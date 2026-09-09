@@ -132,12 +132,12 @@ Then run every quality command declared in the target's `pipeliner.config.json`.
 
 ## Create the GitHub Project
 
-The public working example is [Zuriel-Labs Project Pipeliner](https://github.com/orgs/Zuriel-Labs/projects/PROJECT_NUMBER). Copying it preserves the built-in field, view, and workflow structure that the public GitHub CLI cannot fully author from scratch.
+The public working example is [Zuriel-Labs Project Pipeliner](https://github.com/orgs/Zuriel-Labs/projects/3). Copying it preserves the built-in field, view, and workflow structure that the public GitHub CLI cannot fully author from scratch.
 
 Create a structure-only copy in the target organization:
 
 ```sh
-gh project copy PROJECT_NUMBER --source-owner Zuriel-Labs --target-owner TARGET_ORG --title "TARGET_PROJECT"
+gh project copy 3 --source-owner Zuriel-Labs --target-owner TARGET_ORG --title "TARGET_PROJECT"
 ```
 
 Link the returned Project number to the target repository:

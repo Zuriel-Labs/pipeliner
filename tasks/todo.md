@@ -18,9 +18,9 @@
 
 ## Task 3: Build framework and Project audits
 
-- [ ] Write tests for canonical structure and Project blueprint invariants.
-- [ ] Implement repository alignment validation and a read-only live Project auditor.
-- [ ] Verify success and intentional failure cases.
+- [x] Write tests for canonical structure and Project blueprint invariants.
+- [x] Implement repository alignment validation and a read-only live Project auditor.
+- [x] Verify success and intentional failure cases.
 - Dependencies: Tasks 1-2.
 - Files: `test/validate.test.mjs`, `scripts/validate-repository.mjs`, `scripts/audit-project.mjs`, `blueprints/github-project.json`.
 

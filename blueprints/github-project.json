@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "workingExample": {
+    "owner": "Zuriel-Labs",
+    "number": 0,
+    "title": "Pipeliner",
+    "url": "",
+    "visibility": "PUBLIC",
+    "repository": "Zuriel-Labs/pipeliner"
+  },
+  "fields": [
+    {
+      "name": "Status",
+      "kind": "single-select",
+      "options": ["Backlog", "On Hold", "In Progress", "In Review", "Done"]
+    },
+    {
+      "name": "Priority",
+      "kind": "single-select",
+      "options": ["P0", "P1", "P2", "P3"]
+    },
+    {
+      "name": "Impact",
+      "kind": "single-select",
+      "options": ["High", "Medium", "Low"]
+    },
+    {
+      "name": "Effort",
+      "kind": "single-select",
+      "options": ["XS", "S", "M", "L", "XL"]
+    }
+  ],
+  "views": [
+    {
+      "name": "Backlog",
+      "layout": "BOARD_LAYOUT",
+      "purpose": "Prioritized inactive work available for PM selection."
+    },
+    {
+      "name": "Kanban",
+      "layout": "BOARD_LAYOUT",
+      "purpose": "Full Backlog to Done lifecycle with the active slot visible."
+    }
+  ],
+  "workflows": [
+    { "name": "Auto-add sub-issues to project", "enabled": true },
+    { "name": "Auto-close issue", "enabled": true },
+    { "name": "Item added to project", "enabled": true },
+    { "name": "Item closed", "enabled": true },
+    { "name": "Pull request linked to issue", "enabled": true },
+    {
+      "name": "Pull request merged",
+      "enabled": false,
+      "reason": "Merge is not verified release completion or PM acceptance."
+    }
+  ],
+  "automationLimits": [
+    "Agents discover field and option identifiers at runtime instead of hard-coding GraphQL IDs.",
+    "Agents own lifecycle movement and immediately read every mutation back.",
+    "Project copy is preferred because GitHub does not expose complete view and built-in workflow authoring through the public CLI."
+  ]
+}

@@ -67,6 +67,6 @@
 - [x] Add the root-policy adoption entrypoint and strengthen the canonical adoption skill and provider metadata.
 - [x] Add the README agent quick start and supported target formats.
 - [x] Run focused tests, skill validation, the full gate, and temporary-target adoption verification.
-- [ ] Publish the Issue #3 pull request and hand it to agent review.
+- [x] Publish the Issue #3 pull request and hand it to agent review.
 - Dependencies: Tasks 1-7.
 - Files: `specs/001-bootstrap/spec.md`, `tasks/plan.md`, `tasks/todo.md`, `AGENTS.md`, `README.md`, `.agents/skills/pipeliner-adopt/**`, `.claude/skills/pipeliner-adopt/SKILL.md`, `scripts/lib/validation.mjs`, `test/validate.test.mjs`.

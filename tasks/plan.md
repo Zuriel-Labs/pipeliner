@@ -40,7 +40,7 @@ Specification
 
 ### Phase 2: Deterministic tooling
 
-- Write failing tests for adoption planning, placeholder rendering, collision refusal, and profile validation.
+- Write failing tests for adoption planning, profile validation, identical-file handling, and collision refusal.
 - Implement the smallest dependency-free modules and CLIs that make the tests pass.
 - Add a repository-wide alignment validator and live Project auditor.
 

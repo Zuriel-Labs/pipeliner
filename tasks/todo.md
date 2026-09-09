@@ -10,9 +10,9 @@
 
 ## Task 2: Build adoption behavior test-first
 
-- [ ] Write tests that fail without profile validation, rendering, planning, and safe collision behavior.
-- [ ] Implement dependency-free libraries and `scripts/adopt.mjs`.
-- [ ] Verify dry-run and temporary-target apply behavior.
+- [x] Write tests that fail without profile validation, file planning, identical-file handling, and safe collision behavior.
+- [x] Implement dependency-free libraries and `scripts/adopt.mjs`.
+- [x] Verify dry-run and temporary-target apply behavior.
 - Dependencies: Task 1.
 - Files: `test/adopt.test.mjs`, `scripts/lib/config.mjs`, `scripts/lib/adoption.mjs`, `scripts/adopt.mjs`.
 

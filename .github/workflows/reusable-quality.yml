@@ -1,0 +1,42 @@
+name: Reusable Quality Gate
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: GitHub-hosted runner selected by the caller.
+        required: false
+        default: ubuntu-latest
+        type: string
+      setup-command:
+        description: Optional repository-owned dependency or tool setup command.
+        required: false
+        default: ""
+        type: string
+      quality-command:
+        description: Repository-owned full quality command.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 30
+    steps:
+      - name: Check out caller repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up repository tools
+        if: inputs.setup-command != ''
+        env:
+          PIPELINER_SETUP_COMMAND: ${{ inputs.setup-command }}
+        run: bash -euo pipefail -c "$PIPELINER_SETUP_COMMAND"
+
+      - name: Run repository quality gate
+        env:
+          PIPELINER_QUALITY_COMMAND: ${{ inputs.quality-command }}
+        run: bash -euo pipefail -c "$PIPELINER_QUALITY_COMMAND"

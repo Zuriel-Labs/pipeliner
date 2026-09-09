@@ -1,0 +1,42 @@
+name: Bug report
+description: Capture one reproducible defect for Pipeliner.
+title: "Bug: "
+labels: ["type:bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Before submitting, search open and closed Issues for the same behavior.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What failed, and what user or pipeline outcome is affected?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide the smallest repeatable sequence, including repository state and command.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual results
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence and environment
+      description: Include versions and safe logs. Remove secrets, credentials, and private data.
+    validations:
+      required: true
+  - type: textarea
+    id: pm_testing
+    attributes:
+      label: PM Testing considerations
+      description: What should Project Manager QA prove after remediation?
+    validations:
+      required: true

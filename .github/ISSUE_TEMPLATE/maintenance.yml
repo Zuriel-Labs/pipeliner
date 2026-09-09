@@ -1,0 +1,33 @@
+name: Maintenance request
+description: Propose one security, dependency, workflow, documentation, or operational maintenance outcome.
+title: "Maintenance: "
+labels: ["type:maintenance"]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: Maintenance need
+      description: Describe the evidence, affected surface, and risk of leaving it unchanged.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and preservation boundaries
+      description: State what may change and what must remain untouched.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance and verification
+      description: List the exact checks that prove the maintenance outcome.
+    validations:
+      required: true
+  - type: textarea
+    id: recovery
+    attributes:
+      label: Rollback or recovery
+      description: Describe the safe recovery target and any PM-only destructive step.
+    validations:
+      required: true

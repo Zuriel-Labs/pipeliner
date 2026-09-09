@@ -35,9 +35,9 @@
 
 ## Task 5: Add secure GitHub repository templates
 
-- [ ] Add local and reusable quality workflows with immutable action pins and least privilege.
-- [ ] Add Issue forms and pull-request template aligned to the lifecycle.
-- [ ] Add package scripts and lockfile for repeatable local/CI checks.
+- [x] Add local and reusable quality workflows with immutable action pins and least privilege.
+- [x] Add Issue forms and pull-request template aligned to the lifecycle.
+- [x] Add package scripts and lockfile for repeatable local/CI checks.
 - Dependencies: Tasks 1-4.
 - Files: `.github/**`, `package.json`, `package-lock.json`.
 

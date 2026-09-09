@@ -1,0 +1,40 @@
+name: Feature request
+description: Propose one coherent, independently verifiable outcome.
+title: "Feature: "
+labels: ["type:feature"]
+body:
+  - type: textarea
+    id: outcome
+    attributes:
+      label: User outcome
+      description: Who benefits, what becomes possible, and why does it matter?
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context and evidence
+      description: Describe current behavior, related Issues, and repository evidence.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Observable acceptance criteria
+      description: List results that can be tested without assuming an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: pm_testing
+    attributes:
+      label: PM Testing considerations
+      description: Identify the target, prerequisites, actions, results, and regressions the PM should cover.
+    validations:
+      required: true
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: Out of scope
+      description: State adjacent outcomes this Issue should preserve or defer.
+    validations:
+      required: true

@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "labels": [
+    {
+      "name": "type:bug",
+      "color": "d73a4a",
+      "description": "Incorrect or regressed behavior"
+    },
+    {
+      "name": "type:feature",
+      "color": "1d76db",
+      "description": "New user or system capability"
+    },
+    {
+      "name": "type:maintenance",
+      "color": "6f42c1",
+      "description": "Dependencies, tooling, operations, or internal upkeep"
+    },
+    {
+      "name": "type:security",
+      "color": "b60205",
+      "description": "Security or privacy work"
+    },
+    {
+      "name": "area:workflow",
+      "color": "0e8a16",
+      "description": "Agent pipeline, GitHub Project, or automation"
+    },
+    {
+      "name": "area:release",
+      "color": "fbca04",
+      "description": "Build, candidate, deployment, verification, or rollback"
+    },
+    {
+      "name": "area:documentation",
+      "color": "0075ca",
+      "description": "Instructions, policy, examples, or adoption guidance"
+    },
+    {
+      "name": "area:tooling",
+      "color": "5319e7",
+      "description": "Bootstrap, validation, or audit tooling"
+    }
+  ]
+}

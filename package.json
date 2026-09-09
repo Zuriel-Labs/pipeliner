@@ -1,0 +1,16 @@
+{
+  "name": "@zuriel-labs/pipeliner",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Project-agnostic agent development and release pipeline bootstrap.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "validate": "node scripts/validate-repository.mjs",
+    "test": "node --test",
+    "check": "npm run validate && npm test && git diff --check"
+  },
+  "license": "MIT"
+}

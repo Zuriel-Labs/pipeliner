@@ -5,12 +5,20 @@ import path from "node:path";
 import { validateProfile } from "./config.mjs";
 
 const MANAGED_ROOTS = [
+  ".github/ISSUE_TEMPLATE",
+  ".github/pull_request_template.md",
+  ".github/workflows/reusable-quality.yml",
   ".agents/pipeliner-policy.html",
   ".agents/skills",
   ".claude/skills",
   "AGENTS.md",
+  "blueprints",
   "CLAUDE.md",
   "GEMINI.md",
+  "schema",
+  "scripts/audit-project.mjs",
+  "scripts/lib",
+  "scripts/validate-repository.mjs",
 ];
 
 async function exists(filePath) {

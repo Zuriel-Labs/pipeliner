@@ -90,10 +90,12 @@ async function fixture(t) {
   await mkdir(path.join(sourceRoot, ".claude", "skills", "pipeliner-work-issue"), {
     recursive: true,
   });
+  await mkdir(path.join(sourceRoot, "scripts"), { recursive: true });
   await mkdir(targetRoot, { recursive: true });
   await writeFile(path.join(sourceRoot, "AGENTS.md"), "canonical policy\n");
   await writeFile(path.join(sourceRoot, "CLAUDE.md"), "@AGENTS.md\n");
   await writeFile(path.join(sourceRoot, "GEMINI.md"), "@./AGENTS.md\n");
+  await writeFile(path.join(sourceRoot, "scripts", "validate-repository.mjs"), "validator\n");
   await writeFile(
     path.join(sourceRoot, ".agents", "skills", "pipeliner-work-issue", "SKILL.md"),
     "canonical skill\n",
@@ -138,6 +140,7 @@ test("planAdoption creates canonical files and the supplied profile", async (t) 
       "CLAUDE.md",
       "GEMINI.md",
       "pipeliner.config.json",
+      "scripts/validate-repository.mjs",
     ],
   );
 });

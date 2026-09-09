@@ -51,9 +51,10 @@
 
 ## Task 7: Publish the working example
 
-- [ ] Create public `Zuriel-Labs/pipeliner`, push `main`, and verify repository state.
-- [ ] Create and link the live `Pipeliner` Project by copying the approved structure.
-- [ ] Read back fields, options, views, workflow states, and repository linkage.
-- [ ] Update the blueprint/README with live working-example identity, rerun checks, push, and verify exact SHA.
+- [x] Create public `Zuriel-Labs/pipeliner`, push `main`, and verify repository state.
+- [x] Create and link the live `Pipeliner` Project by copying the approved structure.
+- [x] Read back fields, options, views, workflow states, and repository linkage.
+- [x] Update the blueprint/README with live working-example identity, rerun checks, push, and verify exact SHA.
+- [x] Protect `main` with pull-request review, Code Owner approval, exact quality checks, conversation resolution, linear history, and force-push/deletion prevention.
 - Dependencies: Tasks 1-6.
 - Files: `blueprints/github-project.json`, `README.md` plus GitHub repository/Project state.

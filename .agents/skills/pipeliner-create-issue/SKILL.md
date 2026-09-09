@@ -1,0 +1,18 @@
+---
+name: pipeliner-create-issue
+description: Research, clarify, draft, create, classify, and verify one implementation-ready GitHub Issue without starting implementation.
+---
+
+# Create an Issue
+
+Read `AGENTS.md`, `pipeliner.config.json`, the live Project, every relevant open or closed Issue, open pull requests, and implicated repository evidence.
+
+1. Determine whether the request is one coherent, independently verifiable outcome. Split unrelated goals and identify duplicates, absorbed scope, dependencies, and already-delivered behavior.
+2. Resolve material ambiguity from repository evidence. When evidence is insufficient, ask the PM focused questions with tradeoffs and a recommended default; do not invent product behavior.
+3. Draft an imperative title and complete HTML body using only applicable sections: Summary, Context and evidence, Scope, Acceptance criteria, Verification, Security and privacy, Accessibility, Dependencies, and Out of scope.
+4. Propose exactly one governed type label, applicable area labels, Status, Priority, Impact, Effort, assignee, and milestone. Default new work to open, unassigned Backlog unless the PM approves a different valid state.
+5. Show the complete title, body, and metadata before mutation. Put each value the PM needs to copy in its own fenced code block. Require the exact configured Issue-creation approval for that draft.
+6. Refresh duplicate and Project state immediately before creating. Use `gh` to create only the approved Issue, add it to the configured Project, populate fields, and leave the active slot untouched.
+7. Read the Issue and card back. Byte-compare the body and verify title, labels, fields, open state, assignment, Project membership, Backlog status, and absence of an accidental branch or pull request.
+
+Issue creation never authorizes implementation, release, or changes to another Issue.

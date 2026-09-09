@@ -1,0 +1,4 @@
+interface:
+  display_name: "Release Production"
+  short_description: "Promote and verify an approved candidate"
+  default_prompt: "Use $pipeliner-release-production for the exact approved candidate."

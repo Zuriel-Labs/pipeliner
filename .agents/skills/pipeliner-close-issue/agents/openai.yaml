@@ -1,0 +1,4 @@
+interface:
+  display_name: "Close Pipeline Issue"
+  short_description: "Verify acceptance and complete an Issue"
+  default_prompt: "Use $pipeliner-close-issue to verify and complete the active Issue."

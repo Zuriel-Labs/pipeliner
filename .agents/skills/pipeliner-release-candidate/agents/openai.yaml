@@ -1,0 +1,4 @@
+interface:
+  display_name: "Release Candidate"
+  short_description: "Prepare the exact review candidate"
+  default_prompt: "Use $pipeliner-release-candidate to prepare the configured review candidate."

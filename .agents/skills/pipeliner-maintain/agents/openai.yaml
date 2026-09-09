@@ -1,0 +1,4 @@
+interface:
+  display_name: "Maintain Pipeliner"
+  short_description: "Keep policy, skills, and adapters aligned"
+  default_prompt: "Use $pipeliner-maintain to update and validate Pipeliner contracts."

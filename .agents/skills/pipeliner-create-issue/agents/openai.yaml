@@ -1,0 +1,4 @@
+interface:
+  display_name: "Create Pipeline Issue"
+  short_description: "Draft and verify one Backlog Issue"
+  default_prompt: "Use $pipeliner-create-issue to research and draft this Issue."

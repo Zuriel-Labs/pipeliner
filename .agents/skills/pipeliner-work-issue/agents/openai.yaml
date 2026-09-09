@@ -1,0 +1,4 @@
+interface:
+  display_name: "Work Pipeline Issue"
+  short_description: "Implement the one active Issue"
+  default_prompt: "Use $pipeliner-work-issue to select or continue the active Issue."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Pipeline Health"
+  short_description: "Audit pipeline health without changes"
+  default_prompt: "Use $pipeliner-pipeline-health to audit this repository read-only."

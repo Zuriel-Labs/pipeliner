@@ -1,0 +1,16 @@
+# PM Testing contract
+
+Build the checklist from the actual Issue, diff, candidate, and user journey. Do not reuse a generic smoke list as a substitute for changed-behavior coverage.
+
+Include:
+
+1. exact target URL, application, platform, build, or artifact;
+2. candidate source commit, Git tree, artifact or deployment identity, and validation session where configured;
+3. prerequisite account, permissions, fixtures, data state, browser, device, or native host;
+4. numbered actions in the order the PM should perform them;
+5. an observable expected result paired with every action;
+6. relevant failure, regression, accessibility, persistence, and safety checks;
+7. known limitations or checks the agent could not perform;
+8. the one exact approval phrase for this gate in a standalone fenced code block.
+
+Use `Project Manager QA` or `PM Testing`. Keep the language approachable and explain product terms that are not obvious. Agent test evidence supports the checklist but never approves it.

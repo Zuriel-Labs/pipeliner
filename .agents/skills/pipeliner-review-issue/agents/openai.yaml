@@ -1,0 +1,4 @@
+interface:
+  display_name: "Review Pipeline Issue"
+  short_description: "Review, remediate, and prepare PM Testing"
+  default_prompt: "Use $pipeliner-review-issue to review the active Issue."

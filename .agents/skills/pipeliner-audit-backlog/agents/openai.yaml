@@ -1,0 +1,4 @@
+interface:
+  display_name: "Audit Pipeline Backlog"
+  short_description: "Inspect and prioritize Backlog Issues"
+  default_prompt: "Use $pipeliner-audit-backlog to audit the current Backlog."

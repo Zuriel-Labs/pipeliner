@@ -26,10 +26,10 @@
 
 ## Task 4: Add portable workflow skills
 
-- [ ] Add adoption, Issue, audit, work, review, release, closure, health, and maintenance skills.
-- [ ] Keep conditional release details in focused references.
-- [ ] Add OpenAI discovery metadata and Claude regular-file adapters.
-- [ ] Verify every skill with the bundled quick validator and the repository alignment audit.
+- [x] Add adoption, Issue, audit, work, review, release, closure, health, and maintenance skills.
+- [x] Keep conditional release details in focused references.
+- [x] Add OpenAI discovery metadata and Claude regular-file adapters.
+- [x] Verify every skill with the bundled quick validator and the repository alignment audit.
 - Dependencies: Tasks 1-3.
 - Files: `.agents/skills/**`, `.claude/skills/**`, `CLAUDE.md`, `GEMINI.md`.
 

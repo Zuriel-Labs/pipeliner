@@ -86,6 +86,32 @@ export function isPinnedActionReference(reference) {
   return /^[a-f0-9]{40}$/i.test(reference.slice(separator + 1));
 }
 
+export function validateAdoptionContract({ agents = "", adoptionSkill = "" } = {}) {
+  const errors = [];
+  if (!/target repository location is required/i.test(agents)) {
+    errors.push("AGENTS.md must state that the target repository location is required");
+  }
+  if (!/ask one concise question[\s\S]*wait before target or Project mutation/i.test(agents)) {
+    errors.push("AGENTS.md must require the agent to ask once and wait before target or Project mutation");
+  }
+
+  const adoptionSteps = [
+    "resolve identity",
+    "create the profile",
+    "dry-run",
+    "reconcile conflicts",
+    "align the GitHub Project",
+    "validate",
+    "read back",
+    "PM Testing steps",
+  ];
+  const ownsWorkflow = /complete autonomous adoption workflow/i.test(adoptionSkill);
+  if (!ownsWorkflow || adoptionSteps.some((step) => !adoptionSkill.includes(step))) {
+    errors.push("pipeliner-adopt must define the complete autonomous adoption workflow");
+  }
+  return errors;
+}
+
 export function validateProjectBlueprint(blueprint) {
   if (!blueprint || typeof blueprint !== "object" || Array.isArray(blueprint)) {
     throw new Error("Project blueprint must be an object");
@@ -225,9 +251,11 @@ export async function validateRepository(rootPath, { requireConfig = true } = {}
   if (skillNames.length === 0) errors.push("at least one canonical skill is required");
   if (!sameValues(adapterNames, skillNames)) errors.push("Claude adapter registry must match canonical skills");
 
+  let adoptionSkill = "";
   for (const name of skillNames) {
     const skillRelative = `.agents/skills/${name}/SKILL.md`;
     const skill = await readText(path.join(root, skillRelative), errors, skillRelative);
+    if (name === "pipeliner-adopt") adoptionSkill = skill;
     const frontmatter = parseFrontmatter(skill);
     if (!frontmatter) errors.push(`${skillRelative} has invalid frontmatter`);
     else {
@@ -255,6 +283,13 @@ export async function validateRepository(rootPath, { requireConfig = true } = {}
     }
     const canonicalTarget = `../../../.agents/skills/${name}/SKILL.md`;
     if (!adapter.includes(canonicalTarget)) errors.push(`${adapterRelative} must link to the canonical skill`);
+  }
+
+  if (requireConfig) {
+    if (!skillNames.includes("pipeliner-adopt")) {
+      errors.push("canonical pipeliner-adopt skill is required");
+    }
+    errors.push(...validateAdoptionContract({ agents, adoptionSkill }));
   }
 
   for (const managedText of [agents, policy]) {

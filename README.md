@@ -8,6 +8,42 @@ It is designed for ChatGPT and Codex by default, while keeping provider policy i
 
 The human-facing lifecycle and approval model is available in the self-contained Dark Mode [Pipeliner policy](.agents/pipeliner-policy.html).
 
+## Agent quick start
+
+Give an agent the following request, replacing `TARGET_REPOSITORY_LOCATION` with one of the supported target formats:
+
+```text
+Install or align Pipeliner in TARGET_REPOSITORY_LOCATION. Begin at https://github.com/Zuriel-Labs/pipeliner, read its README.md and AGENTS.md, and use the pipeliner-adopt skill. Own the adoption end to end: verify the target identity, preserve its existing governance and work, derive its configuration from evidence, ask me only about unresolved material choices, preview and reconcile all file operations, align its GitHub Project and labels, validate everything, publish through the target's normal workflow, read the result back, and give me clear PM Testing steps. Do not deploy the application, change credentials, perform destructive migrations, or modify unrelated work.
+```
+
+`TARGET_REPOSITORY_LOCATION` may be:
+
+- an absolute local checkout path, such as `/absolute/path/to/repository`;
+- a GitHub identity, such as `OWNER/REPO`;
+- a GitHub repository URL; or
+- `this repository` when the current repository is explicitly the intended target.
+
+If the request does not identify a target, the agent must ask:
+
+```text
+What is the target repository location? Provide an absolute local checkout path, GitHub OWNER/REPO, or GitHub repository URL.
+```
+
+The agent then waits before making any target repository or GitHub Project mutation. It must not guess the target from its current directory, recent work, or chat history.
+
+### What the agent owns after the target is known
+
+1. Verify the exact local checkout and GitHub repository identity.
+2. Read the target's instructions, Git state, existing work, workflows, checks, release process, environments, security controls, labels, branch protections, and Project.
+3. Follow the target's existing Issue, branch, and pull-request governance. If none exists, bootstrap through a focused branch and pull request unless the PM explicitly authorizes another supported path.
+4. Build `pipeliner.config.json` from evidence and ask the PM only about material choices that cannot be resolved safely.
+5. Run a dry-run, reconcile every collision without blind overwrites, and apply only a conflict-free plan.
+6. Align canonical policy, skills, provider adapters, repository workflows, labels, and the GitHub Project without weakening stronger target-specific rules.
+7. Run Pipeliner validation and every target quality gate, publish the focused changes, and read back the repository, Issue, pull request, checks, and Project state.
+8. Give the PM a concise result with limitations and numbered PM Testing steps, including the expected result for each action.
+
+This request authorizes work only in the named target repository and its linked Project. Deployment, credentials, destructive migration, and unrelated backlog work remain outside adoption authority.
+
 ## What Pipeliner standardizes
 
 - One active Issue by default, with the Issue as the primary work unit.

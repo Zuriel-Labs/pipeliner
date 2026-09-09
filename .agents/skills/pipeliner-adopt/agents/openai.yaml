@@ -1,4 +1,4 @@
 interface:
   display_name: "Adopt Pipeliner"
-  short_description: "Safely adopt or align the pipeline"
-  default_prompt: "Use $pipeliner-adopt to align this repository with Pipeliner."
+  short_description: "Autonomously install Pipeliner safely"
+  default_prompt: "Use $pipeliner-adopt to install or align Pipeliner in the target repository. Ask for its location if missing, then complete adoption through a verified PM Testing handoff."

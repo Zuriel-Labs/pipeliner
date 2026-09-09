@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pipeliner policy</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0a0d12; --panel:#121823; --text:#eef3fa; --muted:#9eabc0; --line:#29364a; --accent:#77d5ff; --ok:#75e6a4; --warn:#ffd479; }
+    * { box-sizing: border-box; }
+    body { margin:0; background:radial-gradient(circle at top right,#15253b 0,#0a0d12 42%); color:var(--text); font:16px/1.6 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    main { width:min(1120px,calc(100% - 32px)); margin:0 auto; padding:56px 0 80px; }
+    header,section { background:rgba(18,24,35,.92); border:1px solid var(--line); border-radius:18px; padding:clamp(20px,4vw,38px); margin:0 0 20px; box-shadow:0 20px 60px rgba(0,0,0,.22); }
+    h1,h2,h3 { line-height:1.15; margin-top:0; }
+    h1 { font-size:clamp(2.25rem,7vw,5rem); letter-spacing:-.05em; }
+    h2 { color:var(--accent); }
+    p,li { max-width:78ch; }
+    .eyebrow { color:var(--ok); font-weight:700; letter-spacing:.12em; text-transform:uppercase; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:14px; }
+    .card { background:#0d131d; border:1px solid var(--line); border-radius:14px; padding:18px; }
+    .stage { color:var(--accent); font-weight:750; }
+    code { background:#080b10; border:1px solid var(--line); border-radius:6px; padding:.12rem .35rem; }
+    .warning { border-left:4px solid var(--warn); padding-left:16px; }
+    a { color:var(--accent); }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="eyebrow">Project-agnostic delivery governance</div>
+      <h1>Pipeliner</h1>
+      <p>One evidence-first path from a coherent GitHub Issue to an exact, verified release and clear PM Testing. The repository profile supplies project-specific details; the lifecycle supplies the safety contract.</p>
+    </header>
+
+    <section>
+      <h2>Lifecycle</h2>
+      <div class="grid">
+        <div class="card"><div class="stage">1 · Backlog</div><p>Research, clarify, approve, create, classify, and read back one implementation-ready Issue.</p></div>
+        <div class="card"><div class="stage">2 · In Progress</div><p>Reserve the single active slot, specify, implement test-first, validate, and publish a linked pull request.</p></div>
+        <div class="card"><div class="stage">3 · In Review</div><p>Complete agent QA, remediate every finding, identify the exact candidate, and prepare PM Testing.</p></div>
+        <div class="card"><div class="stage">4 · Done</div><p>Release through the configured strategy, verify, receive candidate-specific PM acceptance, then close and read back.</p></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Agent-owned Project movement</h2>
+      <p>The agent performs routine GitHub Project transitions and immediately verifies the resulting Status, metadata, assignment, Issue state, linkage, and active count. The PM never has to drag a card to keep the pipeline coherent.</p>
+      <p class="warning">Exactly one Issue may be active. Merge, green CI, deployment health, and silence are evidence—not completion or approval.</p>
+    </section>
+
+    <section>
+      <h2>Release strategies</h2>
+      <div class="grid">
+        <div class="card"><h3>Immutable promotion</h3><p>Build once, verify the review candidate, obtain exact approval, and promote the same artifact without rebuilding.</p></div>
+        <div class="card"><h3>Direct Production</h3><p>Deploy the reviewed default-branch revision, verify Production, then keep the Issue open for PM Testing and exact completion approval.</p></div>
+        <div class="card"><h3>Multi-environment</h3><p>Validate the same code candidate independently on every required native host or environment. One approval cannot substitute for another.</p></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Project Manager QA</h2>
+      <p>Every review or release handoff gives the PM the exact target, prerequisites, numbered actions, expected results, regression checks, candidate identity, limitations, and the precise approval phrase when approval is the next gate.</p>
+      <p>When repository evidence cannot resolve a material behavior, topology, or recovery decision, the agent pauses and asks the PM focused clarifying questions.</p>
+    </section>
+
+    <section>
+      <h2>Candidate integrity</h2>
+      <p>An approval belongs only to the configured source commit, Git tree, artifact digest, rendered configuration, deployment revision, native host, or validation session that defines that candidate. A material identity change invalidates approval and returns the work to verification.</p>
+    </section>
+  </main>
+</body>
+</html>

@@ -1,0 +1,62 @@
+{
+  "$schema": "./schema/pipeliner.schema.json",
+  "version": 1,
+  "repository": {
+    "owner": "Zuriel-Labs",
+    "name": "pipeliner",
+    "defaultBranch": "main",
+    "projectManager": "brimdor"
+  },
+  "project": {
+    "owner": "Zuriel-Labs",
+    "number": 0,
+    "title": "Pipeliner",
+    "statusField": "Status",
+    "statuses": {
+      "backlog": "Backlog",
+      "onHold": "On Hold",
+      "inProgress": "In Progress",
+      "inReview": "In Review",
+      "done": "Done"
+    },
+    "metadataFields": {
+      "priority": {
+        "name": "Priority",
+        "options": ["P0", "P1", "P2", "P3"]
+      },
+      "impact": {
+        "name": "Impact",
+        "options": ["High", "Medium", "Low"]
+      },
+      "effort": {
+        "name": "Effort",
+        "options": ["XS", "S", "M", "L", "XL"]
+      }
+    }
+  },
+  "workflow": {
+    "maxActiveIssues": 1,
+    "branchPattern": "issue/{number}-{slug}",
+    "issueReference": "Refs #{number}",
+    "approvalPhrases": {
+      "issueCreation": "Approved to create this exact GitHub Issue",
+      "production": "Approved to merge and deploy production",
+      "completion": "Approved to complete Issue #{number}",
+      "nativeCandidate": "Beta approved"
+    },
+    "pmTesting": {
+      "required": true,
+      "terms": ["Project Manager QA", "PM Testing"],
+      "requiredSections": ["target", "prerequisites", "numbered actions", "expected results", "regression checks"]
+    }
+  },
+  "quality": {
+    "commands": ["npm run check"],
+    "requiredChecks": ["Quality / verify"]
+  },
+  "release": {
+    "strategy": "none",
+    "candidateIdentity": ["sourceCommit", "gitTree"],
+    "environments": []
+  }
+}

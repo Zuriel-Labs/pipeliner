@@ -2,9 +2,9 @@
 
 ## Task 1: Define the framework contract
 
-- [ ] Add configuration schema and an adoption profile example.
-- [ ] Add the canonical repository `AGENTS.md` and Dark Mode policy.
-- [ ] Verify required lifecycle, PM Testing, ambiguity, and release-strategy language.
+- [x] Add configuration schema and an adoption profile example.
+- [x] Add the canonical repository `AGENTS.md` and Dark Mode policy.
+- [x] Verify required lifecycle, PM Testing, ambiguity, and release-strategy language.
 - Dependencies: None.
 - Files: `schema/pipeliner.schema.json`, `pipeliner.config.json`, `AGENTS.md`, `.agents/pipeliner-policy.html`.
 

@@ -208,6 +208,14 @@ export async function validateRepository(rootPath, { requireConfig = true } = {}
         errors.push(`invalid blueprints/github-project.json: ${error.message}`);
       }
     }
+    for (const examplePath of await walkFiles(path.join(root, "blueprints", "profiles"))) {
+      if (!examplePath.endsWith(".json")) continue;
+      try {
+        validateProfile(JSON.parse(await readFile(examplePath, "utf8")));
+      } catch (error) {
+        errors.push(`invalid ${path.relative(root, examplePath)}: ${error.message}`);
+      }
+    }
   }
 
   const skillsRoot = path.join(root, ".agents", "skills");

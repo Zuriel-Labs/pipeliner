@@ -43,11 +43,11 @@
 
 ## Task 6: Write adoption instructions
 
-- [ ] Explain prerequisites, profile decisions, dry-run, application, Project copy/linking, validation, PM Testing, and upgrade alignment.
-- [ ] Distinguish the three release strategies and known automation limitations.
-- [ ] Verify all commands and links against the implemented tree.
+- [x] Explain prerequisites, profile decisions, dry-run, application, Project copy/linking, validation, PM Testing, and upgrade alignment.
+- [x] Distinguish the three release strategies and known automation limitations.
+- [x] Verify all commands and links against the implemented tree.
 - Dependencies: Tasks 1-5.
-- Files: `README.md`, `CONTRIBUTING.md`.
+- Files: `README.md`, `blueprints/profiles/*.json`.
 
 ## Task 7: Publish the working example
 

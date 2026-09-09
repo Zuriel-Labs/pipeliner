@@ -29,9 +29,11 @@ Success means a repository can adopt one consistent Issue-to-release lifecycle w
 10. Provide a reusable GitHub Project schema and a live `Zuriel-Labs` Project named `Pipeliner` as a working example.
 11. Provide bootstrap, validation, and Project-audit tooling that is dependency-free, safe by default, and test-covered.
 12. Provide reusable GitHub Actions that use least privilege, concurrency control, timeouts, and immutable action pins.
-13. Include clear README adoption instructions for agents and maintainers.
+13. Include a prominent README agent quick start that lets a user provide an absolute target checkout path, GitHub `OWNER/REPO`, or GitHub repository URL and delegate the complete adoption workflow.
 14. Keep human-facing standalone policy documentation as self-contained Dark Mode HTML. Markdown specifications and task files are internal workflow metadata.
 15. Never include reference-product secrets, private data, fixed local usernames, or sensitive infrastructure details.
+16. Treat the target repository location as a mandatory adoption input. If it is absent, the agent asks one concise PM question for it and waits without mutating any target repository or GitHub Project.
+17. Once a target is explicit, the agent owns identity resolution, evidence gathering, profile creation, conflict-safe adoption, Project and label alignment, validation, GitHub coordination, readback, and a user-friendly PM Testing handoff within that target scope.
 
 ## Non-goals
 
@@ -59,6 +61,18 @@ Success means a repository can adopt one consistent Issue-to-release lifecycle w
 - Preview adoption safely: `node scripts/adopt.mjs --target /absolute/path/to/repository --config /absolute/path/to/pipeliner.config.json --dry-run`
 - Apply adoption after review: `node scripts/adopt.mjs --target /absolute/path/to/repository --config /absolute/path/to/pipeliner.config.json`
 - Audit a live Project: `node scripts/audit-project.mjs --config /absolute/path/to/pipeliner.config.json`
+
+## Autonomous Adoption Contract
+
+- Trigger `pipeliner-adopt` when the PM asks to install, bootstrap, adopt, align, or update Pipeliner in a repository.
+- Accept an absolute local checkout path, GitHub `OWNER/REPO`, or GitHub repository URL as the target location. An explicitly named current repository is also valid.
+- If the request omits the target, ask exactly one focused question requesting the target repository location and wait. Reading Pipeliner guidance is allowed; target and Project mutations are not.
+- Prefer an existing target checkout. When only a GitHub identity is supplied and no checkout exists, create an isolated checkout in a safe workspace and report its exact path.
+- Verify local and remote repository identity before mutation. Preserve repository-owned instructions, dirty work, security controls, and stronger governance.
+- Derive the profile from repository and live GitHub evidence. Ask only for material choices that evidence cannot resolve, including Project ownership, quality gates, release topology, approval phrases, credentials, and rollback authority.
+- Preview all adoption operations, reconcile conflicts deliberately, and apply only a conflict-free plan. Never overwrite an existing file blindly.
+- Use the target's existing Issue, branch, and pull-request process. If it has none, use a focused branch and pull request for the bootstrap unless the PM explicitly authorizes another supported path.
+- Complete all in-scope repository and GitHub Project alignment, validation, readback, and clear PM Testing steps. Adoption does not authorize deployment, credentials changes, destructive migration, or unrelated work.
 
 ## Project Structure
 
@@ -128,6 +142,8 @@ export function assertNonEmptyString(value, field) {
 - The public `Zuriel-Labs/pipeliner` repository exists, is reachable, uses `main`, and matches the pushed local commit.
 - The live `Pipeliner` Project is linked to the repository and its required fields, options, views, and automations are read back.
 - The README explains adoption, customization, verification, PM Testing, release strategies, and known GitHub Project API limitations.
+- The README and root `AGENTS.md` provide a first-class autonomous adoption entrypoint, and the canonical adoption skill enforces the missing-target wait gate.
+- Repository validation fails if the canonical target-location gate or autonomous adoption ownership contract is missing.
 
 ## Approved Decisions
 

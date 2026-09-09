@@ -2,6 +2,14 @@
 
 This repository uses Pipeliner: an evidence-first, agent-managed development and release lifecycle. Read this file, `pipeliner.config.json`, and the relevant canonical skill under `.agents/skills/` before acting.
 
+## Pipeliner adoption entrypoint
+
+- Treat requests to install, bootstrap, adopt, align, or update Pipeliner in a repository as `pipeliner-adopt` work before applying the normal lifecycle to that target.
+- The target repository location is required. Accept an absolute local checkout path, GitHub `OWNER/REPO`, GitHub repository URL, or an explicit statement that the current repository is the target.
+- If the target is omitted, ask one concise question: `What is the target repository location? Provide an absolute local checkout path, GitHub OWNER/REPO, or GitHub repository URL.` Then wait before target or Project mutation. Do not guess a repository from the current directory, recent work, or chat history.
+- Once the target is explicit, read `.agents/skills/pipeliner-adopt/SKILL.md` and own its complete workflow. Verify exact local and remote identity before mutation and keep all authority bounded to that target repository and its linked Project.
+- Adoption authority covers safe repository and Project alignment. It does not authorize application deployment, credential changes, destructive migration, or unrelated backlog work.
+
 ## Authority and source of truth
 
 - The repository-owned profile in `pipeliner.config.json` defines repository identity, Project fields, quality commands, release strategy, environments, candidate identity, and exact approval phrases.

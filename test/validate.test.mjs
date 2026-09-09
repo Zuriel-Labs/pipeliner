@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   compareProjectSnapshot,
   isPinnedActionReference,
+  validateAdoptionContract,
   validateProjectBlueprint,
   validateRepository,
 } from "../scripts/lib/validation.mjs";
@@ -62,6 +63,40 @@ test("action references require a full commit SHA", () => {
   );
   assert.equal(isPinnedActionReference("actions/checkout@v6"), false);
   assert.equal(isPinnedActionReference("owner/action@main"), false);
+});
+
+test("autonomous adoption requires an explicit target before mutation", () => {
+  const errors = validateAdoptionContract({
+    agents: "Install Pipeliner when requested.",
+    adoptionSkill: "Inspect the repository and apply the files.",
+  });
+
+  assert.ok(errors.some((error) => error.includes("target repository location")));
+  assert.ok(errors.some((error) => error.includes("wait before target or Project mutation")));
+  assert.ok(errors.some((error) => error.includes("complete autonomous adoption workflow")));
+});
+
+test("autonomous adoption accepts the complete target and ownership contract", () => {
+  assert.deepEqual(
+    validateAdoptionContract({
+      agents:
+        "Target repository location is required. If omitted, ask one concise question and wait before target or Project mutation.",
+      adoptionSkill:
+        "Own the complete autonomous adoption workflow: resolve identity, create the profile, dry-run, reconcile conflicts, align the GitHub Project, validate, read back, and provide PM Testing steps.",
+    }),
+    [],
+  );
+});
+
+test("README gives an agent a target-driven adoption entrypoint", async () => {
+  const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
+
+  assert.match(readme, /^## Agent quick start$/m);
+  assert.match(readme, /TARGET_REPOSITORY_LOCATION/);
+  assert.match(readme, /absolute local checkout path/);
+  assert.match(readme, /`OWNER\/REPO`/);
+  assert.match(readme, /waits before making any target repository or GitHub Project mutation/);
+  assert.match(readme, /What the agent owns after the target is known/);
 });
 
 test("compareProjectSnapshot reports exact live drift", () => {

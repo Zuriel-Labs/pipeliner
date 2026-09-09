@@ -94,3 +94,37 @@ Specification
 - YAML parse/pin checks.
 - Git status and exact local/remote SHA.
 - `gh repo view`, `gh project view`, field list, repository link, view list, and workflow GraphQL readback.
+
+## Issue 3: Autonomous target-driven adoption
+
+### Contract
+
+- Make install, bootstrap, adopt, align, and update requests explicit `pipeliner-adopt` entrypoints.
+- Require a target location before target or Project mutation.
+- Accept an absolute checkout path, GitHub `OWNER/REPO`, or GitHub URL and resolve exact repository identity.
+- Preserve the target's policy and own the complete safe adoption workflow through PM Testing handoff.
+
+### Implementation order
+
+1. Extend the approved specification and task traceability.
+2. Add a failing repository-validation test for the missing-target and autonomous-ownership contracts.
+3. Extend the validator with focused contract checks.
+4. Update the canonical root policy, adoption skill, OpenAI discovery metadata, Claude adapter description, and README quick start.
+5. Run focused tests, canonical skill validation, the full repository gate, and realistic temporary-target adoption cases.
+6. Commit, push, open a focused pull request, and hand the exact candidate to agent review.
+
+### Risks and mitigations
+
+| Risk | Mitigation |
+|---|---|
+| An agent mutates the wrong repository | Require an explicit target and verify local/remote identity before mutation. |
+| Autonomous guidance weakens clarification gates | Ask for every unresolved material Project, release, credential, and rollback choice. |
+| Adoption overwrites repository-owned policy | Preserve collision refusal and require deliberate reconciliation. |
+| Source-only README rules break adopted repositories | Validate the portable contract in `AGENTS.md` and the canonical adoption skill; test README onboarding separately. |
+
+### Verification checkpoints
+
+- Focused tests demonstrate RED before implementation and GREEN afterward.
+- `quick_validate.py` passes for `pipeliner-adopt`.
+- `npm run check` exits zero.
+- A temporary repository dry-run and apply remain conflict-safe and validate successfully.

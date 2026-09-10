@@ -5,6 +5,8 @@ description: Interview for repository creation or adoption, configure local deve
 
 # Adopt Pipeliner
 
+Install and verify the [Issue-based communication contract](../../../AGENTS.md#issue-based-communication) in the target's `AGENTS.md` and canonical skills, including reconciled files. Status, handoffs, and approval acknowledgments must lead with the owning Issue; linked pull requests remain supporting evidence. Preserve configured gate phrases and use the Issue number for completion approval placeholders. If adoption has no Issue yet, state that and follow target Issue-creation governance without inventing a number.
+
 ## Target repository location gate
 
 The target repository location is required for an existing repository. Accept an absolute local checkout path, GitHub `OWNER/REPO`, GitHub repository URL, or an explicit statement that the current repository is the target. Explicit new-repository intent starts the creation interview below.

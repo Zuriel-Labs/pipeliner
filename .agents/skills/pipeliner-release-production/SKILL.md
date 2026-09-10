@@ -5,6 +5,8 @@ description: Release the exact approved candidate to Production using the config
 
 # Release Production
 
+Follow [Issue-based communication](../../../AGENTS.md#issue-based-communication): acknowledge approval for the owning Issue, configured release gate, and exact candidate. Report release results and remaining PM Testing against that Issue, with pull-request and deployment evidence as supporting details. Preserve the configured approval phrase.
+
 Read `AGENTS.md`, `pipeliner.config.json`, the active Issue, approved candidate evidence, merged pull request when required, current Production state, and the matching section of [release strategies](../pipeliner-release-candidate/references/strategies.md).
 
 1. Revalidate the approval phrase, candidate identity, pull-request state, exact tree, required checks, environment, and authorization immediately before mutation. Require all configured local QA turns and cleanup to be complete for the shared candidate; [QA ownership](../pipeliner-work-issue/references/local-qa.md) is independent of deployment topology. Do not create an artificial staging gate for direct Production.

@@ -5,6 +5,8 @@ description: Perform complete agent QA for the active Issue, remediate findings,
 
 # Review an Issue
 
+Follow [Issue-based communication](../../../AGENTS.md#issue-based-communication): identify the Issue first in findings, PM Testing handoffs, approval requests, and approval acknowledgments. Bind the configured approval to that Issue and exact candidate, retaining the pull request as review evidence.
+
 Read `AGENTS.md`, `pipeliner.config.json`, the sole active Issue, complete pull-request diff and history, acceptance criteria, specifications, candidate state, and applicable test guidance.
 
 1. Require one active In Progress Issue and one matching open pull request with the configured non-closing Issue reference.

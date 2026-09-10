@@ -5,6 +5,8 @@ description: Build or prepare and verify the exact review or native candidate re
 
 # Release a Candidate
 
+Follow [Issue-based communication](../../../AGENTS.md#issue-based-communication): report candidate readiness or blockers for the owning Issue. Lead PM Testing and approval requests with its Issue number, then include exact candidate identity and linked pull-request evidence.
+
 Read `AGENTS.md`, `pipeliner.config.json`, the active Issue, pull request, configured release environments, and [release strategy reference](references/strategies.md).
 
 1. Require a clean committed pull-request head, successful configured quality checks, In Progress status, and complete agent review.

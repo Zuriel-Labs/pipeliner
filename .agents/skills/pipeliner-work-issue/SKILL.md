@@ -5,6 +5,8 @@ description: Select, reserve, specify, implement, validate, and publish one GitH
 
 # Work an Issue
 
+Follow [Issue-based communication](../../../AGENTS.md#issue-based-communication): lead progress, blockers, and handoffs with the selected Issue number and its current gate. Include the linked pull request and checks as supporting evidence; publishing or merging it does not complete the Issue.
+
 Read `AGENTS.md`, `pipeliner.config.json`, the live Project and active cards, open Issues and pull requests, Git state, selected Issue, relevant code, tests, specifications, and history.
 
 ## Selection gate

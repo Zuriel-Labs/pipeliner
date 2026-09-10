@@ -5,6 +5,8 @@ description: Perform a read-only audit of repository, Issue, Project, pull-reque
 
 # Audit Pipeline Health
 
+Follow [Issue-based communication](../../../AGENTS.md#issue-based-communication): organize work-status findings by owning Issue and its remaining gates, including linked pull-request, check, and deployment evidence. Report unlinked pull requests or missing Issues explicitly without substituting PR numbers for Issue identity.
+
 Read `AGENTS.md`, `pipeliner.config.json`, and [Project operations](references/project-operations.md).
 
 1. Run `node scripts/validate-repository.mjs` from the repository root.

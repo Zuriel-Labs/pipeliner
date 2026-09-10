@@ -5,6 +5,8 @@ description: Complete an active Issue only after exact-candidate release evidenc
 
 # Close an Issue
 
+Follow [Issue-based communication](../../../AGENTS.md#issue-based-communication): request and acknowledge completion for the owning Issue and exact candidate. Render the configured completion phrase with the Issue number, never the pull-request number; the default is `Approved to complete Issue #{number}`. Lead the final status with the Issue and report it complete only after every gate and live readback pass. Retain the linked pull request as supporting evidence.
+
 Read `AGENTS.md`, `pipeliner.config.json`, the sole active Issue, matching pull request, candidate record, current PM approval, checks, release evidence, and live Project state.
 
 1. Require In Review, exact current candidate identity, successful configured gates, zero unresolved findings, and the approval required at this point by the selected release strategy. Verify every configured independent local QA turn, exact PM approval and final task-owned cleanup using [local QA execution](../pipeliner-work-issue/references/local-qa.md). Missing hosts, waiting pickup and PM-retained resources are pending, not complete. Legacy missing QA requires discovery before a new sequence; do not invent completed turns.

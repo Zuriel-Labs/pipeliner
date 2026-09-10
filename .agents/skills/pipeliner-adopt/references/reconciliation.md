@@ -5,6 +5,7 @@ The agent owns semantic review. Hashes bind the reviewed files; they cannot prov
 ## Customized files
 
 1. Read upstream and target instructions completely. Preserve dirty work and stronger constraints. Manually merge only adoption-authorized changes; never overwrite unknown changes.
+   Verify the merged `AGENTS.md` and canonical skills retain Issue-based status, handoffs, approval requests and acknowledgments, Issue-number completion placeholders, and exact-candidate binding. Preserve pull-request linkage, review/check requirements, and merge evidence as supporting details; a matching digest alone cannot establish these semantics.
 2. Save a target-owned `.agents/reconciliation.json` with version 1 and a `files` object keyed by managed relative path. Each entry has `sourceSha256`, `targetSha256`, and a non-empty `rationale` explaining retained policy and integration. Compute SHA-256 over exact bytes after review using Node crypto or the host's SHA-256 tool. Do not store credentials or private source in rationale.
 3. Pass its absolute path using `--reconciliation` to both dry-run and apply. Reconciled files remain untouched. Changes to upstream or target invalidate the entry and reopen the conflict; update only after a fresh semantic review. Apply rechecks existing bytes before creation.
 4. Run target repository validation, skill validation and full local gates. Reconcile stronger provider policies by preserving content and a canonical import; explain any structural validator mismatch rather than deleting policy.

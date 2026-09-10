@@ -2,6 +2,8 @@
 
 Build the checklist from the actual Issue, diff, candidate, and user journey. Do not reuse a generic smoke list as a substitute for changed-behavior coverage.
 
+Lead the handoff and approval acknowledgment with the owning Issue number and its current gate. Include the linked pull request as supporting evidence alongside exact candidate identity. Resolve `{number}` from the Issue: for Issue #42 implemented by PR #57, the default completion request is `Approved to complete Issue #42`. Preserve other configured gate phrases and explicitly bind them to the Issue and unchanged candidate; completion approval never authorizes a different candidate or skips pending gates.
+
 Include:
 
 1. exact target URL, application, platform, build, or artifact;

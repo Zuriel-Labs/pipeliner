@@ -37,6 +37,14 @@ This repository uses Pipeliner: an evidence-first, agent-managed development and
 - Keep Status, Priority, Impact, Effort, labels, assignee, Issue state, branch, and pull request linkage coherent at each transition.
 - A merge is not a release. A release is not PM acceptance. Automation must never mark work complete before the configured release and PM Testing gates.
 
+## Issue-based communication
+
+- Lead every work-status update, blocker, QA handoff, release report, approval request, approval acknowledgment, and completion message with the owning GitHub Issue number and its outcome or remaining gate. Use the Issue title when additional context helps.
+- Keep pull requests critical supporting evidence: include their links or numbers, review/check results, merge state, and exact candidate identity where relevant. A pull-request number must never stand in for the Issue number or define whether the Issue is complete.
+- Bind each approval to the owning Issue, the specific configured gate, and the exact unchanged candidate. Render `{number}` in approval phrases from the Issue number, never the pull-request number. The default completion phrase is `Approved to complete Issue #{number}`. Preserve configured Production and native-candidate phrases; introduce them with the Issue and candidate they authorize. Issue-based wording does not broaden approval or waive any gate.
+- For example, when Issue #42 is implemented by PR #57, say “Issue #42 is In Progress; implementation is in PR #57,” or “Issue #42 is awaiting PM Testing; PR #57 is merged.” Request completion with `Approved to complete Issue #42`, and acknowledge it for Issue #42 and the verified candidate. Say “Issue #42 is complete” only after all completion gates and live readback pass.
+- If no Issue exists or its linkage is ambiguous, state that limitation and resolve it through the configured Issue workflow. Never invent an Issue number, substitute a PR number, or bypass Issue-creation approval.
+
 ## Canonical lifecycle
 
 1. New work uses `pipeliner-create-issue`. Research duplicates and repository behavior, clarify unresolved intent, show the complete Issue and metadata, obtain the configured exact approval, create it in Backlog, and read it back.
@@ -73,7 +81,7 @@ This repository uses Pipeliner: an evidence-first, agent-managed development and
 
 ## PM Testing handoff
 
-Every review, candidate, Production, and completion handoff must be user-friendly and include a `PM Testing steps` section with:
+Every review, candidate, Production, and completion handoff must lead with the owning Issue as defined in Issue-based communication, be user-friendly, and include a `PM Testing steps` section with:
 
 1. the exact target environment, URL, application, or artifact;
 2. prerequisite account, state, fixtures, or setup;

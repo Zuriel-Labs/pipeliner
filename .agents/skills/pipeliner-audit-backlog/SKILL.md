@@ -5,6 +5,8 @@ description: Audit and, when explicitly requested, repair Backlog Issue classifi
 
 # Audit the Backlog
 
+Follow [Issue-based communication](../../../AGENTS.md#issue-based-communication): lead each finding, recommendation, and status with the Backlog Issue number. Include linked pull requests as supporting evidence and distinguish delivered implementation from an Issue that has passed all completion gates.
+
 Read `AGENTS.md`, `pipeliner.config.json`, the live Project schema, every Backlog Issue, open pull requests, and relevant repository or dependency evidence.
 
 - Account for every Backlog Issue and classify it as ready, blocked, dependent, duplicate, superseded, delivered, or needing PM clarification.

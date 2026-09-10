@@ -42,6 +42,13 @@
     </section>
 
     <section>
+      <h2>Issue-based communication</h2>
+      <p>Every progress update, blocker, testing handoff, release result, approval request and acknowledgment, and completion message identifies the owning GitHub Issue first. Pull requests remain critical supporting evidence for review, checks, merge state, and candidate identity.</p>
+      <p>For Issue #42 implemented by PR #57, report “Issue #42 is awaiting PM Testing; PR #57 is merged.” The default completion approval is <code>Approved to complete Issue #42</code>. Use the Issue number, never the PR number. Preserve other configured gate phrases and bind every approval to the Issue, specific gate, and exact unchanged candidate.</p>
+      <p>Report the Issue complete only after all configured gates and live readback pass. If no Issue exists or linkage is unclear, state the limitation and follow Issue-creation governance without inventing an identifier.</p>
+    </section>
+
+    <section>
       <h2>Agent-owned Project movement</h2>
       <p>The agent performs routine GitHub Project transitions and immediately verifies the resulting Status, metadata, assignment, Issue state, linkage, and active count. The PM never has to drag a card to keep the pipeline coherent.</p>
       <p class="warning">Exactly one Issue may be active. Merge, green CI, deployment health, and silence are evidence—not completion or approval.</p>

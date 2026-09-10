@@ -1,6 +1,6 @@
 ## Summary
 
-<!-- State the user or pipeline outcome, not an inventory of files. -->
+<!-- Lead with the owning Issue number and user or pipeline outcome. This PR supplies supporting implementation and review evidence. -->
 
 ## Issue
 
@@ -21,3 +21,4 @@
 ## PM Testing
 
 <!-- Add target, prerequisites, numbered actions, expected results, and regression checks. -->
+<!-- Identify the Issue and exact candidate when requesting or acknowledging approval. Render the configured completion phrase with the Issue number, never this PR number. -->

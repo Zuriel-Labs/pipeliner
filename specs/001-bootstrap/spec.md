@@ -34,6 +34,15 @@ Success means a repository can adopt one consistent Issue-to-release lifecycle w
 15. Never include reference-product secrets, private data, fixed local usernames, or sensitive infrastructure details.
 16. Treat the target repository location as a mandatory adoption input. If it is absent, the agent asks one concise PM question for it and waits without mutating any target repository or GitHub Project.
 17. Once a target is explicit, the agent owns identity resolution, evidence gathering, profile creation, conflict-safe adoption, Project and label alignment, validation, GitHub coordination, readback, and a user-friendly PM Testing handoff within that target scope.
+18. Bootstrap `AGENTS.md` and canonical skills must make the GitHub Issue the primary reference in progress, blockers, review, release, approval requests, approval acknowledgments, and completion messages. Retain linked pull requests and exact candidate evidence as supporting details. Resolve approval placeholders from the Issue number, never the pull-request number; the default completion phrase is `Approved to complete Issue #{number}`. Preserve configured gate-specific phrases and bind them explicitly to the Issue and unchanged candidate. Never invent an Issue number when none exists.
+
+## Issue communication maintenance plan
+
+1. Define the shared communication contract in `AGENTS.md`, including distinct Issue and pull-request numbers in examples.
+2. Apply it to the portable lifecycle skills, PM Testing reference, adoption reconciliation, and human-facing policy.
+3. Verify a temporary adoption contains the updated instructions, skills, and existing approval defaults; run changed-skill validation and `npm run check`, then remove task-owned temporary output.
+
+Acceptance: status leads with the Issue, approval acknowledgment identifies its Issue and candidate, and completion remains gated. Pull-request links, review, checks, merge evidence, release topology, and existing configured approval phrases remain intact. This is an instruction update, not a change to application logic or automatic updates of existing adopters. The main risk is accidentally treating Issue-level approval as permission for a changed candidate; the shared contract must explicitly forbid that.
 
 ## Non-goals
 

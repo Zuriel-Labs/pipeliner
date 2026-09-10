@@ -144,6 +144,9 @@ test("validateRepository accepts canonical skills and regular-file adapters", as
   );
 
   assert.deepEqual(await validateRepository(root, { requireConfig: false }), []);
+  await writeFile(path.join(root, 'CLAUDE.md'), '@AGENTS.md\n\nPreserve a stronger provider requirement.\n');
+  await writeFile(path.join(root, 'GEMINI.md'), '@./AGENTS.md\n\nPreserve another provider requirement.\n');
+  assert.deepEqual(await validateRepository(root, { requireConfig: false }), []);
 });
 
 test("validateRepository reports copied policy and unsafe provider drift", async (t) => {
@@ -166,7 +169,7 @@ test("validateRepository reports copied policy and unsafe provider drift", async
   await writeFile(path.join(root, ".claude", "skills", "example-skill", "SKILL.md"), "copied policy\n");
 
   const errors = await validateRepository(root, { requireConfig: false });
-  assert.ok(errors.some((error) => error.includes("CLAUDE.md must contain only @AGENTS.md")));
+  assert.ok(errors.some((error) => error.includes("CLAUDE.md must import @AGENTS.md")));
   assert.ok(errors.some((error) => error.includes("color-scheme: dark")));
   assert.ok(errors.some((error) => error.includes("frontmatter name")));
   assert.ok(errors.some((error) => error.includes("canonical skill")));

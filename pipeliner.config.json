@@ -35,6 +35,7 @@
     }
   },
   "workflow": {
+    "branchProtection": "disabled",
     "maxActiveIssues": 1,
     "branchPattern": "issue/{number}-{slug}",
     "issueReference": "Refs #{number}",

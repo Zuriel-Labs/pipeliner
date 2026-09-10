@@ -20,9 +20,33 @@
       "done": "Done"
     },
     "metadataFields": {
-      "priority": { "name": "Priority", "options": ["P0", "P1", "P2", "P3"] },
-      "impact": { "name": "Impact", "options": ["High", "Medium", "Low"] },
-      "effort": { "name": "Effort", "options": ["XS", "S", "M", "L", "XL"] }
+      "priority": {
+        "name": "Priority",
+        "options": [
+          "P0",
+          "P1",
+          "P2",
+          "P3"
+        ]
+      },
+      "impact": {
+        "name": "Impact",
+        "options": [
+          "High",
+          "Medium",
+          "Low"
+        ]
+      },
+      "effort": {
+        "name": "Effort",
+        "options": [
+          "XS",
+          "S",
+          "M",
+          "L",
+          "XL"
+        ]
+      }
     }
   },
   "workflow": {
@@ -37,17 +61,35 @@
     },
     "pmTesting": {
       "required": true,
-      "terms": ["Project Manager QA", "PM Testing"],
-      "requiredSections": ["target", "prerequisites", "numbered actions", "expected results", "regression checks"]
+      "terms": [
+        "Project Manager QA",
+        "PM Testing"
+      ],
+      "requiredSections": [
+        "target",
+        "prerequisites",
+        "numbered actions",
+        "expected results",
+        "regression checks"
+      ]
     }
   },
   "quality": {
-    "commands": ["python -m example_app --selftest"],
-    "requiredChecks": ["Quality / verify"]
+    "commands": [
+      "python -m example_app --selftest"
+    ],
+    "requiredChecks": [
+      "Quality / verify"
+    ]
   },
   "release": {
     "strategy": "multi-environment",
-    "candidateIdentity": ["sourceCommit", "gitTree", "platform", "validationSession"],
+    "candidateIdentity": [
+      "sourceCommit",
+      "gitTree",
+      "platform",
+      "validationSession"
+    ],
     "environments": [
       {
         "name": "macOS Beta",
@@ -68,6 +110,93 @@
         "verifyCommand": "python -m example_app --selftest",
         "approvalPhrase": "Beta approved",
         "promoteWithoutRebuild": false
+      }
+    ]
+  },
+  "qa": {
+    "applicationType": "native",
+    "runtimePlatforms": [
+      {
+        "os": "windows",
+        "architecture": "x64"
+      },
+      {
+        "os": "macos",
+        "architecture": "arm64"
+      }
+    ],
+    "candidateIdentity": [
+      "sourceCommit",
+      "gitTree"
+    ],
+    "developers": [
+      {
+        "id": "developer-a",
+        "environments": [
+          "windows"
+        ]
+      },
+      {
+        "id": "developer-b",
+        "environments": [
+          "macos"
+        ]
+      }
+    ],
+    "environments": [
+      {
+        "id": "windows",
+        "os": "windows",
+        "architecture": "x64",
+        "prerequisites": [
+          "Native Windows host and project SDK"
+        ],
+        "setup": [
+          "scripts\\setup-qa.bat"
+        ],
+        "suite": [
+          "scripts\\test.bat",
+          "scripts\\build.bat",
+          "scripts\\smoke.bat"
+        ],
+        "teardown": [
+          "scripts\\cleanup-qa.bat"
+        ]
+      },
+      {
+        "id": "macos",
+        "os": "macos",
+        "architecture": "arm64",
+        "prerequisites": [
+          "Native macOS host and project SDK"
+        ],
+        "setup": [
+          "./scripts/setup-qa.sh"
+        ],
+        "suite": [
+          "./scripts/test.sh",
+          "./scripts/build.sh",
+          "./scripts/smoke.sh"
+        ],
+        "teardown": [
+          "./scripts/cleanup-qa.sh"
+        ]
+      }
+    ],
+    "turns": [
+      {
+        "id": "windows",
+        "developer": "developer-a",
+        "environment": "windows",
+        "pm": "project-manager",
+        "approvalPhrase": "Windows QA approved"
+      },
+      {
+        "id": "macos",
+        "developer": "developer-b",
+        "environment": "macos",
+        "pm": "project-manager",
+        "approvalPhrase": "macOS QA approved"
       }
     ]
   }

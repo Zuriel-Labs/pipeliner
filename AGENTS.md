@@ -5,10 +5,12 @@ This repository uses Pipeliner: an evidence-first, agent-managed development and
 ## Pipeliner adoption entrypoint
 
 - Treat requests to install, bootstrap, adopt, align, or update Pipeliner in a repository as `pipeliner-adopt` work before applying the normal lifecycle to that target.
-- The target repository location is required. Accept an absolute local checkout path, GitHub `OWNER/REPO`, GitHub repository URL, or an explicit statement that the current repository is the target.
-- If the target is omitted, ask one concise question: `What is the target repository location? Provide an absolute local checkout path, GitHub OWNER/REPO, or GitHub repository URL.` Then wait before target or Project mutation. Do not guess a repository from the current directory, recent work, or chat history.
+- The target repository location is required for existing-repository adoption. Accept an absolute local checkout path, GitHub `OWNER/REPO`, GitHub repository URL, or an explicit statement that the current repository is the target. Explicit intent to create a new repository starts the creation interview.
+- If both target and creation intent are omitted, ask one concise question: `What is the target repository location, or do you want to create a new repository?` Then wait before target or Project mutation. Do not guess a repository from the current directory, recent work, or chat history.
+- For creation, resolve name, purpose, owner, explicit visibility and local destination before mutation. Verify absence and creation authority; authentication, permission, network failures and an ambiguous 404 are not proof of absence. Initialize the appropriate README and verify local/remote identity before adoption. Never inherit Pipeliner's public visibility.
 - Once the target is explicit, read `.agents/skills/pipeliner-adopt/SKILL.md` and own its complete workflow. Verify exact local and remote identity before mutation and keep all authority bounded to that target repository and its linked Project.
 - Adoption authority covers safe repository and Project alignment. It does not authorize application deployment, credential changes, destructive migration, or unrelated backlog work.
+- Branch protection and repository rulesets are opt-in, never bootstrap defaults. Ask whether the PM wants them; record the explicit choice in `workflow.branchProtection`. If enabled, clarify branch scope and exact rules first. If omitted, preserve current controls and ask; do not infer consent from quality checks, Project setup or example repositories. Remove existing protection only on explicit PM direction. Agent quality checks and exact PM approval still apply without branch protection.
 
 ## Authority and source of truth
 
@@ -55,6 +57,12 @@ This repository uses Pipeliner: an evidence-first, agent-managed development and
 - Run every configured quality command and inspect exit status before claiming success. List anything not run and why.
 
 ## Candidate and release contract
+
+- QA topology is independent of release topology. Read `qa.developers`, `qa.environments` and ordered `qa.turns`; follow [local QA execution](.agents/skills/pipeliner-work-issue/references/local-qa.md). Missing QA in a legacy profile requires discovery before adoption or starting a new QA sequence; it never implies passed environments.
+- Build applications, native packages and container images only on compatible local hosts. No application builds may execute in GitHub Actions, including through setup, package hooks, quality scripts, composite actions or reusable workflows. Keep reviewed lightweight checks and inspect every transitive command before publishing workflows.
+- Each required local turn runs the complete environment suite and records source/tree and all shared candidate identity, owner, environment, session, host, results, PM approval and cleanup. Missing hosts remain pending. QA waiting and pickup keep the sole Issue In Progress; only the PM can request On Hold. One developer/one environment omits the baton; self-handoff and same-OS handoff still require independent complete turns.
+- Do not pass the baton until outgoing gates and cleanup pass and the exact candidate is available to the next environment. Incoming owners verify identity before pickup. Candidate changes invalidate all prior shared QA evidence; remediate on the same Issue and retest. PM Testing retention remains pending until eventual cleanup is verified.
+- Inventory task-owned processes, images, containers, volumes, workspaces and artifacts before local tests. Use exact IDs and run ownership; teardown in failure and success paths, inspect removal and report cleanup failures. Preserve unrelated resources. Record PM-retained resources with owner and cleanup trigger; never use global prune, broad process kills or inferred ownership.
 
 - Record every configured candidate-identity component. Typical components are source commit, Git tree, immutable artifact digest, rendered configuration, deployment revision, native platform, and validation session.
 - Any change to a configured identity component invalidates prior PM approval. Re-run affected gates and request fresh approval.

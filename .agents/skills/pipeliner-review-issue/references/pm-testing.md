@@ -12,5 +12,6 @@ Include:
 6. relevant failure, regression, accessibility, persistence, and safety checks;
 7. known limitations or checks the agent could not perform;
 8. the one exact approval phrase for this gate in a standalone fenced code block.
+9. each required local QA environment and its developer/PM owner, current and next turn, suite state, candidate availability, and any PM-retained resource with cleanup owner and trigger. An unavailable host or unverified cleanup remains pending.
 
 Use `Project Manager QA` or `PM Testing`. Keep the language approachable and explain product terms that are not obvious. Agent test evidence supports the checklist but never approves it.

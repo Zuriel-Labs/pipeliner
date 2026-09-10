@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { createHash } from 'node:crypto';
 
 import { applyAdoptionPlan, planAdoption } from "../scripts/lib/adoption.mjs";
 import { validateProfile } from "../scripts/lib/config.mjs";
@@ -175,4 +176,30 @@ test("applyAdoptionPlan writes planned files and never overwrites conflicts", as
     JSON.parse(await readFile(path.join(targetRoot, "pipeliner.config.json"), "utf8")),
     profile,
   );
+});
+
+test('reviewed reconciliation preserves custom bytes, repeats safely, and expires on drift', async t => {
+  const roots = await fixture(t);
+  const profile = validProfile();
+  const custom = 'canonical policy\nStronger target requirement\n';
+  await writeFile(path.join(roots.targetRoot, 'AGENTS.md'), custom);
+  const hash = value => createHash('sha256').update(value).digest('hex');
+  const reconciliation = { version: 1, files: { 'AGENTS.md': {
+    sourceSha256: hash('canonical policy\n'), targetSha256: hash(custom), rationale: 'Merged canonical policy while preserving stronger requirement.' } } };
+  const plan = await planAdoption({ ...roots, profile, reconciliation });
+  assert.equal(plan.conflicts.length, 0);
+  assert.equal(plan.reconciled.length, 1);
+  await applyAdoptionPlan(plan);
+  assert.equal(await readFile(path.join(roots.targetRoot, 'AGENTS.md'), 'utf8'), custom);
+  assert.equal((await planAdoption({ ...roots, profile, reconciliation })).create.length, 0);
+  await writeFile(path.join(roots.targetRoot, 'AGENTS.md'), custom + 'drift');
+  await assert.rejects(applyAdoptionPlan(plan), /changed after planning/);
+  assert.equal((await planAdoption({ ...roots, profile, reconciliation })).conflicts.length, 1);
+});
+
+test('adoption refuses a symlink destination before creating files', async t => {
+  const roots = await fixture(t);
+  const outside = path.join(roots.sourceRoot, 'outside'); await mkdir(outside);
+  await symlink(outside, path.join(roots.targetRoot, '.agents'));
+  await assert.rejects(planAdoption({ ...roots, profile: validProfile() }), /symlink/);
 });

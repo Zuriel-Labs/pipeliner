@@ -2,6 +2,8 @@ import { lstat, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { validateProfile } from "./config.mjs";
+import { auditCI } from './ci.mjs';
+import { validateQA } from './qa.mjs';
 
 const REQUIRED_FIELDS = new Map([
   ["Status", ["Backlog", "On Hold", "In Progress", "In Review", "Done"]],
@@ -202,8 +204,8 @@ export async function validateRepository(rootPath, { requireConfig = true } = {}
     ".agents/pipeliner-policy.html",
   );
 
-  if (claude.trim() !== "@AGENTS.md") errors.push("CLAUDE.md must contain only @AGENTS.md");
-  if (gemini.trim() !== "@./AGENTS.md") errors.push("GEMINI.md must contain only @./AGENTS.md");
+  if (!/^@AGENTS\.md\s*$/m.test(claude)) errors.push("CLAUDE.md must import @AGENTS.md");
+  if (!/^@\.\/AGENTS\.md\s*$/m.test(gemini)) errors.push("GEMINI.md must import @./AGENTS.md");
   if (!agents.includes("PM Testing")) errors.push("AGENTS.md must contain PM Testing");
   if (!agents.includes("Exactly one Issue may be active")) {
     errors.push("AGENTS.md must define the one-active-Issue invariant");
@@ -242,6 +244,12 @@ export async function validateRepository(rootPath, { requireConfig = true } = {}
         errors.push(`invalid ${path.relative(root, examplePath)}: ${error.message}`);
       }
     }
+  }
+
+  for (const examplePath of await walkFiles(path.join(root, 'blueprints', 'qa'))) {
+    if (!examplePath.endsWith('.json')) continue;
+    try { validateQA(JSON.parse(await readFile(examplePath, 'utf8'))); }
+    catch (error) { errors.push(`invalid ${path.relative(root, examplePath)}: ${error.message}`); }
   }
 
   const skillsRoot = path.join(root, ".agents", "skills");
@@ -312,5 +320,6 @@ export async function validateRepository(rootPath, { requireConfig = true } = {}
     }
   }
 
+  errors.push(...await auditCI(root));
   return [...new Set(errors)];
 }

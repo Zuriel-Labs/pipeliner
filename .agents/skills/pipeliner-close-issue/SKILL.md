@@ -7,7 +7,7 @@ description: Complete an active Issue only after exact-candidate release evidenc
 
 Read `AGENTS.md`, `pipeliner.config.json`, the sole active Issue, matching pull request, candidate record, current PM approval, checks, release evidence, and live Project state.
 
-1. Require In Review, exact current candidate identity, successful configured gates, zero unresolved findings, and the approval required at this point by the selected release strategy.
+1. Require In Review, exact current candidate identity, successful configured gates, zero unresolved findings, and the approval required at this point by the selected release strategy. Verify every configured independent local QA turn, exact PM approval and final task-owned cleanup using [local QA execution](../pipeliner-work-issue/references/local-qa.md). Missing hosts, waiting pickup and PM-retained resources are pending, not complete. Legacy missing QA requires discovery before a new sequence; do not invent completed turns.
 2. If merge precedes Production, record the approved head tree, merge using the repository's approved method, and prove the resulting default-branch tree equals the reviewed tree. Stop on mismatch.
 3. Invoke `pipeliner-release-production` when Production is not yet verified. Do not rebuild an immutable candidate.
 4. For direct Production, keep the Issue open and In Review after deployment until the PM completes Production PM Testing and gives the exact configured completion phrase for the unchanged release.

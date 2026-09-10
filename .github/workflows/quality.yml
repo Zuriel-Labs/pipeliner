@@ -31,8 +31,10 @@ jobs:
           node-version: 22.23.2
           cache: npm
 
-      - run: npm ci
-      - run: npm run check
+      - name: Validate Pipeliner contracts
+        run: node scripts/validate-repository.mjs
+      - name: Check commit whitespace
+        run: git -c core.hooksPath=/dev/null show --format= --check HEAD
 
   secret-security:
     name: secret-security

@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { validateQA } from "./qa.mjs";
 
 const RELEASE_STRATEGIES = new Set([
   "none",
@@ -60,6 +61,7 @@ function validateEnvironment(environment, index) {
 
 export function validateProfile(profile) {
   const root = requireObject(profile, "profile");
+  if (root.qa !== undefined) validateQA(root.qa);
   if (root.version !== 1) throw new Error("version must equal 1");
 
   const repository = requireObject(root.repository, "repository");
@@ -87,6 +89,9 @@ export function validateProfile(profile) {
   }
 
   const workflow = requireObject(root.workflow, "workflow");
+  if (workflow.branchProtection !== undefined && !['enabled', 'disabled'].includes(workflow.branchProtection)) {
+    throw new Error('workflow.branchProtection must be enabled or disabled; omit for PM discovery');
+  }
   if (workflow.maxActiveIssues !== 1) throw new Error("workflow.maxActiveIssues must equal 1");
   requireString(workflow.branchPattern, "workflow.branchPattern");
   requireString(workflow.issueReference, "workflow.issueReference");

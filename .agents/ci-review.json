@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "workflows": {
+    ".github/workflows/quality.yml": {
+      "rationale": "Reviewed pinned checkout/setup-node, direct Node contract validator and all static imports (read-only validation; no package lifecycle hooks or application commands). Secret scanner action 363923b uses docker run of prebuilt tooling, not an application build. Full behavioral tests execute locally. Data profiles are parsed, never executed. No local composite actions, nested workflow calls or downloaded application scripts.",
+      "files": {
+        ".github/workflows/quality.yml": "afaa26443693e044fc0fee8a956d3303c4accf6feca5ecdfedeb9f7d546a9e51",
+        "package.json": "591159744983ea992feb3a9130162509832ee07efac3c2228d1b26ce71892213",
+        "scripts/validate-repository.mjs": "fb01f8962a59a438f66b985a54babe9ee03008c0f2b6e54307e37952994cacf8",
+        "scripts/lib/validation.mjs": "27d959c4b468cb7106f30935606af748bf4711dc65c991eaaf61f161e890f084",
+        "scripts/lib/config.mjs": "0ea784bb8c944a11f73ecd5b65b71a251df74ff79d057232725ca7ce64b574b4",
+        "scripts/lib/qa.mjs": "62ded45fade6ed0713559aa6f520d616cc65ddf2e535be87c7184507a823778d",
+        "scripts/lib/cleanup.mjs": "92d37747b5456b00cf16640f8ea7ed0d29b1209bf09b4b06c0e8f95d127ebd16",
+        "scripts/lib/ci.mjs": "41d39874b3667e9b6de1d6e9e09b5b4010a25122b24a97689b36e4d551bb6f19"
+      }
+    },
+    ".github/workflows/reusable-quality.yml": {
+      "rationale": "Pinned checkout followed only by fixed Git whitespace inspection with hooks disabled. No inputs, setup, package commands, application builds or transitive executable files.",
+      "files": {
+        ".github/workflows/reusable-quality.yml": "28b2970036147971c0aa1a004c25f1d0f5d32e768ee601c70dd1562e135ebfb0"
+      }
+    }
+  }
+}

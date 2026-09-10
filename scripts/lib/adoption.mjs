@@ -1,8 +1,9 @@
 import { constants } from "node:fs";
-import { access, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, readdir, readFile, lstat, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { validateProfile } from "./config.mjs";
+import { digest } from './ci.mjs';
 
 const MANAGED_ROOTS = [
   ".github/ISSUE_TEMPLATE",
@@ -17,6 +18,7 @@ const MANAGED_ROOTS = [
   "GEMINI.md",
   "schema",
   "scripts/audit-project.mjs",
+  "scripts/evaluate-qa.mjs",
   "scripts/lib",
   "scripts/validate-repository.mjs",
 ];
@@ -33,7 +35,8 @@ async function exists(filePath) {
 async function listFiles(root, relativePath) {
   const absolutePath = path.join(root, relativePath);
   if (!(await exists(absolutePath))) return [];
-  const details = await stat(absolutePath);
+  const details = await lstat(absolutePath);
+  if (details.isSymbolicLink()) throw new Error(`refusing managed source symlink: ${relativePath}`);
   if (details.isFile()) return [relativePath];
   if (!details.isDirectory()) return [];
 
@@ -46,6 +49,17 @@ async function listFiles(root, relativePath) {
   return nested.flat();
 }
 
+async function assertSafeDestination(root, destination) {
+  const relative = path.relative(root, destination);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('unsafe adoption destination');
+  let current = root;
+  for (const part of relative.split(path.sep)) {
+    current = path.join(current, part);
+    try { if ((await lstat(current)).isSymbolicLink()) throw new Error(`refusing destination symlink: ${current}`); }
+    catch (error) { if (error.code === 'ENOENT') return; throw error; }
+  }
+}
+
 function entry(relativePath, targetRoot, content, sourcePath = null) {
   return {
     relativePath: relativePath.split(path.sep).join("/"),
@@ -55,10 +69,10 @@ function entry(relativePath, targetRoot, content, sourcePath = null) {
   };
 }
 
-export async function planAdoption({ sourceRoot, targetRoot, profile }) {
+export async function planAdoption({ sourceRoot, targetRoot, profile, reconciliation }) {
   validateProfile(profile);
-  const source = path.resolve(sourceRoot);
-  const target = path.resolve(targetRoot);
+  const source = await realpath(sourceRoot);
+  const target = await realpath(targetRoot);
   if (!(await exists(source))) throw new Error(`source root does not exist: ${source}`);
   if (!(await exists(target))) throw new Error(`target root does not exist: ${target}`);
 
@@ -79,15 +93,22 @@ export async function planAdoption({ sourceRoot, targetRoot, profile }) {
   );
   candidates.sort((left, right) => left.relativePath.localeCompare(right.relativePath));
 
-  const plan = { sourceRoot: source, targetRoot: target, create: [], identical: [], conflicts: [] };
+  if (reconciliation && (reconciliation.version !== 1 || !reconciliation.files)) throw new Error('invalid reconciliation manifest');
+  const plan = { sourceRoot: source, targetRoot: target, create: [], identical: [], reconciled: [], conflicts: [] };
   for (const candidate of candidates) {
+    await assertSafeDestination(target, candidate.targetPath);
     if (!(await exists(candidate.targetPath))) {
       plan.create.push(candidate);
       continue;
     }
     const current = await readFile(candidate.targetPath);
     if (current.equals(candidate.content)) plan.identical.push(candidate);
-    else plan.conflicts.push(candidate);
+    else {
+      const review = reconciliation?.files[candidate.relativePath];
+      if (review?.sourceSha256 === digest(candidate.content) && review.targetSha256 === digest(current) && typeof review.rationale === 'string' && review.rationale.trim()) {
+        plan.reconciled.push({ ...candidate, content: current });
+      } else plan.conflicts.push(candidate);
+    }
   }
   return plan;
 }
@@ -99,6 +120,11 @@ export async function applyAdoptionPlan(plan) {
   }
 
   let created = 0;
+  if (await realpath(plan.targetRoot) !== plan.targetRoot) throw new Error('adoption root changed after planning');
+  for (const item of [...plan.create, ...plan.identical, ...(plan.reconciled ?? [])]) await assertSafeDestination(plan.targetRoot, item.targetPath);
+  for (const item of [...plan.identical, ...(plan.reconciled ?? [])]) {
+    if (!(await readFile(item.targetPath)).equals(item.content)) throw new Error(`file changed after planning: ${item.relativePath}`);
+  }
   for (const item of plan.create) {
     await mkdir(path.dirname(item.targetPath), { recursive: true });
     try {

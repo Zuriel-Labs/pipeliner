@@ -26,17 +26,19 @@ Install or align Pipeliner in TARGET_REPOSITORY_LOCATION. Begin at https://githu
 If the request does not identify a target, the agent must ask:
 
 ```text
-What is the target repository location? Provide an absolute local checkout path, GitHub OWNER/REPO, or GitHub repository URL.
+What is the target repository location, or do you want to create a new repository?
 ```
 
 The agent then waits before making any target repository or GitHub Project mutation. It must not guess the target from its current directory, recent work, or chat history.
+
+For a new repository, say that you want one created. The agent asks for missing name, purpose, owner, visibility and local destination, verifies access and absence, creates within that authority and verifies identity before adoption. It never assumes public visibility or treats failed access as permission to create.
 
 ### What the agent owns after the target is known
 
 1. Verify the exact local checkout and GitHub repository identity.
 2. Read the target's instructions, Git state, existing work, workflows, checks, release process, environments, security controls, labels, branch protections, and Project.
 3. Follow the target's existing Issue, branch, and pull-request governance. If none exists, bootstrap through a focused branch and pull request unless the PM explicitly authorizes another supported path.
-4. Build `pipeliner.config.json` from evidence and ask the PM only about material choices that cannot be resolved safely.
+4. Build `pipeliner.config.json` from evidence and ask about unresolved application type, runtime OS/architectures, developers and their available systems, ordered local QA turns and PM owners, prerequisites, release destinations and approval gates. Wait for material answers.
 5. Run a dry-run, reconcile every collision without blind overwrites, and apply only a conflict-free plan.
 6. Align canonical policy, skills, provider adapters, repository workflows, labels, and the GitHub Project without weakening stronger target-specific rules.
 7. Run Pipeliner validation and every target quality gate, publish the focused changes, and read back the repository, Issue, pull request, checks, and Project state.
@@ -145,8 +147,9 @@ The plan reports:
 - `create`: files that do not exist and can be added safely;
 - `identical`: files already aligned byte-for-byte;
 - `conflicts`: existing files with different content.
+- `reconciled`: reviewed custom files whose upstream and target hashes match the reconciliation manifest.
 
-Pipeliner never overwrites a conflict. Read both versions and merge the contracts deliberately. Existing repository-specific instructions remain authoritative when they are stronger or more precise.
+Pipeliner never overwrites a conflict. Read both versions and merge contracts deliberately. Existing repository-specific instructions remain authoritative when stronger or more precise. Preserve the resulting bytes with `.agents/reconciliation.json` and pass its absolute path with `--reconciliation` to dry-run and apply; [the reconciliation contract](.agents/skills/pipeliner-adopt/references/reconciliation.md) defines the digest fields and review evidence. Changes to either version reopen the conflict.
 
 ### 4. Apply only a conflict-free plan
 
@@ -154,7 +157,7 @@ Pipeliner never overwrites a conflict. Read both versions and merge the contract
 node pipeliner/scripts/adopt.mjs --target /absolute/path/to/target --config /tmp/pipeliner.config.json
 ```
 
-The adoption includes canonical policy and skills, Claude adapters, Issue forms, the reusable quality workflow, schemas, blueprints, and the audit tools. It does not replace the target's stack-specific CI, deployment code, credentials, or runtime configuration.
+The adoption includes canonical policy and skills, Claude adapters, Issue forms, the reusable quality workflow, schemas, blueprints and audit tools. The agent must reconcile target workflows so application builds run locally, preserving lightweight security checks. Adoption never deploys the application or changes credentials.
 
 ### 5. Validate the target
 
@@ -208,6 +211,12 @@ Apply the label taxonomy in `blueprints/github-labels.json` with `gh label creat
 
 ## Release strategies
 
+QA ownership is independent of these strategies. Declare `qa` with application type, runtime platforms, developers and their available environments, each environment's prerequisites/setup/full suite/teardown, ordered turns and PM approval phrases. The four examples under `blueprints/qa/` cover one developer/one environment, one developer across Windows/macOS, two developers sharing Windows, and separate Windows/macOS developers. Example commands and IDs must be replaced with verified target values.
+
+Existing version 1 profiles remain readable without `qa`, but adoption requires explicit discovery and migration. `migrateQA(profile, resolvedQA)` adds confirmed QA without changing release settings. This repository's legacy profile continues to describe its existing local gate; new adoption must not infer topology from it.
+
+Run native builds on compatible local hosts; containerized web QA must specify dependencies, ports, fixtures, readiness and teardown. Missing hosts stay pending. Follow [local QA execution and evidence](.agents/skills/pipeliner-work-issue/references/local-qa.md). Every turn records full suite results, exact candidate, PM approval and cleanup; self-handoff and same-OS handoff require independent turns. Waiting remains In Progress. Changed candidates invalidate prior QA. Task-owned test resources are cleaned after success, failure and PM Testing; unrelated data and resources remain intact.
+
 ### Immutable promotion
 
 Use when a review environment and Production run the same deployable artifact. Build the exact pull-request candidate once, resolve its immutable identity from the artifact authority, deploy and verify it in review, receive exact PM approval, and promote the same artifact without rebuilding.
@@ -232,18 +241,15 @@ Automated tests and agent QA do not replace Project Manager QA. A PM finding ret
 
 ## Reuse the quality workflow
 
-The reusable workflow is stack-neutral. A caller owns its setup and quality commands:
+The reusable workflow runs a fixed lightweight Git whitespace check. It accepts no arbitrary setup, quality or runner inputs. Full application, native-package and image builds run locally, including builds previously hidden in setup hooks or transitive scripts. Call it without inputs:
 
 ```yaml
 jobs:
   quality:
     uses: Zuriel-Labs/pipeliner/.github/workflows/reusable-quality.yml@PINNED_PIPELINER_COMMIT
-    with:
-      setup-command: npm ci
-      quality-command: npm run check
 ```
 
-Pin `PINNED_PIPELINER_COMMIT` to a reviewed full commit SHA. Do not call a mutable branch from a protected pipeline. The reusable workflow grants only `contents: read`; deployment and environment secrets stay in repository-specific release workflows.
+Pin `PINNED_PIPELINER_COMMIT` to a reviewed full commit SHA. Existing callers must remove the old inputs when upgrading. Review all target workflow command chains and record workflow/transitive file hashes in `.agents/ci-review.json`; the repository validator blocks missing or stale review coverage. The ledger records review freshness, not an automatic proof of arbitrary program behavior. Keep lightweight security checks; publish real local evidence without fabricating GitHub check results. [GitHub documents reusable workflow inputs and calls](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows).
 
 ## Provider compatibility
 

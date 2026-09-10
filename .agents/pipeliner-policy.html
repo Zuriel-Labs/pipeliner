@@ -63,6 +63,20 @@
     </section>
 
     <section>
+      <h2>Repository discovery</h2>
+      <p>Begin with an explicit target or intent to create a repository. The agent resolves missing name, purpose, owner, visibility and destination, then verifies access and identity. Failed access is not proof of absence. Existing customized policies and unrelated work remain protected.</p>
+      <p>The interview establishes runtime systems, developer availability, required local QA turns, PM ownership, setup, cleanup and release destinations. Material unanswered choices pause dependent work. Bootstrap does not deploy the application.</p>
+    </section>
+
+    <section>
+      <h2>Local QA and ownership</h2>
+      <p>QA turns are independent of release destinations. One developer may test Windows and macOS; two developers may both test Windows. Each required turn runs the full suite locally and records the exact candidate, owner, environment, session, results, PM Testing and cleanup.</p>
+      <p>One developer on one environment needs no baton. Otherwise, the outgoing owner verifies every gate and confirms the exact candidate is available to the next environment. The incoming owner verifies identity and acknowledges pickup. Waiting remains In Progress on the same Issue; missing hosts never count as a pass.</p>
+      <p>Application, native-package and container-image builds stay on compatible local systems. GitHub Actions retains reviewed lightweight checks, including inspection of every indirect command chain. Local evidence never fabricates a GitHub check result.</p>
+      <p>Track test-owned processes, containers, images, volumes, artifacts and workspaces by exact identity. Clean up after successful and failed runs, preserve unrelated resources, and verify removal. Resources retained for PM Testing need an owner and cleanup trigger; final removal remains a required gate.</p>
+    </section>
+
+    <section>
       <h2>Candidate integrity</h2>
       <p>An approval belongs only to the configured source commit, Git tree, artifact digest, rendered configuration, deployment revision, native host, or validation session that defines that candidate. A material identity change invalidates approval and returns the work to verification.</p>
     </section>

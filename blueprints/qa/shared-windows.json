@@ -1,0 +1,11 @@
+{
+  "applicationType": "native",
+  "runtimePlatforms": [{ "os": "windows", "architecture": "x64" }],
+  "candidateIdentity": ["sourceCommit", "gitTree"],
+  "developers": [{ "id": "developer-a", "environments": ["windows"] }, { "id": "developer-b", "environments": ["windows"] }],
+  "environments": [{ "id": "windows", "os": "windows", "architecture": "x64", "prerequisites": ["Native Windows host and project SDK"], "setup": ["scripts\\setup-qa.bat"], "suite": ["scripts\\test.bat", "scripts\\build.bat", "scripts\\smoke.bat"], "teardown": ["scripts\\cleanup-qa.bat"] }],
+  "turns": [
+    { "id": "first", "developer": "developer-a", "environment": "windows", "pm": "project-manager", "approvalPhrase": "First Windows QA approved" },
+    { "id": "second", "developer": "developer-b", "environment": "windows", "pm": "project-manager", "approvalPhrase": "Second Windows QA approved" }
+  ]
+}

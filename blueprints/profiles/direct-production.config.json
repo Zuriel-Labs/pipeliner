@@ -20,9 +20,33 @@
       "done": "Done"
     },
     "metadataFields": {
-      "priority": { "name": "Priority", "options": ["P0", "P1", "P2", "P3"] },
-      "impact": { "name": "Impact", "options": ["High", "Medium", "Low"] },
-      "effort": { "name": "Effort", "options": ["XS", "S", "M", "L", "XL"] }
+      "priority": {
+        "name": "Priority",
+        "options": [
+          "P0",
+          "P1",
+          "P2",
+          "P3"
+        ]
+      },
+      "impact": {
+        "name": "Impact",
+        "options": [
+          "High",
+          "Medium",
+          "Low"
+        ]
+      },
+      "effort": {
+        "name": "Effort",
+        "options": [
+          "XS",
+          "S",
+          "M",
+          "L",
+          "XL"
+        ]
+      }
     }
   },
   "workflow": {
@@ -37,17 +61,34 @@
     },
     "pmTesting": {
       "required": true,
-      "terms": ["Project Manager QA", "PM Testing"],
-      "requiredSections": ["target", "prerequisites", "numbered actions", "expected results", "regression checks"]
+      "terms": [
+        "Project Manager QA",
+        "PM Testing"
+      ],
+      "requiredSections": [
+        "target",
+        "prerequisites",
+        "numbered actions",
+        "expected results",
+        "regression checks"
+      ]
     }
   },
   "quality": {
-    "commands": ["npm run check"],
-    "requiredChecks": ["Quality / verify"]
+    "commands": [
+      "npm run check"
+    ],
+    "requiredChecks": [
+      "Quality / verify"
+    ]
   },
   "release": {
     "strategy": "direct-production",
-    "candidateIdentity": ["sourceCommit", "gitTree", "deploymentId"],
+    "candidateIdentity": [
+      "sourceCommit",
+      "gitTree",
+      "deploymentId"
+    ],
     "environments": [
       {
         "name": "Production",
@@ -58,6 +99,55 @@
         "verifyCommand": "npm run verify:production",
         "approvalPhrase": "Approved to complete Issue #{number}",
         "promoteWithoutRebuild": false
+      }
+    ]
+  },
+  "qa": {
+    "applicationType": "web",
+    "runtimePlatforms": [
+      {
+        "os": "linux",
+        "architecture": "x64"
+      }
+    ],
+    "candidateIdentity": [
+      "sourceCommit",
+      "gitTree"
+    ],
+    "developers": [
+      {
+        "id": "developer-a",
+        "environments": [
+          "local-linux"
+        ]
+      }
+    ],
+    "environments": [
+      {
+        "id": "local-linux",
+        "os": "linux",
+        "architecture": "x64",
+        "prerequisites": [
+          "Compatible local container runtime; configure project ports, fixtures and dependencies"
+        ],
+        "setup": [
+          "npm ci"
+        ],
+        "suite": [
+          "npm run check"
+        ],
+        "teardown": [
+          "./scripts/cleanup-qa.sh"
+        ]
+      }
+    ],
+    "turns": [
+      {
+        "id": "local",
+        "developer": "developer-a",
+        "environment": "local-linux",
+        "pm": "project-manager",
+        "approvalPhrase": "Local QA approved"
       }
     ]
   }

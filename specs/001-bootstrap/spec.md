@@ -155,4 +155,6 @@ export function assertNonEmptyString(value, field) {
 
 ## Open Questions
 
+Issue #5 extends this baseline with explicit creation intake, independent local QA and reviewed workflow reconciliation. See `specs/005-local-qa/spec.md`; its creation-intent alternative and local-only application builds supersede the existing-target-only intake and arbitrary reusable-command behavior described in this historical baseline.
+
 None. Repository-specific choices are intentionally deferred to each adopter's configuration and PM clarification gate.

@@ -1,0 +1,8 @@
+{
+  "applicationType": "tooling",
+  "runtimePlatforms": [{ "os": "linux", "architecture": "x64" }],
+  "candidateIdentity": ["sourceCommit", "gitTree"],
+  "developers": [{ "id": "developer-a", "environments": ["local-linux"] }],
+  "environments": [{ "id": "local-linux", "os": "linux", "architecture": "x64", "prerequisites": ["Git and Node.js 22 or later"], "setup": ["npm ci"], "suite": ["npm run check"], "teardown": [] }],
+  "turns": [{ "id": "local", "developer": "developer-a", "environment": "local-linux", "pm": "project-manager", "approvalPhrase": "Local QA approved" }]
+}

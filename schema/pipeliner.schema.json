@@ -7,6 +7,7 @@
   "additionalProperties": false,
   "required": ["version", "repository", "project", "workflow", "quality", "release"],
   "properties": {
+    "qa": { "$ref": "#/$defs/qa" },
     "$schema": { "type": "string" },
     "version": { "const": 1 },
     "repository": {
@@ -130,6 +131,46 @@
     }
   },
   "$defs": {
+    "strings": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/nonEmptyString" } },
+    "platform": {
+      "type": "object", "additionalProperties": false, "required": ["os", "architecture"],
+      "properties": { "os": { "$ref": "#/$defs/nonEmptyString" }, "architecture": { "$ref": "#/$defs/nonEmptyString" } }
+    },
+    "qa": {
+      "type": "object", "additionalProperties": false,
+      "required": ["applicationType", "runtimePlatforms", "candidateIdentity", "developers", "environments", "turns"],
+      "properties": {
+        "applicationType": { "enum": ["native", "web", "library", "tooling"] },
+        "runtimePlatforms": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/platform" } },
+        "candidateIdentity": { "type": "array", "minItems": 2, "uniqueItems": true, "items": { "$ref": "#/$defs/nonEmptyString" } },
+        "developers": {
+          "type": "array", "minItems": 1, "items": {
+            "type": "object", "additionalProperties": false, "required": ["id", "environments"],
+            "properties": { "id": { "$ref": "#/$defs/nonEmptyString" }, "environments": { "allOf": [{ "$ref": "#/$defs/strings" }], "minItems": 1 } }
+          }
+        },
+        "environments": {
+          "type": "array", "minItems": 1, "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["id", "os", "architecture", "prerequisites", "setup", "suite", "teardown"],
+            "properties": {
+              "id": { "$ref": "#/$defs/nonEmptyString" }, "os": { "$ref": "#/$defs/nonEmptyString" }, "architecture": { "$ref": "#/$defs/nonEmptyString" },
+              "prerequisites": { "$ref": "#/$defs/strings" }, "setup": { "$ref": "#/$defs/strings" },
+              "suite": { "allOf": [{ "$ref": "#/$defs/strings" }], "minItems": 1 }, "teardown": { "$ref": "#/$defs/strings" }
+            }
+          }
+        },
+        "turns": {
+          "type": "array", "minItems": 1, "items": {
+            "type": "object", "additionalProperties": false, "required": ["id", "developer", "environment", "pm", "approvalPhrase"],
+            "properties": {
+              "id": { "$ref": "#/$defs/nonEmptyString" }, "developer": { "$ref": "#/$defs/nonEmptyString" },
+              "environment": { "$ref": "#/$defs/nonEmptyString" }, "pm": { "$ref": "#/$defs/nonEmptyString" }, "approvalPhrase": { "$ref": "#/$defs/nonEmptyString" }
+            }
+          }
+        }
+      }
+    },
     "nonEmptyString": { "type": "string", "minLength": 1 },
     "projectField": {
       "type": "object",

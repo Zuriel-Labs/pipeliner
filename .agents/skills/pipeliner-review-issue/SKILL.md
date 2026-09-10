@@ -9,7 +9,7 @@ Read `AGENTS.md`, `pipeliner.config.json`, the sole active Issue, complete pull-
 
 1. Require one active In Progress Issue and one matching open pull request with the configured non-closing Issue reference.
 2. Review correctness, regressions, security, privacy, authorization, data integrity, errors, concurrency, migrations, operations, accessibility, responsive UX, performance, compatibility, documentation, and tests in proportion to the change.
-3. Run focused tests, every configured quality command, diff checks, migration rehearsal, security checks, and hands-on application testing where applicable.
+3. Run focused tests, every configured quality command locally, diff checks, migration rehearsal, security checks, and hands-on application testing where applicable. Follow [local QA execution](../pipeliner-work-issue/references/local-qa.md). Evaluate every required turn against the current candidate and verify PM approval and final cleanup before declaring that turn complete. While a turn awaits PM Testing or host pickup, hand it off clearly and keep In Progress; In Review requires completed QA turns. Review all Actions transitive chains and CI review freshness; application/native/image builds stay local.
 4. Remediate every finding on the same branch. Repeat affected review and tests until no unresolved finding remains.
 5. Confirm the pull request is current, mergeable, and green for the exact committed head. Record every configured candidate-identity component.
 6. If the release strategy has a review or native environment, invoke `pipeliner-release-candidate`; otherwise prepare the local/CI candidate directly.

@@ -262,14 +262,20 @@ Pin `PINNED_PIPELINER_COMMIT` to a reviewed full commit SHA. Existing callers mu
 
 ## Update an adoption
 
+Use the bootstrapped [`pipeliner-update`](.agents/skills/pipeliner-update/SKILL.md) skill for an existing repository. It updates and publishes the framework directly as maintenance, preserving configuration and custom policies without creating or requiring a GitHub Issue or consuming the active Issue slot.
+
 1. Fetch a reviewed Pipeliner revision.
 2. Run adoption with `--dry-run` against the target's current profile.
 3. Inspect every difference and preserve target-specific governance.
 4. Apply a conflict-free plan or merge conflicts manually.
 5. Run the target validator, skill validation, repository quality gates, and live Project audit.
-6. Commit the aligned target changes through its normal Issue pipeline.
+6. Commit and publish the verified maintenance update to the target's default branch, using a supporting PR only when repository controls require one. Read back the published revision; no Issue-creation or Issue-completion approval is needed.
 
 Pipeliner does not silently synchronize adopters. Each repository controls when a framework revision is reviewed and adopted.
+
+Verified installations record their applied upstream commit in target-owned `.agents/pipeliner-source.json`; legacy installations without evidence remain unknown until reviewed. The installer runs from a reviewed upstream checkout, since `scripts/adopt.mjs` is not copied into adopters.
+
+For explicitly requested scheduled detection, use [`pipeliner-monitor-updates`](.agents/skills/pipeliner-monitor-updates/SKILL.md). It discovers the current environment's supported scheduler, resolves the target and schedule, avoids duplicate jobs, and verifies the saved automation. Setup and monitor management run directly without a GitHub Issue. If scheduling is unavailable, it reports that limitation. Detection reports new upstream revisions or actionable failures and keeps unchanged successful checks quiet. It never installs updates or creates a monitor merely because Pipeliner was bootstrapped.
 
 ## GitHub automation limits
 

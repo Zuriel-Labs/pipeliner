@@ -85,6 +85,12 @@
     </section>
 
     <section>
+      <h2>Framework updates and optional monitoring</h2>
+      <p>Use <code>pipeliner-update</code> to incorporate a reviewed upstream revision into an existing repository. Preserve its configuration and custom policies, validate the reconciled installation, record the applied framework commit, and publish the verified maintenance update. Framework updates and update-monitor setup run directly without creating or requiring GitHub Issues, consuming the active slot, or asking for Issue approval. Existing repository protections still apply. Missing historical provenance remains unknown until verified.</p>
+      <p>Use <code>pipeliner-monitor-updates</code> only when the user requests scheduled detection. The agent discovers the environment's supported scheduler, resolves the schedule, avoids duplicate jobs, and verifies the saved automation. Unsupported environments receive an honest limitation. Monitoring reports meaningful changes and never installs updates; adoption does not create a monitor automatically.</p>
+    </section>
+
+    <section>
       <h2>Candidate integrity</h2>
       <p>An approval belongs only to the configured source commit, Git tree, artifact digest, rendered configuration, deployment revision, native host, or validation session that defines that candidate. A material identity change invalidates approval and returns the work to verification.</p>
     </section>

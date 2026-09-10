@@ -7,6 +7,8 @@ description: Create, update, and validate Pipeliner policy, canonical skills, pr
 
 Use this skill for changes to `AGENTS.md`, provider imports, `.agents/`, `.claude/skills/`, `pipeliner.config.json`, schemas, blueprints, adoption tooling, or alignment validation.
 
+Use [pipeliner-update](../pipeliner-update/SKILL.md) to incorporate an upstream revision into an existing adopter; use this skill to author framework changes. Explicitly requested scheduled detection uses [pipeliner-monitor-updates](../pipeliner-monitor-updates/SKILL.md); maintaining the framework never schedules a monitor by itself.
+
 - Read the current specification, policy, skills, adapters, tests, and reference-provider documentation before editing.
 - Keep shared authority canonical. Root provider files import `AGENTS.md`; `.agents/skills/` contains full skills; `.claude/skills/` contains regular-file adapters with relative canonical links.
 - Keep skill names concise, descriptions discriminating, entrypoints focused, and conditional detail in linked references. Preserve automatic discovery unless the PM explicitly requests otherwise.

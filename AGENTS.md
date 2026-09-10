@@ -4,7 +4,9 @@ This repository uses Pipeliner: an evidence-first, agent-managed development and
 
 ## Pipeliner adoption entrypoint
 
-- Treat requests to install, bootstrap, adopt, align, or update Pipeliner in a repository as `pipeliner-adopt` work before applying the normal lifecycle to that target.
+- Treat requests to install, bootstrap, adopt, or initially align Pipeliner in a repository as `pipeliner-adopt` work before applying the normal lifecycle to that target. Requests to update an existing adoption use `pipeliner-update`; changes to the upstream framework itself use `pipeliner-maintain`.
+- Use `pipeliner-monitor-updates` only for explicitly requested scheduled update detection or management of an existing monitor. Discover supported persistent automation capabilities before creating a job; if unavailable, report that limitation. Neither adoption nor an update request authorizes scheduling, and detection never authorizes installation.
+- Running `pipeliner-update` or `pipeliner-monitor-updates` is direct framework maintenance: do not create or require a GitHub Issue, reserve the active Issue slot, move Project cards, or request Issue-creation/completion approval. Execute the user's requested operation, preserving unrelated active work and existing repository protections. Use a supporting PR only when repository controls require it. Report the target repository, operation, and exact revision or automation identity; this is an explicit exception to Issue-based lifecycle and communication rules below.
 - The target repository location is required for existing-repository adoption. Accept an absolute local checkout path, GitHub `OWNER/REPO`, GitHub repository URL, or an explicit statement that the current repository is the target. Explicit intent to create a new repository starts the creation interview.
 - If both target and creation intent are omitted, ask one concise question: `What is the target repository location, or do you want to create a new repository?` Then wait before target or Project mutation. Do not guess a repository from the current directory, recent work, or chat history.
 - For creation, resolve name, purpose, owner, explicit visibility and local destination before mutation. Verify absence and creation authority; authentication, permission, network failures and an ambiguous 404 are not proof of absence. Initialize the appropriate README and verify local/remote identity before adoption. Never inherit Pipeliner's public visibility.
@@ -55,6 +57,7 @@ This repository uses Pipeliner: an evidence-first, agent-managed development and
 6. Production release uses `pipeliner-release-production` only with the authorization and candidate identity required by the configured strategy.
 7. Completion uses `pipeliner-close-issue` only after release verification and the configured PM acceptance gate.
 8. Read-only diagnosis uses `pipeliner-pipeline-health`. Changes to these contracts use `pipeliner-maintain`.
+9. Updating an existing adoption uses `pipeliner-update`, preserving local policies and recording the reviewed upstream revision. User-requested monitoring uses `pipeliner-monitor-updates` only where a supported scheduler exists. These two operational workflows do not require GitHub Issues or consume the active Issue slot.
 
 ## Specification and implementation
 

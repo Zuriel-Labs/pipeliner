@@ -73,7 +73,7 @@ Acceptance: status leads with the Issue, approval acknowledgment identifies its 
 
 ## Autonomous Adoption Contract
 
-- Trigger `pipeliner-adopt` when the PM asks to install, bootstrap, adopt, align, or update Pipeliner in a repository.
+- Trigger `pipeliner-adopt` when the PM asks to install, bootstrap, adopt, or initially align Pipeliner in a repository. Existing-adoption updates use `pipeliner-update`; explicitly requested scheduled detection uses `pipeliner-monitor-updates`. Both operational skills run without a GitHub Issue under `specs/007-update-skills/spec.md`.
 - Accept an absolute local checkout path, GitHub `OWNER/REPO`, or GitHub repository URL as the target location. An explicitly named current repository is also valid.
 - If the request omits the target, ask exactly one focused question requesting the target repository location and wait. Reading Pipeliner guidance is allowed; target and Project mutations are not.
 - Prefer an existing target checkout. When only a GitHub identity is supplied and no checkout exists, create an isolated checkout in a safe workspace and report its exact path.

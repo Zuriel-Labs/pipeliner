@@ -1,0 +1,4 @@
+interface:
+  display_name: "Update Pipeliner"
+  short_description: "Update an adoption while preserving local policies"
+  default_prompt: "Use $pipeliner-update to update and publish Pipeliner in the current repository from a reviewed upstream revision, preserving local configuration without creating a GitHub Issue."

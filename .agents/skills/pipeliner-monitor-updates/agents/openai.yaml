@@ -1,0 +1,4 @@
+interface:
+  display_name: "Monitor Pipeliner Updates"
+  short_description: "Set up explicitly requested update monitoring"
+  default_prompt: "Use $pipeliner-monitor-updates to set up my requested Pipeliner update monitor if this environment supports persistent automations; resolve the target and schedule before creating it."

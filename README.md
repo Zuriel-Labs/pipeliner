@@ -13,7 +13,7 @@ The human-facing lifecycle and approval model is available in the self-contained
 Give an agent the following request, replacing `TARGET_REPOSITORY_LOCATION` with one of the supported target formats:
 
 ```text
-Install or align Pipeliner in TARGET_REPOSITORY_LOCATION. Begin at https://github.com/Zuriel-Labs/pipeliner, read its README.md and AGENTS.md, and use the pipeliner-adopt skill. Own the adoption end to end: verify the target identity, preserve its existing governance and work, derive its configuration from evidence, ask me only about unresolved material choices, preview and reconcile all file operations, align its GitHub Project and labels, validate everything, publish through the target's normal workflow, read the result back, and give me clear PM Testing steps. Do not deploy the application, change credentials, perform destructive migrations, or modify unrelated work.
+Install or align Pipeliner in TARGET_REPOSITORY_LOCATION. Begin at https://github.com/Zuriel-Labs/pipeliner, read its README.md and AGENTS.md, and use the pipeliner-adopt skill. Own the adoption end to end: verify the target identity, preserve its existing governance and work, derive its configuration from evidence, ask me only about unresolved material choices, preview and reconcile all file operations, align its GitHub Project and labels, validate everything, publish through the target's normal workflow, perform agent testing, remediate findings, rerun affected checks, read the published result back, verify cleanup, and report completion without PM Testing or a bootstrap-completion approval. Do not deploy the application, change credentials, perform destructive migrations, or modify unrelated work.
 ```
 
 `TARGET_REPOSITORY_LOCATION` may be:
@@ -42,7 +42,7 @@ For a new repository, say that you want one created. The agent asks for missing 
 5. Run a dry-run, reconcile every collision without blind overwrites, and apply only a conflict-free plan.
 6. Align canonical policy, skills, provider adapters, repository workflows, labels, and the GitHub Project without weakening stronger target-specific rules.
 7. Run Pipeliner validation and every target quality gate, publish the focused changes, and read back the repository, Issue, pull request, checks, and Project state.
-8. Give the PM a concise result with limitations and numbered PM Testing steps, including the expected result for each action.
+8. Perform agent testing, remediate findings, rerun affected checks, verify publication and cleanup, and report the result. Adoption and updates require no PM Testing, PM acceptance, or bootstrap-completion approval.
 
 This request authorizes work only in the named target repository and its linked Project. Deployment, credentials, destructive migration, and unrelated backlog work remain outside adoption authority.
 
@@ -234,12 +234,13 @@ Use when platform or host behavior cannot be proven from one environment. Each c
 ### No application release
 
 Use `none` for documentation or tooling repositories that have no application deployment. Source commit, Git tree, checks, review, and configured PM acceptance still define completion.
-
 ## PM Testing standard
 
-Every review and release handoff must tell the PM exactly what to test. It includes the target, prerequisites, numbered actions, an expected result for each action, focused regressions, candidate identity, known limitations, and the exact approval phrase when approval is next.
+Adoption and framework updates are exempt: the agent runs test suites and agent testing, remediates findings, reruns affected checks, verifies publication and cleanup, and reports completion. Configure application PM gates for future work without invoking them during bootstrap.
 
-Automated tests and agent QA do not replace Project Manager QA. A PM finding returns the Issue to In Progress, invalidates affected approval, and starts a fresh remediation and verification loop.
+For application work, every review and release handoff must tell the PM exactly what to test. It includes the target, prerequisites, numbered actions, an expected result for each action, focused regressions, candidate identity, known limitations, and the exact approval phrase when approval is next.
+
+For application work, automated tests and agent QA do not replace Project Manager QA. A PM finding returns the Issue to In Progress, invalidates affected approval, and starts a fresh remediation and verification loop.
 
 ## Reuse the quality workflow
 

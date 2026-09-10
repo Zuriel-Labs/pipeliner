@@ -82,10 +82,18 @@ test("autonomous adoption accepts the complete target and ownership contract", (
       agents:
         "Target repository location is required. If omitted, ask one concise question and wait before target or Project mutation.",
       adoptionSkill:
-        "Own the complete autonomous adoption workflow: resolve identity, create the profile, dry-run, reconcile conflicts, align the GitHub Project, validate, read back, and provide PM Testing steps.",
+        "Own the complete autonomous adoption workflow: resolve identity, create the profile, dry-run, reconcile conflicts, align the GitHub Project, validate, read back, perform agent testing, remediate findings, and rerun affected checks. No PM Testing is required for adoption or updates.",
     }),
     [],
   );
+});
+
+test("adoption rejects the obsolete PM handoff without agent remediation", () => {
+  const errors = validateAdoptionContract({
+    agents: "Target repository location is required. If omitted, ask one concise question and wait before target or Project mutation.",
+    adoptionSkill: "Own the complete autonomous adoption workflow: resolve identity, create the profile, dry-run, reconcile conflicts, align the GitHub Project, validate, read back, and provide PM Testing steps.",
+  });
+  assert.ok(errors.some(error => error.includes("complete autonomous adoption workflow")));
 });
 
 test("README gives an agent a target-driven adoption entrypoint", async () => {

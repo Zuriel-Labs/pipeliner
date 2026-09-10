@@ -28,4 +28,6 @@ Monitoring must require a user request, an explicit target, schedule/timezone an
 
 ## Non-goals and risks
 
+PM clarification: `pipeliner-adopt` and `pipeliner-update` require no PM Testing, PM acceptance, or bootstrap-completion approval. Completion requires configured test suites, agent testing of the installed workflows, remediation of all findings with affected checks rerun, publication readback, and cleanup. Configure future application QA without starting or waiting for its PM turns during bootstrap. Preserve application release/PM gates and existing branch controls. Implement this exception in shared policy, skills, metadata, README and adoption validation; verify the validator accepts agent-only completion and rejects the obsolete PM-handoff contract before publishing.
+
 No automatic scheduling during adoption; no background detection infrastructure, application changes, schema migration, or new provider SDK. Tool schemas are discovered at execution time to avoid embedding stale APIs. Source records are evidence maintained by the agent, not cryptographic proof of semantic equivalence. Existing instruction files are conflict-reviewed, never blindly overwritten.

@@ -84,6 +84,8 @@ This repository uses Pipeliner: an evidence-first, agent-managed development and
 
 ## PM Testing handoff
 
+`pipeliner-adopt` and `pipeliner-update` are exempt from PM Testing and PM acceptance. Do not request PM Testing steps, a PM test session, or a bootstrap-completion approval phrase. The agent runs the configured test suites and agent testing, remediates findings, reruns affected checks until clean, verifies publication and cleanup, then reports completion. Configure future application QA without starting or waiting for its PM turns during bootstrap. This exception overrides generic handoff/completion rules for these operations only; application development/release gates, material-choice clarification, and existing repository protections still apply.
+
 Every review, candidate, Production, and completion handoff must lead with the owning Issue as defined in Issue-based communication, be user-friendly, and include a `PM Testing steps` section with:
 
 1. the exact target environment, URL, application, or artifact;

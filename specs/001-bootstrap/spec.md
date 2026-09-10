@@ -1,5 +1,7 @@
 # Spec: Pipeliner Bootstrap Repository
 
+Current bootstrap completion exception: `pipeliner-adopt` and `pipeliner-update` finish through test suites, agent testing, remediation with affected checks rerun, publication readback, and cleanup. They require no PM Testing, PM acceptance, or bootstrap-completion approval. This supersedes historical PM-handoff requirements for bootstrap in this baseline and `specs/005-local-qa/spec.md`; future application work retains its configured PM gates. See `specs/007-update-skills/spec.md`.
+
 ## Objective
 
 Create `Zuriel-Labs/pipeliner` as a public, MIT-licensed source of truth for adopting an agent-managed development and release pipeline in an arbitrary repository. Consolidate the durable methodology demonstrated by Versa, Strata, PointSite Builder, and Spectrune while keeping product, stack, host, and deployment details configurable.

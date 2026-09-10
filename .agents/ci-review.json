@@ -7,7 +7,7 @@
         ".github/workflows/quality.yml": "afaa26443693e044fc0fee8a956d3303c4accf6feca5ecdfedeb9f7d546a9e51",
         "package.json": "591159744983ea992feb3a9130162509832ee07efac3c2228d1b26ce71892213",
         "scripts/validate-repository.mjs": "fb01f8962a59a438f66b985a54babe9ee03008c0f2b6e54307e37952994cacf8",
-        "scripts/lib/validation.mjs": "27d959c4b468cb7106f30935606af748bf4711dc65c991eaaf61f161e890f084",
+        "scripts/lib/validation.mjs": "04ffb96524fdef12bec0c99a50f1583ece0507d7079e4f43bf3ed05522bcc07b",
         "scripts/lib/config.mjs": "0ea784bb8c944a11f73ecd5b65b71a251df74ff79d057232725ca7ce64b574b4",
         "scripts/lib/qa.mjs": "62ded45fade6ed0713559aa6f520d616cc65ddf2e535be87c7184507a823778d",
         "scripts/lib/cleanup.mjs": "92d37747b5456b00cf16640f8ea7ed0d29b1209bf09b4b06c0e8f95d127ebd16",

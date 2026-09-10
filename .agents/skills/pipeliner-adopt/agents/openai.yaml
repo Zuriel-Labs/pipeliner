@@ -1,4 +1,4 @@
 interface:
   display_name: "Adopt Pipeliner"
   short_description: "Interview, create or adopt, and configure local QA"
-  default_prompt: "Use $pipeliner-adopt for repository creation or adoption. Ask for a target or creation intent, discover developer environments and independent local QA turns, preserve policies, and verify the installation through PM Testing."
+  default_prompt: "Use $pipeliner-adopt for repository creation or adoption. Ask for a target or creation intent, discover developer environments and independent local QA turns, preserve policies, and verify the installation through agent testing and remediation without PM Testing."

@@ -105,7 +105,10 @@ export function validateAdoptionContract({ agents = "", adoptionSkill = "" } = {
     "align the GitHub Project",
     "validate",
     "read back",
-    "PM Testing steps",
+    "agent testing",
+    "remediate findings",
+    "rerun affected checks",
+    "No PM Testing is required for adoption or updates",
   ];
   const ownsWorkflow = /complete autonomous adoption workflow/i.test(adoptionSkill);
   if (!ownsWorkflow || adoptionSteps.some((step) => !adoptionSkill.includes(step))) {

@@ -29,6 +29,7 @@
         "owner": { "$ref": "#/$defs/nonEmptyString" },
         "number": { "type": "integer", "minimum": 0 },
         "title": { "$ref": "#/$defs/nonEmptyString" },
+        "visibility": { "enum": ["PUBLIC", "PRIVATE"], "description": "Expected Project visibility. Omission reports observed visibility without inheriting or changing it." },
         "statusField": { "$ref": "#/$defs/nonEmptyString" },
         "statuses": {
           "type": "object",
@@ -123,6 +124,11 @@
           "minItems": 2,
           "uniqueItems": true,
           "items": { "$ref": "#/$defs/nonEmptyString" }
+        },
+        "preReleaseIdentity": {
+          "type": "array", "minItems": 2, "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonEmptyString" },
+          "description": "Identity available before merge/release approval, including sourceCommit and gitTree; subset of final candidateIdentity. None/direct legacy profiles default to source/tree, others retain full identity pending discovery."
         },
         "environments": {
           "type": "array",

@@ -117,11 +117,18 @@ test("compareProjectSnapshot reports exact live drift", () => {
     views: blueprint.views.map(({ name, layout }) => ({ name, layout })),
     workflows: blueprint.workflows.map(({ name, enabled }) => ({ name, enabled })),
   };
-  assert.deepEqual(compareProjectSnapshot(blueprint, snapshot), []);
+  const profile = {
+    version: 1,
+    repository: { owner: 'Example-Org', name: 'example', defaultBranch: 'main', projectManager: 'pm' },
+    project: { owner: 'Example-Org', number: 1, title: 'Example', visibility: 'PUBLIC', statusField: 'Status', statuses: { backlog: 'Backlog', onHold: 'On Hold', inProgress: 'In Progress', inReview: 'In Review', done: 'Done' }, metadataFields: Object.fromEntries(blueprint.fields.slice(1).map(field => [field.name.toLowerCase(), field])) },
+    workflow: { maxActiveIssues: 1, branchPattern: 'issue/{number}', issueReference: 'Refs #{number}', approvalPhrases: { issueCreation: 'create', production: 'release', completion: 'complete', nativeCandidate: 'beta' }, pmTesting: { required: true, terms: ['Project Manager QA', 'PM Testing'], requiredSections: ['target', 'setup', 'actions', 'results', 'regressions'] } },
+    quality: { commands: ['test'], requiredChecks: [] }, release: { strategy: 'none', candidateIdentity: ['sourceCommit', 'gitTree'], environments: [] },
+  };
+  assert.deepEqual(compareProjectSnapshot(blueprint, snapshot, profile), []);
 
   snapshot.workflows.find((workflow) => workflow.name === "Pull request merged").enabled = true;
   snapshot.repositories = [];
-  const errors = compareProjectSnapshot(blueprint, snapshot);
+  const errors = compareProjectSnapshot(blueprint, snapshot, profile);
   assert.ok(errors.some((error) => error.includes("repository link")));
   assert.ok(errors.some((error) => error.includes("Pull request merged")));
 });

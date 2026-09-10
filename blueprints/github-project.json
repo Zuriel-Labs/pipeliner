@@ -34,7 +34,7 @@
     {
       "name": "Backlog",
       "layout": "BOARD_LAYOUT",
-      "purpose": "Prioritized inactive work available for PM selection."
+      "purpose": "Ready work selected by the agent on a start request, honoring PM direction and configured priority."
     },
     {
       "name": "Kanban",

@@ -17,3 +17,5 @@ Include:
 9. each required local QA environment and its developer/PM owner, current and next turn, suite state, candidate availability, and any PM-retained resource with cleanup owner and trigger. An unavailable host or unverified cleanup remains pending.
 
 Use `Project Manager QA` or `PM Testing`. Keep the language approachable and explain product terms that are not obvious. Agent test evidence supports the checklist but never approves it.
+
+Present only the current gate and real target. Local QA, review/native approval, Production authorization and final release acceptance are distinct unless the repository explicitly configures the same gate for the same candidate. Never ask the PM to approve a future deployment or perform routine setup/cleanup the agent can safely perform. Source-only tooling uses source/scenario inspection rather than invented Production steps. After a response, own the next authorized transition; feedback after merge follows a fresh supporting PR on the same Issue. Clarifications follow native-app questions with a message fallback and indefinite waiting, never a timer.

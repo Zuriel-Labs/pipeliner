@@ -75,6 +75,7 @@ export function validateProfile(profile) {
     throw new Error("project.number must be a non-negative integer");
   }
   requireString(project.title, "project.title");
+  if (project.visibility !== undefined && !['PUBLIC', 'PRIVATE'].includes(project.visibility)) throw new Error('project.visibility must be PUBLIC or PRIVATE; omission preserves observed visibility');
   requireString(project.statusField, "project.statusField");
   const statuses = requireObject(project.statuses, "project.statuses");
   const statusValues = ["backlog", "onHold", "inProgress", "inReview", "done"].map((name) =>
@@ -116,6 +117,11 @@ export function validateProfile(profile) {
     throw new Error(`release.strategy must be one of ${[...RELEASE_STRATEGIES].join(", ")}`);
   }
   requireStringArray(release.candidateIdentity, "release.candidateIdentity", 2);
+  for (const key of ['sourceCommit', 'gitTree']) if (!release.candidateIdentity.includes(key)) throw new Error(`release.candidateIdentity requires ${key}`);
+  if (release.preReleaseIdentity !== undefined) {
+    requireStringArray(release.preReleaseIdentity, 'release.preReleaseIdentity', 2);
+    if (['sourceCommit', 'gitTree'].some(key => !release.preReleaseIdentity.includes(key)) || release.preReleaseIdentity.some(key => !release.candidateIdentity.includes(key))) throw new Error('release.preReleaseIdentity must include sourceCommit/gitTree and be a subset of candidateIdentity');
+  }
   if (!Array.isArray(release.environments)) throw new Error("release.environments must be an array");
   release.environments.forEach(validateEnvironment);
 

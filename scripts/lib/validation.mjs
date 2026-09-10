@@ -30,6 +30,29 @@ async function readText(filePath, errors, label = filePath) {
   }
 }
 
+const REQUIRED_SKILLS = ['adopt', 'audit-backlog', 'close-issue', 'create-issue', 'maintain', 'monitor-updates', 'pipeline-health', 'release-candidate', 'release-production', 'review-issue', 'update', 'work-issue'].map(name => `pipeliner-${name}`);
+
+async function validateLocalLinks(root, files) {
+  const errors = [];
+  for (const file of files.filter(file => /\.(md|html)$/.test(file))) {
+    let text;
+    try { text = await readFile(file, 'utf8'); }
+    catch { errors.push(`unreadable reference source: ${path.relative(root, file)}`); continue; }
+    const links = [...text.matchAll(/\]\(([^)\s]+)\)/g), ...text.matchAll(/href="([^"]+)"/g)];
+    for (const match of links) {
+      const link = match[1].split('#')[0];
+      if (!link || /^[a-z][a-z0-9+.-]*:/i.test(link)) continue;
+      const target = path.resolve(path.dirname(file), link);
+      try {
+        if (!target.startsWith(root + path.sep) || !(await lstat(target)).isFile()) throw new Error('missing or unsafe target');
+      } catch {
+        errors.push(`${path.relative(root, file)} has broken local reference: ${match[1]}`);
+      }
+    }
+  }
+  return errors;
+}
+
 function sameValues(actual, expected) {
   return actual.length === expected.length && actual.every((value, index) => value === expected[index]);
 }
@@ -156,22 +179,24 @@ export function validateProjectBlueprint(blueprint) {
   return blueprint;
 }
 
-export function compareProjectSnapshot(blueprint, snapshot) {
+export function compareProjectSnapshot(blueprint, snapshot, profile) {
   validateProjectBlueprint(blueprint);
+  validateProfile(profile);
   const errors = [];
-  if (snapshot.title !== blueprint.workingExample.title) {
-    errors.push(`title mismatch: expected ${blueprint.workingExample.title}; found ${snapshot.title}`);
+  if (snapshot.title !== profile.project.title) {
+    errors.push(`title mismatch: expected ${profile.project.title}; found ${snapshot.title}`);
   }
-  const expectsPublic = blueprint.workingExample.visibility === "PUBLIC";
-  if (snapshot.public !== expectsPublic) {
-    errors.push(`visibility mismatch: expected ${blueprint.workingExample.visibility}`);
+  if (profile.project.visibility !== undefined && snapshot.public !== (profile.project.visibility === 'PUBLIC')) {
+    errors.push(`visibility mismatch: expected ${profile.project.visibility}`);
   }
-  if (!snapshot.repositories.includes(blueprint.workingExample.repository)) {
-    errors.push(`repository link missing: ${blueprint.workingExample.repository}`);
+  const repository = `${profile.repository.owner}/${profile.repository.name}`;
+  if (!snapshot.repositories.some(name => name.toLowerCase() === repository.toLowerCase())) {
+    errors.push(`repository link missing: ${repository}`);
   }
 
   const fields = new Map(snapshot.fields.map((field) => [field.name, field]));
-  for (const expected of blueprint.fields) {
+  const expectedFields = [{ name: profile.project.statusField, options: ['backlog', 'onHold', 'inProgress', 'inReview', 'done'].map(key => profile.project.statuses[key]) }, ...Object.values(profile.project.metadataFields)];
+  for (const expected of expectedFields) {
     const actual = fields.get(expected.name);
     if (!actual) errors.push(`field missing: ${expected.name}`);
     else if (!sameValues(actual.options ?? [], expected.options)) {
@@ -297,10 +322,9 @@ export async function validateRepository(rootPath, { requireConfig = true } = {}
   }
 
   if (requireConfig) {
-    if (!skillNames.includes("pipeliner-adopt")) {
-      errors.push("canonical pipeliner-adopt skill is required");
-    }
+    for (const name of REQUIRED_SKILLS) if (!skillNames.includes(name)) errors.push(`canonical ${name} skill is required`);
     errors.push(...validateAdoptionContract({ agents, adoptionSkill }));
+    errors.push(...await validateLocalLinks(root, [path.join(root, 'AGENTS.md'), ...await walkFiles(skillsRoot), ...await walkFiles(adapterRoot)]));
   }
 
   for (const managedText of [agents, policy]) {

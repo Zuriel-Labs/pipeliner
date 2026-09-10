@@ -16,10 +16,10 @@
   "workflow": {
     "maxActiveIssues": 1, "branchPattern": "issue/{number}-{slug}", "issueReference": "Refs #{number}",
     "approvalPhrases": {
-      "issueCreation": "Approved to create this exact GitHub Issue",
-      "production": "Approved to merge and deploy production",
-      "completion": "Approved to complete Issue #{number}",
-      "nativeCandidate": "Beta approved"
+      "issueCreation": "Approved",
+      "production": "Approved",
+      "completion": "Approved",
+      "nativeCandidate": "Approved"
     },
     "pmTesting": {
       "required": true, "terms": ["Project Manager QA", "PM Testing"],
@@ -35,36 +35,36 @@
       {
         "name": "Development", "role": "review", "url": "https://development.example.invalid",
         "buildCommand": "./scripts/build.sh development", "deployCommand": "./scripts/deploy.sh development",
-        "verifyCommand": "./scripts/verify.sh development", "approvalPhrase": "Approved to stabilize Release Issue #{number}", "promoteWithoutRebuild": false
+        "verifyCommand": "./scripts/verify.sh development", "approvalPhrase": "Approved", "promoteWithoutRebuild": false
       },
       {
         "name": "Beta", "role": "review", "url": "https://beta.example.invalid",
         "buildCommand": "./scripts/build.sh beta", "deployCommand": "./scripts/deploy.sh beta",
-        "verifyCommand": "./scripts/verify.sh beta", "approvalPhrase": "Approved to merge and deploy production", "promoteWithoutRebuild": false
+        "verifyCommand": "./scripts/verify.sh beta", "approvalPhrase": "Approved", "promoteWithoutRebuild": false
       },
       {
         "name": "Production", "role": "production", "url": "https://example.invalid",
         "buildCommand": "", "deployCommand": "./scripts/promote.sh production",
-        "verifyCommand": "./scripts/verify.sh production", "approvalPhrase": "Approved to complete Issue #{number}", "promoteWithoutRebuild": true
+        "verifyCommand": "./scripts/verify.sh production", "approvalPhrase": "Approved", "promoteWithoutRebuild": true
       }
     ],
     "cycle": {
       "phases": [
         {
           "id": "development", "kind": "development", "branch": "develop", "environments": ["Development"],
-          "approvalPhrase": "Approved to stabilize Release Issue #{number}",
+          "approvalPhrase": "Approved",
           "readiness": ["Release scope Issues are verified", "All QA turns and PMs approve the aggregate candidate", "Release scope is frozen"],
           "promotion": "source", "forwardPortTo": []
         },
         {
           "id": "beta", "kind": "stabilization", "branch": "beta", "environments": ["Beta"],
-          "approvalPhrase": "Approved to merge and deploy production",
+          "approvalPhrase": "Approved",
           "readiness": ["Frozen release scope has no unresolved blockers", "All QA turns and PMs approve the aggregate candidate", "Beta fixes are integrated and verified in development", "Rollback target is verified"],
           "promotion": "distinct-artifact", "forwardPortTo": ["development"]
         },
         {
           "id": "production", "kind": "production", "branch": "main", "environments": ["Production"],
-          "approvalPhrase": "Approved to complete Issue #{number}",
+          "approvalPhrase": "Approved",
           "readiness": ["Approved Beta artifact is promoted without rebuilding", "Production identity and runtime are verified", "All QA turns and PMs accept the aggregate release"],
           "promotion": "same-artifact", "forwardPortTo": []
         }
@@ -82,6 +82,6 @@
       "setup": ["./scripts/setup-qa.sh"], "suite": ["./scripts/check.sh", "./scripts/build.sh qa", "./scripts/smoke.sh"],
       "teardown": ["./scripts/cleanup-qa.sh"]
     }],
-    "turns": [{ "id": "local", "developer": "developer-a", "environment": "local-linux", "pm": "project-manager", "approvalPhrase": "Local QA approved" }]
+    "turns": [{ "id": "local", "developer": "developer-a", "environment": "local-linux", "pm": "project-manager", "approvalPhrase": "Approved" }]
   }
 }

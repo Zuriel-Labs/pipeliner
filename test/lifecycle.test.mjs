@@ -50,11 +50,14 @@ test('all release strategies order approval before mutation and final acceptance
   assert.ok(direct.indexOf('production-approval') < direct.indexOf('merge'));
   assert.ok(direct.indexOf('verify-release') < direct.indexOf('completion-approval'));
   assert.ok(!direct.includes('review-deploy'));
-  assert.deepEqual(releaseStages('none'), ['agent-review', 'local-qa', 'completion-approval', 'merge', 'verify-source', 'close']);
+  assert.deepEqual(releaseStages('none'), ['agent-review', 'local-qa', 'merge', 'verify-source', 'close']);
   const immutable = releaseStages('immutable-promotion');
   assert.ok(immutable.indexOf('review-deploy') < immutable.indexOf('production-approval'));
   assert.ok(immutable.includes('promote-same-artifact'));
-  assert.ok(releaseStages('multi-environment').includes('native-approvals'));
+  assert.deepEqual(releaseStages('multi-environment'), ['agent-review', 'prepare-native', 'local-qa', 'merge', 'verify-release', 'close']);
+  const nativeProduction = releaseStages('multi-environment', { hasProduction: true });
+  assert.ok(nativeProduction.indexOf('production-approval') < nativeProduction.indexOf('merge'));
+  assert.ok(nativeProduction.indexOf('completion-approval') > nativeProduction.indexOf('verify-release'));
   assert.throws(() => releaseStages('unknown'), /strategy/);
 });
 

@@ -11,7 +11,7 @@ No PM Testing is required for adoption or updates. The agent owns test suites, a
 
 For an existing adoption's upstream update, use [pipeliner-update](../pipeliner-update/SKILL.md). First installation and repository creation stay here. Scheduling update detection requires an explicit user request and [pipeliner-monitor-updates](../pipeliner-monitor-updates/SKILL.md); never schedule it as an adoption default.
 
-Install and verify the [Issue-based communication contract](../../../AGENTS.md#issue-based-communication) in the target's `AGENTS.md` and canonical skills, including reconciled files. Status, handoffs, and approval acknowledgments must lead with the owning Issue; linked pull requests remain supporting evidence. Preserve configured gate phrases and use the Issue number for completion approval placeholders. If adoption has no Issue yet, state that and follow target Issue-creation governance without inventing a number.
+Install and verify the [Issue-based communication contract](../../../AGENTS.md#issue-based-communication) in the target's `AGENTS.md` and canonical skills, including reconciled files. Status, handoffs, and approval acknowledgments must lead with the owning Issue; linked pull requests remain supporting evidence. Set all future approval phrases to exactly `Approved`; identify the Issue, Human, candidate, gate and authorized outcome in the request. Preserve gate scope and historical evidence. If adoption has no Issue yet, state that without inventing a number; the adoption exception does not require an Issue.
 
 ## Target repository location gate
 

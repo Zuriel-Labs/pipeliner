@@ -37,10 +37,11 @@ export function identityKeys(profile, phase) {
 
 export function releaseStages(strategy, { hasProduction = false } = {}) {
   switch (strategy) {
-    case 'none': return ['agent-review', 'local-qa', 'completion-approval', 'merge', 'verify-source', 'close'];
+    // Local QA includes every required Human approval; no duplicate closure gate.
+    case 'none': return ['agent-review', 'local-qa', 'merge', 'verify-source', 'close'];
     case 'direct-production': return ['agent-review', 'local-qa', 'production-approval', 'merge', 'deploy', 'verify-release', 'completion-approval', 'close'];
     case 'immutable-promotion': return ['agent-review', 'review-deploy', 'local-qa', 'production-approval', 'merge', 'promote-same-artifact', 'verify-release', 'completion-approval', 'close'];
-    case 'multi-environment': return ['agent-review', 'prepare-native', 'local-qa', 'native-approvals', ...(hasProduction ? ['production-approval'] : []), 'merge', ...(hasProduction ? ['deploy'] : []), 'verify-release', 'completion-approval', 'close'];
+    case 'multi-environment': return ['agent-review', 'prepare-native', 'local-qa', ...(hasProduction ? ['production-approval'] : []), 'merge', ...(hasProduction ? ['deploy'] : []), 'verify-release', ...(hasProduction ? ['completion-approval'] : []), 'close'];
     default: throw new Error('unknown release strategy');
   }
 }

@@ -73,6 +73,13 @@ function entry(relativePath, targetRoot, content, sourcePath = null) {
 
 export async function planAdoption({ sourceRoot, targetRoot, profile, reconciliation }) {
   validateProfile(profile);
+  const phrases = [
+    ...Object.values(profile.workflow.approvalPhrases),
+    ...(profile.qa?.turns ?? []).map(turn => turn.approvalPhrase),
+    ...(profile.release.cycle?.phases ?? []).map(phase => phase.approvalPhrase),
+    ...profile.release.environments.filter(environment => environment.approvalPhrase !== undefined).map(environment => environment.approvalPhrase),
+  ];
+  if (phrases.some(phrase => phrase !== 'Approved')) throw new Error('Bootstrap/update requires every approval phrase to be exactly Approved. Reconcile the profile wording without changing gate scope or historical evidence.');
   const source = await realpath(sourceRoot);
   const target = await realpath(targetRoot);
   if (!(await exists(source))) throw new Error(`source root does not exist: ${source}`);

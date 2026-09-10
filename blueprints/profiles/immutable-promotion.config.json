@@ -54,10 +54,10 @@
     "branchPattern": "issue/{number}-{slug}",
     "issueReference": "Refs #{number}",
     "approvalPhrases": {
-      "issueCreation": "Approved to create this exact GitHub Issue",
-      "production": "Approved to merge and deploy production",
-      "completion": "Approved to complete Issue #{number}",
-      "nativeCandidate": "Beta approved"
+      "issueCreation": "Approved",
+      "production": "Approved",
+      "completion": "Approved",
+      "nativeCandidate": "Approved"
     },
     "pmTesting": {
       "required": true,
@@ -99,7 +99,7 @@
         "buildCommand": "npm run build:candidate",
         "deployCommand": "npm run deploy:canary",
         "verifyCommand": "npm run verify:canary",
-        "approvalPhrase": "Approved to merge and deploy production",
+        "approvalPhrase": "Approved",
         "promoteWithoutRebuild": false
       },
       {
@@ -109,7 +109,7 @@
         "buildCommand": "",
         "deployCommand": "npm run promote:production",
         "verifyCommand": "npm run verify:production",
-        "approvalPhrase": "Approved to merge and deploy production",
+        "approvalPhrase": "Approved",
         "promoteWithoutRebuild": true
       }
     ]
@@ -163,7 +163,7 @@
         "developer": "developer-a",
         "environment": "local-linux",
         "pm": "project-manager",
-        "approvalPhrase": "Local QA approved"
+        "approvalPhrase": "Approved"
       }
     ]
   }

@@ -41,10 +41,10 @@
     "branchPattern": "issue/{number}-{slug}",
     "issueReference": "Refs #{number}",
     "approvalPhrases": {
-      "issueCreation": "Approved to create this exact GitHub Issue",
-      "production": "Approved to merge and deploy production",
-      "completion": "Approved to complete Issue #{number}",
-      "nativeCandidate": "Beta approved"
+      "issueCreation": "Approved",
+      "production": "Approved",
+      "completion": "Approved",
+      "nativeCandidate": "Approved"
     },
     "pmTesting": {
       "required": true,
@@ -76,6 +76,6 @@
       "suite": ["npm run check"],
       "teardown": []
     }],
-    "turns": [{ "id": "local", "developer": "brimdor", "environment": "local-mac", "pm": "brimdor", "approvalPhrase": "Beta approved" }]
+    "turns": [{ "id": "local", "developer": "brimdor", "environment": "local-mac", "pm": "brimdor", "approvalPhrase": "Approved" }]
   }
 }

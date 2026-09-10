@@ -17,3 +17,8 @@ Avoid compatibility silently implying approvals: explicit migration, no invented
 
 ## Acceptance and verification
 Follow the complete approved Issue #9 body. Behavioral tests cover message-only waiting, portable/mismatched Git roots, explicit participant coverage, one/two/three pairs, middle/last remediation, missing host/PM/Showcase/cleanup, duplicate rounds and stale evidence, branch routing/freeze/blockers/forward-port, aggregate all-PM approvals, artifact continuity, legacy discovery, installed CLI, fresh/repeated/customized non-Node adoption. Run changed-skill validation and npm run check. Review transitive CI imports before refreshing digests. Report provider documentation checks separately from live provider execution.
+# Follow-up: one approval per tested candidate and outcome
+
+The final required PM QA approval (for example `Approved`) authorizes source-only/native-only integration, verification, Issue closure and cleanup. Do not append an Issue-completion confirmation for the same candidate. Every configured pair must still approve the latest candidate; an intermediate pair approval only advances the baton. Showcases explain the authorized outcome before approval. Unexpected candidate changes invalidate approval. Distinct Production authorization and post-deployment testing remain distinct gates; final PM acceptance itself authorizes closure without a further administrative confirmation. Existing phrase fields remain compatible and describe gate wording, not additional gates.
+
+Verification: regression tests for source-only and native-only stage ordering, Production gate preservation, full repository checks, and canonical skill validation. No application deployment or changes to adopter repositories are in scope.

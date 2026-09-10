@@ -1,5 +1,7 @@
 # Pipeliner
 
+Every official approval response is exactly `Approved`. The agent's request identifies the Issue or proposed draft, PM, candidate, gate and authorized outcome. Final required QA approval also authorizes source-only/native-only integration, verification, Issue closure and cleanup; no second Issue-completion confirmation follows. Intermediate pair approvals continue the baton. Distinct release-stage testing and Production authorization retain their own scoped requests. Bootstrap/update reconciles legacy phrase fields to `Approved` without rewriting historical evidence.
+
 [![Quality](https://github.com/Zuriel-Labs/pipeliner/actions/workflows/quality.yml/badge.svg)](https://github.com/Zuriel-Labs/pipeliner/actions/workflows/quality.yml)
 
 Pipeliner is a public, project-agnostic bootstrap for agent-managed development and release pipelines. It gives a repository one evidence-first path from a coherent GitHub Issue through implementation, review, release, Project Manager QA, and verified completion.

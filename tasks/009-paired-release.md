@@ -1,5 +1,13 @@
 # Issue #9 implementation plan
 
+## PM-requested follow-up: approval redundancy
+
+- Reopened the same Issue after PM feedback; use a fresh remediation PR from main.
+- Remove duplicate source/native-only completion stages; include integration, verification, closure and cleanup in final QA acceptance.
+- Set every official future response to `Approved`; bind its authority to the pending scoped request, never phrase equality. Preserve historical evidence and distinct Production/stage decisions.
+- Align bootstrap profiles, adoption enforcement, canonical contracts and Dark Mode policy. Validate stage ordering, exact response rejection, PM/candidate/Issue isolation and realistic installed CLI scenarios.
+- Present one fresh Showcase for the changed candidate; its `Approved` response completes the authorized merge/close/cleanup flow without another prompt.
+
 1. Specify shared contracts and compatibility; add behavioral regression tests.
 2. Implement home resolver, message decisions, typed participants and Showcase validation.
 3. Implement rotating QA history/current-owner evaluation and CLI support.

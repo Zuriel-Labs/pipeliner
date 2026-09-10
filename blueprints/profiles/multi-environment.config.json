@@ -54,10 +54,10 @@
     "branchPattern": "issue/{number}-{slug}",
     "issueReference": "Refs #{number}",
     "approvalPhrases": {
-      "issueCreation": "Approved to create this exact GitHub Issue",
-      "production": "Approved to merge and deploy production",
-      "completion": "Approved to complete Issue #{number}",
-      "nativeCandidate": "Beta approved"
+      "issueCreation": "Approved",
+      "production": "Approved",
+      "completion": "Approved",
+      "nativeCandidate": "Approved"
     },
     "pmTesting": {
       "required": true,
@@ -99,7 +99,7 @@
         "buildCommand": "./scripts/build-beta.sh --no-publish",
         "deployCommand": "",
         "verifyCommand": "python -m example_app --selftest",
-        "approvalPhrase": "Beta approved",
+        "approvalPhrase": "Approved",
         "promoteWithoutRebuild": false
       },
       {
@@ -109,7 +109,7 @@
         "buildCommand": "scripts\\build-beta.bat --no-publish",
         "deployCommand": "",
         "verifyCommand": "python -m example_app --selftest",
-        "approvalPhrase": "Beta approved",
+        "approvalPhrase": "Approved",
         "promoteWithoutRebuild": false
       }
     ]
@@ -196,14 +196,14 @@
         "developer": "developer-a",
         "environment": "windows",
         "pm": "project-manager",
-        "approvalPhrase": "Windows QA approved"
+        "approvalPhrase": "Approved"
       },
       {
         "id": "macos",
         "developer": "developer-b",
         "environment": "macos",
         "pm": "project-manager",
-        "approvalPhrase": "macOS QA approved"
+        "approvalPhrase": "Approved"
       }
     ]
   }

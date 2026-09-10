@@ -84,6 +84,7 @@
   },
   "release": {
     "strategy": "direct-production",
+    "preReleaseIdentity": ["sourceCommit", "gitTree"],
     "candidateIdentity": [
       "sourceCommit",
       "gitTree",

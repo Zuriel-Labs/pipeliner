@@ -53,6 +53,21 @@ test('temporary customized repository adopts, validates and repeats without eras
   assert.equal(await readFile(path.join(targetRoot, 'unrelated.txt'), 'utf8'), 'preserved');
 });
 
+test('non-Node adoption installs stack-neutral instructions and usable module entrypoints', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'pipeliner-non-node-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const profile = JSON.parse(await readFile(path.join(sourceRoot, 'blueprints/profiles/direct-production.config.json')));
+  profile.quality.commands = ['python3 -m unittest'];
+  const plan = await planAdoption({ sourceRoot, targetRoot: root, profile });
+  await applyAdoptionPlan(plan);
+  const agents = await readFile(path.join(root, 'AGENTS.md'), 'utf8');
+  assert.doesNotMatch(agents, /npm (ci|test|run check|run validate)/);
+  assert.match(agents, /quality\.commands/);
+  assert.match(agents, /reviewed.*source checkout/);
+  assert.ok(!(await readdir(root)).includes('package.json'));
+  execFileSync(process.execPath, ['--input-type=module', '-e', "await import('./scripts/lib/qa.mjs'); await import('./scripts/lib/project.mjs');"], { cwd: root, stdio: 'pipe' });
+});
+
 test('legacy adoption CLI requires discovery without changing the target', async t => {
   const parent = await mkdtemp(path.join(os.tmpdir(), 'pipeliner-legacy-'));
   t.after(() => rm(parent, { recursive: true, force: true }));
@@ -61,4 +76,17 @@ test('legacy adoption CLI requires discovery without changing the target', async
   const config = path.join(parent, 'profile.json'); await writeFile(config, JSON.stringify(profile));
   assert.throws(() => execFileSync(process.execPath, [path.join(sourceRoot, 'scripts/adopt.mjs'), '--target', target, '--config', config], { stdio: 'pipe' }), /QA discovery required/);
   assert.deepEqual(await readdir(target), []);
+});
+
+test('installed validation rejects a broken reference and missing lifecycle skill', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'pipeliner-links-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const profile = JSON.parse(await readFile(path.join(sourceRoot, 'blueprints/profiles/direct-production.config.json')));
+  await applyAdoptionPlan(await planAdoption({ sourceRoot, targetRoot: root, profile }));
+  const skill = path.join(root, '.agents/skills/pipeliner-work-issue/SKILL.md');
+  await writeFile(skill, (await readFile(skill, 'utf8')) + '\nRead [missing reference](references/missing.md).\n');
+  assert.ok((await validateRepository(root)).some(error => error.includes('missing.md')));
+  await rm(path.join(root, '.agents/skills/pipeliner-review-issue'), { recursive: true });
+  await rm(path.join(root, '.claude/skills/pipeliner-review-issue'), { recursive: true });
+  assert.ok((await validateRepository(root)).some(error => error.includes('canonical pipeliner-review-issue skill is required')));
 });

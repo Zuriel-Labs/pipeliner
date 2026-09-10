@@ -84,6 +84,7 @@
   },
   "release": {
     "strategy": "immutable-promotion",
+    "preReleaseIdentity": ["sourceCommit", "gitTree", "artifactDigest", "deploymentRevision"],
     "candidateIdentity": [
       "sourceCommit",
       "gitTree",

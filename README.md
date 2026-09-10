@@ -199,6 +199,8 @@ Configure an `Auto-add to project` filter when the organization and repository n
 node scripts/audit-project.mjs --config /absolute/path/to/target/pipeliner.config.json
 ```
 
+The audit uses the target profile's repository, Project title and field mappings. It supports user- and organization-owned Projects and paginates all audited collections. Optional `project.visibility` declares expected PUBLIC or PRIVATE visibility; omission reports the live value without changing it. The working example's identity and visibility are never target defaults. Structural success does not replace inspecting active cards or workflow trigger destinations.
+
 The required working-example structure is versioned in `blueprints/github-project.json`:
 
 - Status: `Backlog`, `On Hold`, `In Progress`, `In Review`, `Done`.
@@ -215,7 +217,7 @@ Apply the label taxonomy in `blueprints/github-labels.json` with `gh label creat
 
 QA ownership is independent of these strategies. Declare `qa` with application type, runtime platforms, developers and their available environments, each environment's prerequisites/setup/full suite/teardown, ordered turns and PM approval phrases. The four examples under `blueprints/qa/` cover one developer/one environment, one developer across Windows/macOS, two developers sharing Windows, and separate Windows/macOS developers. Example commands and IDs must be replaced with verified target values.
 
-Existing version 1 profiles remain readable without `qa`, but adoption requires explicit discovery and migration. `migrateQA(profile, resolvedQA)` adds confirmed QA without changing release settings. This repository's legacy profile continues to describe its existing local gate; new adoption must not infer topology from it.
+Existing version 1 profiles remain readable without `qa`, but adoption requires explicit discovery and migration. `migrateQA(profile, resolvedQA)` adds confirmed QA without changing release settings. Pipeliner itself uses one confirmed local macOS arm64 turn with its configured PM; adopters must discover their own topology.
 
 Run native builds on compatible local hosts; containerized web QA must specify dependencies, ports, fixtures, readiness and teardown. Missing hosts stay pending. Follow [local QA execution and evidence](.agents/skills/pipeliner-work-issue/references/local-qa.md). Every turn records full suite results, exact candidate, PM approval and cleanup; self-handoff and same-OS handoff require independent turns. Waiting remains In Progress. Changed candidates invalidate prior QA. Task-owned test resources are cleaned after success, failure and PM Testing; unrelated data and resources remain intact.
 
@@ -225,7 +227,7 @@ Use when a review environment and Production run the same deployable artifact. B
 
 ### Direct Production
 
-Use when the product has no application Canary or staging environment. Complete agent QA against the exact pull-request tree, merge and deploy the exact default-branch revision through the repository's authorized path, verify Production, then keep the Issue In Review for PM Testing. Only exact approval of that unchanged Production candidate permits Done.
+Use when the product has no application Canary or staging environment. Complete agent review and local QA, obtain the configured Production authorization against pre-release source/tree, then merge and deploy the exact default-branch revision. Record final identity and verify Production before final PM Testing. Only exact completion approval of that unchanged Production candidate permits Done.
 
 ### Multi-environment
 
@@ -234,6 +236,16 @@ Use when platform or host behavior cannot be proven from one environment. Each c
 ### No application release
 
 Use `none` for documentation or tooling repositories that have no application deployment. Source commit, Git tree, checks, review, and configured PM acceptance still define completion.
+
+`release.preReleaseIdentity` separates evidence available for merge/release authorization from final `release.candidateIdentity`. Do not invent a deployment ID before deployment. Legacy none/direct profiles default to source/tree before release; immutable/native profiles retain full identity until stage ownership is resolved. Preserve stronger existing artifact and configuration approval requirements. The [strategy reference](.agents/skills/pipeliner-release-candidate/references/strategies.md) defines exact gate ordering and expected merge/deployment transitions.
+
+## Agent-led work and questions
+
+Tell the agent to start work, work an Issue number, or review the active Issue. It honors active work, selects ready Backlog work by configured priority order and then lowest Issue number when unspecified, and invokes subsequent skills through the next actual PM gate. Testing approval or feedback resumes the same Issue without another start command. After merge, feedback uses a new supporting PR on that Issue. Read-only audits never start implementation, and completion does not automatically begin unrelated work.
+
+Questions use permitted native app controls when available and a clearly marked message otherwise. Required answers wait indefinitely: no timers, reminders or defaults inferred from silence. Agents preserve previous answers and continue independent authorized work. Exact approval phrases and real access/host/repository controls still apply.
+
+Installed validators require Node.js 22+ independently of the application's stack. AGENTS.md takes application commands from the target profile; adoption does not install npm package scripts or the installer itself. Run the installer from a reviewed upstream source checkout.
 ## PM Testing standard
 
 Adoption and framework updates are exempt: the agent runs test suites and agent testing, remediates findings, reruns affected checks, verifies publication and cleanup, and reports completion. Configure application PM gates for future work without invoking them during bootstrap.

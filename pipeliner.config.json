@@ -11,6 +11,7 @@
     "owner": "Zuriel-Labs",
     "number": 3,
     "title": "Pipeliner",
+    "visibility": "PUBLIC",
     "statusField": "Status",
     "statuses": {
       "backlog": "Backlog",
@@ -57,7 +58,22 @@
   },
   "release": {
     "strategy": "none",
+    "preReleaseIdentity": ["sourceCommit", "gitTree"],
     "candidateIdentity": ["sourceCommit", "gitTree"],
     "environments": []
+  },
+  "qa": {
+    "applicationType": "tooling",
+    "runtimePlatforms": [{ "os": "macos", "architecture": "arm64" }],
+    "candidateIdentity": ["sourceCommit", "gitTree"],
+    "developers": [{ "id": "brimdor", "environments": ["local-mac"] }],
+    "environments": [{
+      "id": "local-mac", "os": "macos", "architecture": "arm64",
+      "prerequisites": ["Apple Silicon Mac with Node.js 22+, Git and authenticated GitHub CLI"],
+      "setup": [],
+      "suite": ["npm run check"],
+      "teardown": []
+    }],
+    "turns": [{ "id": "local", "developer": "brimdor", "environment": "local-mac", "pm": "brimdor", "approvalPhrase": "Beta approved" }]
   }
 }

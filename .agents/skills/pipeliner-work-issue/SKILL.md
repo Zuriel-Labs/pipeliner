@@ -1,6 +1,6 @@
 ---
 name: pipeliner-work-issue
-description: Select, reserve, specify, implement, validate, and publish one GitHub Issue while enforcing the configured single-active-Issue lifecycle.
+description: Start or resume one Issue, select ready work when unspecified, and lead implementation through review to the next required PM gate.
 ---
 
 # Work an Issue
@@ -13,7 +13,7 @@ Read `AGENTS.md`, `pipeliner.config.json`, the live Project and active cards, op
 
 - If more than one Issue is active, or the baton and lane conflict, remain read-only and report the exact repair needed.
 - If one Issue is active, continue only that Issue. A different requested Issue must wait unless the PM first pauses or cancels the active work.
-- With no requested or active Issue, rank the top three ready Backlog Issues and wait for PM selection.
+- With no requested or active Issue after a start/work request, select the highest-priority ready Backlog Issue using configured priority option order, then lowest Issue number. Verify dependencies and readiness; ask only for unresolved material decisions. Follow [lifecycle routing](references/lifecycle.md), including native questions and indefinite waiting without timers. A read-only audit does not authorize work selection.
 - A requested Issue must be open and Backlog unless it is the active Issue. Resume On Hold only on explicit PM direction.
 
 ## Execute
@@ -22,8 +22,8 @@ Read `AGENTS.md`, `pipeliner.config.json`, the live Project and active cards, op
 2. Start from the current default branch using the configured branch pattern. Isolate the work when needed and preserve user-owned changes.
 3. Diagnose first. For medium or larger work, create or update the specification, plan, tasks, acceptance criteria, non-goals, risks, and verification commands before implementation.
 4. Implement the smallest coherent outcome test-first. Keep scope and metadata current; obtain PM approval before materially changing the Issue body or product outcome.
-5. Run focused checks while iterating and every configured quality command locally before handoff. Follow [local QA execution and baton](references/local-qa.md) for explicit environment ownership, full suites, incoming pickup, cleanup and candidate-bound evidence. A missing host stays pending. No application/native/image builds in Actions, including indirect command chains; inspect the CI review ledger before publishing workflow changes. Record anything not run and why.
+5. Run focused checks while iterating and every configured quality command locally before publication. Follow [local QA execution and baton](references/local-qa.md) for environment ownership, full suites and cleanup. Commit the candidate and prepare required artifacts before requesting PM Testing; review owns that candidate-bound handoff. A missing host stays pending. No application/native/image builds in Actions, including indirect command chains; inspect the CI review ledger before publishing workflow changes. Record anything not run and why.
 6. Commit intended files, push the focused branch, and create or update one pull request targeting the default branch. Use the configured Issue reference and no auto-close keyword.
-7. Hand off to `pipeliner-review-issue`. A pull request does not move the Issue to In Review by itself.
+7. Invoke `pipeliner-review-issue` yourself and continue to the next actual PM gate. Do not stop merely because the PR exists or ask the PM to trigger review again. A pull request does not move the Issue to In Review by itself. On resumed active work, use the existing branch/PR; merged-PR feedback uses a fresh supporting branch/PR on the same Issue as described in lifecycle routing.
 
 If the PM pauses work, move it to On Hold, preserve durable evidence, verify the slot is free, and stop implementation.

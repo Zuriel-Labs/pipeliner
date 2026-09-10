@@ -30,6 +30,14 @@ This repository uses Pipeliner: an evidence-first, agent-managed development and
 - When repository evidence cannot resolve a material choice, ask the PM focused clarifying questions, explain the tradeoff, and recommend a default when evidence supports one. Do not silently invent product behavior, release topology, acceptance criteria, credentials, or destructive recovery authority.
 - Never ask the PM to perform routine Project bookkeeping the agent can perform and verify.
 
+## Agent-led continuation and questions
+
+- A request to start/work an Issue authorizes the agent to continue its implementation, review, verification and coordination through the next actual PM gate. Invoke the next canonical skill yourself; do not ask the PM to name skills, restart routine stages, run ordinary commands or move cards. After testing approval or feedback, revalidate the candidate and resume the appropriate stage. Preserve exact approval requirements and external controls.
+- Honor the sole active Issue and an explicit requested Issue. With no active or specified Issue after a start request, select one ready open Backlog Issue by configured priority option order (highest first), then lowest Issue number; verify dependencies and readiness first. Ask only for unresolved material priority/readiness decisions. Read-only audits never start work. Completion of one Issue does not authorize starting another.
+- Ask focused questions through the current app's native question control when available and permitted by its tool contract. Otherwise send a clearly marked `Question:` in the agent message. Explain the choice and recommend a default when evidence supports it. Do not use a question tool for approval if its contract forbids that use; request the exact approval in a message instead.
+- Preserve answered questions. Wait indefinitely for required answers: no timers, timed reminders, silence-based defaults, or inferred approval. Pause only dependent work; continue independent authorized work. Do not schedule reminders. Tool wait timeouts are polling boundaries, not PM deadlines or permission to proceed.
+- Follow [lifecycle routing](.agents/skills/pipeliner-work-issue/references/lifecycle.md) for resumed review, merged-PR feedback and stage-specific approvals. The pure helpers in `scripts/lib/lifecycle.mjs` check supplied decision inputs; they neither execute actions nor authenticate evidence.
+
 ## Pipeline invariants
 
 - One GitHub Issue is the primary unit of work. Pull requests and branches are supporting evidence.
@@ -75,10 +83,10 @@ This repository uses Pipeliner: an evidence-first, agent-managed development and
 - Do not pass the baton until outgoing gates and cleanup pass and the exact candidate is available to the next environment. Incoming owners verify identity before pickup. Candidate changes invalidate all prior shared QA evidence; remediate on the same Issue and retest. PM Testing retention remains pending until eventual cleanup is verified.
 - Inventory task-owned processes, images, containers, volumes, workspaces and artifacts before local tests. Use exact IDs and run ownership; teardown in failure and success paths, inspect removal and report cleanup failures. Preserve unrelated resources. Record PM-retained resources with owner and cleanup trigger; never use global prune, broad process kills or inferred ownership.
 
-- Record every configured candidate-identity component. Typical components are source commit, Git tree, immutable artifact digest, rendered configuration, deployment revision, native platform, and validation session.
-- Any change to a configured identity component invalidates prior PM approval. Re-run affected gates and request fresh approval.
+- Record every configured candidate-identity component at its applicable stage. `release.preReleaseIdentity` identifies evidence available before merge/release approval; `release.candidateIdentity` identifies the final release. Both include source commit and Git tree. Never require or invent a future deployment ID before deployment. Follow the [release strategy reference](.agents/skills/pipeliner-release-candidate/references/strategies.md) for legacy discovery and defaults.
+- Any unexpected change to a configured identity component invalidates prior PM approval. Re-run affected gates and request fresh approval. An approved exact-tree merge or same-artifact deployment produces a new stage record: verify and link its resulting commit/deployment identity to the approved source/tree/artifact. This permits only the intended transition, not an unreviewed tree or rebuilt artifact.
 - `immutable-promotion`: build the exact review candidate once, verify it in the review environment, obtain exact PM approval, and promote the same immutable artifact to Production without rebuilding.
-- `direct-production`: merge the exact reviewed tree, deploy the exact clean default-branch revision, verify Production, then keep the Issue active until PM Testing and exact completion approval.
+- `direct-production`: complete configured local QA, obtain the configured Production authorization for pre-release identity, merge the exact reviewed tree, deploy the exact clean default-branch revision, verify final identity and Production, then keep the Issue active until Production PM Testing and exact completion approval. Local QA approval is not Production acceptance.
 - `multi-environment`: each configured environment validates the exact code candidate independently. Approval from one environment cannot stand in for another.
 - Record a known-good rollback target before deployment. A documented non-destructive application or GitOps rollback may be agent-owned; destructive schema or data recovery always requires explicit PM approval.
 
@@ -98,14 +106,11 @@ Every review, candidate, Production, and completion handoff must lead with the o
 
 Agent tests and live verification support this handoff but never replace PM Testing. PM findings return the Issue to In Progress, invalidate the affected approval, and require remediation plus fresh verification.
 
-## Repository-specific commands
+## Repository commands and installed tooling
 
-- Install: `npm ci`
-- Validate contracts: `npm run validate`
-- Test behavior: `npm test`
-- Full gate: `npm run check`
-- Adoption preview: `node scripts/adopt.mjs --target <absolute-path> --config <absolute-config-path> --dry-run`
-- Live Project audit: `node scripts/audit-project.mjs --config <absolute-config-path>`
+- Run the target's `quality.commands` and the current `qa.environments` setup, suite and teardown from `pipeliner.config.json`. Read its manifest/documentation for prerequisites; never assume a package manager or copy Pipeliner's own package scripts into another stack.
+- Installed framework tools require Node.js 22 or later independently of the application's language: `node scripts/validate-repository.mjs`, `node scripts/audit-project.mjs --config <absolute-config-path>`, and `node scripts/evaluate-qa.mjs <profile.json> <evidence.json>`. Use a compatible local host and verify availability.
+- Installation and updates use `scripts/adopt.mjs` from a reviewed upstream source checkout as described by `pipeliner-adopt`/`pipeliner-update`; the installer is not installed into adopters. Do not invoke it relative to an adopter checkout.
 
 ## Security, privacy, and documentation
 

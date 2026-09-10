@@ -36,7 +36,7 @@
       <div class="grid">
         <div class="card"><div class="stage">1 · Backlog</div><p>Research, clarify, approve, create, classify, and read back one implementation-ready Issue.</p></div>
         <div class="card"><div class="stage">2 · In Progress</div><p>Reserve the single active slot, specify, implement test-first, validate, and publish a linked pull request.</p></div>
-        <div class="card"><div class="stage">3 · In Review</div><p>Complete agent QA, remediate every finding, identify the exact candidate, and prepare PM Testing.</p></div>
+        <div class="card"><div class="stage">3 · In Review</div><p>After local QA turns and cleanup, verify the exact candidate and guide the next release or completion gate. Local PM Testing waits in In Progress.</p></div>
         <div class="card"><div class="stage">4 · Done</div><p>Release through the configured strategy, verify, receive candidate-specific PM acceptance, then close and read back.</p></div>
       </div>
     </section>
@@ -50,6 +50,7 @@
 
     <section>
       <h2>Agent-owned Project movement</h2>
+      <p>Tell the agent to start work, work a specific Issue, or review. It selects ready work by configured priority and then oldest Issue number when no target is specified, honors the sole active Issue, and invokes subsequent skills itself. Testing approval or feedback resumes the same Issue without another start command. Read-only audits remain read-only; completion does not start unrelated work.</p>
       <p>The agent performs routine GitHub Project transitions and immediately verifies the resulting Status, metadata, assignment, Issue state, linkage, and active count. The PM never has to drag a card to keep the pipeline coherent.</p>
       <p class="warning">Exactly one Issue may be active. Merge, green CI, deployment health, and silence are evidence—not completion or approval.</p>
     </section>
@@ -58,7 +59,7 @@
       <h2>Release strategies</h2>
       <div class="grid">
         <div class="card"><h3>Immutable promotion</h3><p>Build once, verify the review candidate, obtain exact approval, and promote the same artifact without rebuilding.</p></div>
-        <div class="card"><h3>Direct Production</h3><p>Deploy the reviewed default-branch revision, verify Production, then keep the Issue open for PM Testing and exact completion approval.</p></div>
+        <div class="card"><h3>Direct Production</h3><p>Complete local QA, obtain Production authorization for the reviewed source, merge and deploy, then verify final identity before Production PM Testing and completion approval. Do not request a future deployment ID or invent staging.</p></div>
         <div class="card"><h3>Multi-environment</h3><p>Validate the same code candidate independently on every required native host or environment. One approval cannot substitute for another.</p></div>
       </div>
     </section>
@@ -66,7 +67,8 @@
     <section>
       <h2>Project Manager QA</h2>
       <p>Every review or release handoff gives the PM the exact target, prerequisites, numbered actions, expected results, regression checks, candidate identity, limitations, and the precise approval phrase when approval is the next gate.</p>
-      <p>When repository evidence cannot resolve a material behavior, topology, or recovery decision, the agent pauses and asks the PM focused clarifying questions.</p>
+      <p>When evidence cannot resolve a material choice, the agent asks focused questions using permitted native app controls, or a clearly marked message if unavailable. Required answers wait indefinitely: no timers, reminders or inferred answers. Only dependent work pauses. Actual approval is bound to the exact candidate and gate.</p>
+      <p>Review resumes while In Progress or In Review. Feedback after merge returns the same Issue to In Progress and the agent creates a fresh supporting PR. Pre-release and final deployment identities are recorded at their respective stages; changed trees or artifacts invalidate earlier approvals.</p>
     </section>
 
     <section>
@@ -74,6 +76,7 @@
       <p>Branch protection and rulesets are optional and never enabled by default. The agent asks the PM whether protection is wanted and, if so, which branches and rules to enforce. Existing controls remain unchanged until an explicit decision. Agent quality gates and PM approval still apply without branch protection.</p>
       <p>Begin with an explicit target or intent to create a repository. The agent resolves missing name, purpose, owner, visibility and destination, then verifies access and identity. Failed access is not proof of absence. Existing customized policies and unrelated work remain protected.</p>
       <p>The interview establishes runtime systems, developer availability, required local QA turns, PM ownership, setup, cleanup and release destinations. Material unanswered choices pause dependent work. Bootstrap does not deploy the application.</p>
+      <p>Installed commands come from the target profile, with Node.js 22+ required only for framework tooling. The installer runs from a reviewed upstream checkout. Project audits use the target identity and mapped fields, support user and organization owners, and fetch complete pages. Missing visibility policy preserves the observed value; Pipeliner's public example is never an adopter default.</p>
     </section>
 
     <section>

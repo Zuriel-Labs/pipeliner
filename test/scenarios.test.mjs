@@ -11,6 +11,42 @@ import { validateRepository } from '../scripts/lib/validation.mjs';
 import { digest } from '../scripts/lib/ci.mjs';
 
 const sourceRoot = fileURLToPath(new URL('..', import.meta.url));
+
+test('installed question guidance reaches provider paths and conflicting customizations block CLI writes', async t => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), 'pipeliner-question-scenario-'));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const targetRoot = path.join(parent, 'target'); await mkdir(targetRoot);
+  const profile = JSON.parse(await readFile(path.join(sourceRoot, 'pipeliner.config.json')));
+  const config = path.join(parent, 'profile.json'); await writeFile(config, JSON.stringify(profile));
+  await applyAdoptionPlan(await planAdoption({ sourceRoot, targetRoot, profile }));
+  for (const relative of ['AGENTS.md', '.agents/skills/pipeliner-adopt/SKILL.md',
+    '.agents/skills/pipeliner-adopt/references/discovery.md', '.agents/skills/pipeliner-maintain/references/questions.md',
+    '.agents/skills/pipeliner-adopt/agents/openai.yaml', '.agents/skills/pipeliner-update/agents/openai.yaml']) {
+    const installed = await readFile(path.join(targetRoot, relative), 'utf8');
+    assert.equal(installed, await readFile(path.join(sourceRoot, relative), 'utf8'));
+    assert.match(installed, /end the turn immediately/);
+  }
+  const args = [path.join(sourceRoot, 'scripts/adopt.mjs'), '--target', targetRoot, '--config', config];
+  for (const relative of ['AGENTS.md', 'CLAUDE.md', 'GEMINI.md',
+    '.agents/skills/pipeliner-adopt/agents/openai.yaml', '.claude/skills/pipeliner-adopt/SKILL.md']) {
+    const file = path.join(targetRoot, relative);
+    const original = await readFile(file, 'utf8');
+    const bad = original + '\nUse request_user_input for clarification.\n';
+    await writeFile(file, bad);
+    const reconciliation = { version: 1, files: { [relative]: {
+      sourceSha256: digest(original), targetSha256: digest(bad), rationale: 'Previously reviewed customization.' } } };
+    const manifest = path.join(parent, 'reconciliation.json');
+    await writeFile(manifest, JSON.stringify(reconciliation));
+    for (const extra of [[], ['--dry-run']]) {
+      assert.throws(() => execFileSync(process.execPath, [...args, '--reconciliation', manifest, ...extra], { stdio: 'pipe' }), /conflicting question instructions/);
+    }
+    assert.equal(await readFile(file, 'utf8'), bad);
+    assert.ok((await validateRepository(targetRoot)).some(error => error.startsWith(relative + ': superseded native-question')));
+    await writeFile(file, original);
+  }
+  assert.deepEqual((await planAdoption({ sourceRoot, targetRoot, profile })).questionConflicts, []);
+});
+
 test('all topology examples work independently with direct and gated release profiles', async () => {
   for (const release of ['direct-production', 'immutable-promotion', 'multi-environment']) {
     const profile = JSON.parse(await readFile(path.join(sourceRoot, `blueprints/profiles/${release}.config.json`), 'utf8'));

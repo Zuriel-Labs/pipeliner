@@ -5,7 +5,7 @@ description: Interview for repository creation or adoption, configure local deve
 
 # Adopt Pipeliner
 
-Apply the shared [installed repository home](../pipeliner-maintain/references/home.md) and [message-only questions](../pipeliner-maintain/references/questions.md) contracts. First adoption retains its explicit-target gate.
+Apply the shared [installed repository home](../pipeliner-maintain/references/home.md) and [message-only questions](../pipeliner-maintain/references/questions.md) contracts. First adoption retains its explicit-target gate. When an answer is needed, ask in the final ordinary message and end the turn immediately; no work or tool calls follow until the Human replies.
 
 No PM Testing is required for adoption or updates. The agent owns test suites, agent testing, remediation, verification, publication readback, and cleanup. Do not request a PM test session, PM Testing checklist, or bootstrap-completion approval. Configure application PM gates for future product work without applying them to bootstrap; material-choice clarification and existing repository protections still apply.
 

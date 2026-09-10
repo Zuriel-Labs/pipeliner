@@ -5,7 +5,7 @@ description: Complete an active Issue only after exact-candidate release evidenc
 
 # Close an Issue
 
-Apply the shared [installed repository home](../pipeliner-maintain/references/home.md) and [message-only questions](../pipeliner-maintain/references/questions.md) contracts. First adoption retains its explicit-target gate.
+Apply the shared [installed repository home](../pipeliner-maintain/references/home.md) and [message-only questions](../pipeliner-maintain/references/questions.md) contracts. First adoption retains its explicit-target gate. When an answer is needed, ask in the final ordinary message and end the turn immediately; no work or tool calls follow until the Human replies.
 
 Follow [Issue-based communication](../../../AGENTS.md#issue-based-communication): request and acknowledge completion for the owning Issue and exact candidate. The official response is `Approved`; identify the Issue, candidate and authorized outcome in the request. Final QA acceptance also authorizes closure when no distinct release-stage testing remains. Lead the final status with the Issue and report it complete only after every gate and live readback pass. Retain the linked pull request as supporting evidence.
 

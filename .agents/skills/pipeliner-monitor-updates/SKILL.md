@@ -5,7 +5,7 @@ description: Set up or manage scheduled Pipeliner update detection only when the
 
 # Monitor Pipeliner Updates
 
-Apply the shared [installed repository home](../pipeliner-maintain/references/home.md) and [message-only questions](../pipeliner-maintain/references/questions.md) contracts. First adoption retains its explicit-target gate.
+Apply the shared [installed repository home](../pipeliner-maintain/references/home.md) and [message-only questions](../pipeliner-maintain/references/questions.md) contracts. First adoption retains its explicit-target gate. When an answer is needed, ask in the final ordinary message and end the turn immediately; no work or tool calls follow until the Human replies.
 
 Use when the user explicitly asks to schedule, watch for, or receive notifications about Pipeliner updates, or to change/remove an existing such monitor. Installing this skill, invoking it without a scheduling request, or requesting a framework update does not authorize creating an automation. A one-time check can remain read-only. This is direct maintenance: never create or require a GitHub Issue, reserve an active slot, move Project cards, or ask for Issue-creation/completion approval. Execute within the user's requested scope and identify the target repository and monitor in communication, as allowed by the explicit maintenance exception in `AGENTS.md`.
 

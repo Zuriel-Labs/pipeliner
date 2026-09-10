@@ -5,7 +5,7 @@ description: Start or resume one Issue, select ready work when unspecified, and 
 
 # Work an Issue
 
-Apply the shared [installed repository home](../pipeliner-maintain/references/home.md) and [message-only questions](../pipeliner-maintain/references/questions.md) contracts. First adoption retains its explicit-target gate.
+Apply the shared [installed repository home](../pipeliner-maintain/references/home.md) and [message-only questions](../pipeliner-maintain/references/questions.md) contracts. First adoption retains its explicit-target gate. When an answer is needed, ask in the final ordinary message and end the turn immediately; no work or tool calls follow until the Human replies.
 
 Follow [Issue-based communication](../../../AGENTS.md#issue-based-communication): lead progress, blockers, and handoffs with the selected Issue number and its current gate. Include the linked pull request and checks as supporting evidence; publishing or merging it does not complete the Issue.
 

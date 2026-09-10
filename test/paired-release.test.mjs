@@ -44,7 +44,7 @@ function profile() {
     ] } } };
 }
 test('native capability never changes message-only indefinite waiting', () => {
-  assert.deepEqual(clarificationDecision({ nativeAvailable: true, nativePermitted: true }), { channel: 'message', state: 'waiting', timeout: null });
+  assert.deepEqual(clarificationDecision({ nativeAvailable: true, nativePermitted: true }), { channel: 'message', state: 'waiting', timeout: null, endTurn: true });
 });
 test('reconciled policy cannot retain superseded question or QA restart instructions', () => {
   for (const text of ['Prefer a supported native question; fall back to messages.',

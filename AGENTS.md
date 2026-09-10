@@ -10,6 +10,7 @@ This repository uses Pipeliner: an evidence-first, agent-managed development and
 - For creation, resolve name, purpose, owner, explicit visibility and local destination before mutation. Verify absence and creation authority; authentication, permission, network failures and an ambiguous 404 are not proof of absence. Initialize the appropriate README and verify local/remote identity before adoption. Never inherit Pipeliner's public visibility.
 - Once the target is explicit, read `.agents/skills/pipeliner-adopt/SKILL.md` and own its complete workflow. Verify exact local and remote identity before mutation and keep all authority bounded to that target repository and its linked Project.
 - Adoption authority covers safe repository and Project alignment. It does not authorize application deployment, credential changes, destructive migration, or unrelated backlog work.
+- Branch protection and repository rulesets are opt-in, never bootstrap defaults. Ask whether the PM wants them; record the explicit choice in `workflow.branchProtection`. If enabled, clarify branch scope and exact rules first. If omitted, preserve current controls and ask; do not infer consent from quality checks, Project setup or example repositories. Remove existing protection only on explicit PM direction. Agent quality checks and exact PM approval still apply without branch protection.
 
 ## Authority and source of truth
 

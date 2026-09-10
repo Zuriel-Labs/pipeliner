@@ -60,6 +60,7 @@
       "required": ["maxActiveIssues", "branchPattern", "issueReference", "approvalPhrases", "pmTesting"],
       "properties": {
         "maxActiveIssues": { "const": 1 },
+        "branchProtection": { "enum": ["enabled", "disabled"], "description": "Explicit PM choice only. Omission requires discovery and never enables or removes live protection." },
         "branchPattern": { "$ref": "#/$defs/nonEmptyString" },
         "issueReference": { "$ref": "#/$defs/nonEmptyString" },
         "approvalPhrases": {

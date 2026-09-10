@@ -89,6 +89,9 @@ export function validateProfile(profile) {
   }
 
   const workflow = requireObject(root.workflow, "workflow");
+  if (workflow.branchProtection !== undefined && !['enabled', 'disabled'].includes(workflow.branchProtection)) {
+    throw new Error('workflow.branchProtection must be enabled or disabled; omit for PM discovery');
+  }
   if (workflow.maxActiveIssues !== 1) throw new Error("workflow.maxActiveIssues must equal 1");
   requireString(workflow.branchPattern, "workflow.branchPattern");
   requireString(workflow.issueReference, "workflow.issueReference");

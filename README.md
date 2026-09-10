@@ -46,6 +46,8 @@ For a new repository, say that you want one created. The agent asks for missing 
 
 This request authorizes work only in the named target repository and its linked Project. Deployment, credentials, destructive migration, and unrelated backlog work remain outside adoption authority.
 
+Branch protection and rulesets are **opt-in and never enabled by default**. During discovery the agent asks whether you want them. An explicit choice is recorded in `workflow.branchProtection`; enabling protection requires choosing its branch scope and rules. An omitted choice preserves existing settings and prompts for a decision. Existing protection is removed only on explicit instruction. Required quality checks describe agent verification and do not automatically become GitHub branch protection.
+
 ## What Pipeliner standardizes
 
 - One active Issue by default, with the Issue as the primary work unit.

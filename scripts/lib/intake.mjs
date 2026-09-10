@@ -1,4 +1,12 @@
 // Pure decision support. Probe evidence and authorization must come from live agent discovery.
+export function branchProtectionDecision({ current, choice } = {}) {
+  if (choice !== undefined && !['enabled', 'disabled'].includes(choice)) throw new Error('invalid branch protection choice');
+  if (typeof current !== 'boolean') return { action: 'blocked', reason: 'Inspect live branch protection and applicable rulesets first.' };
+  if (choice === undefined) return { action: 'ask', question: 'Do you want branch protection? The default is not to enable it; existing settings remain unchanged until you decide.' };
+  if (choice === 'enabled') return { action: 'ask-rules', reason: 'Confirm branch scope and review/check rules before configuring protection.' };
+  return { action: current ? 'remove' : 'unchanged' };
+}
+
 export function intakeDecision(input = {}) {
   if (!input.target && input.intent !== 'create') return { action: 'ask', question: 'What is the target repository location, or do you want to create a new repository?' };
   if (input.intent === 'create' && !input.target && (!input.owner || !input.name)) return { action: 'ask', question: 'What name, purpose, owner, visibility and local destination should the new repository use?' };

@@ -11,6 +11,8 @@ The agent owns semantic review. Hashes bind the reviewed files; they cannot prov
 
 ## Actions review
 
+Branch protection is an independent, optional PM choice, not an installation requirement. Never create branch protection or rulesets from check names alone. Ask whether protection is wanted, then clarify exact branch scope and rules if enabled. Preserve existing controls until explicitly instructed to change or remove them. An unprotected repository still requires agent verification and PM acceptance under Pipeliner.
+
 Inspect all `.github/workflows` files before pushing, including disabled or manually triggered workflows. Expand every command: package pre/post hooks, executable scripts and imports, local actions, nested workflows, Dockerfiles, action pins and downloaded executables. Build/test application packages and images locally. If a command's behavior cannot be established, move it local or block until resolved. Security scanners may inspect source and use prebuilt tooling; they must not build the application.
 
 The reusable workflow now accepts no command inputs and runs only Git whitespace checks. Remove `setup-command`, `quality-command`, and `runner` from callers when upgrading; keep full suites in `qa.environments[].suite` and `quality.commands`. An older pinned workflow remains old behavior until deliberately upgraded. Preserve required security checks; update obsolete check names only after equivalent lightweight checks and local evidence gates are in place and read protections back.

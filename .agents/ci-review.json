@@ -2,18 +2,19 @@
   "version": 1,
   "workflows": {
     ".github/workflows/quality.yml": {
-      "rationale": "Reviewed pinned checkout/setup-node and the read-only Node contract validator with all static imports. New release-cycle, QA and Showcase helpers validate supplied JSON only; no configured commands are executed. crypto hashes scope and cleanup tokens. Home verification and full behavioral tests run locally, not in Actions. Secret scanner action uses prebuilt tooling. No application builds, package lifecycle hooks, composites or nested workflow calls.",
+      "rationale": "Reviewed pinned checkout/setup-node and the read-only Node contract validator with all static imports. New release-cycle, QA and Showcase helpers validate supplied JSON only; no configured commands are executed. crypto hashes scope and cleanup tokens. Home verification and full behavioral tests run locally, not in Actions. Secret scanner action uses prebuilt tooling. No application builds, package lifecycle hooks, composites or nested workflow calls. Issue #12 adds a pure known-question-directive matcher and read-only checks of provider Markdown/YAML; no commands or application builds are introduced.",
       "files": {
         ".github/workflows/quality.yml": "c89ab05dce1f8a9ee0aa258a2a7da9f67d7241b747d20095015bc949155c2d73",
         "package.json": "591159744983ea992feb3a9130162509832ee07efac3c2228d1b26ce71892213",
         "scripts/validate-repository.mjs": "fb01f8962a59a438f66b985a54babe9ee03008c0f2b6e54307e37952994cacf8",
-        "scripts/lib/validation.mjs": "1aa9d8aba763d2e33859dd275876238318200b735b941aba71e2992dea33f88f",
+        "scripts/lib/validation.mjs": "9638335da652807e63e96be6a04647e2fc22d9f0985c2b7b2783c55ddaaf2bcc",
         "scripts/lib/config.mjs": "430a6a4ddfd026d94d85ca13ac4fe4be45d64e8176006c3e8834221cd8c52c67",
         "scripts/lib/qa.mjs": "17fe419a5aa2c41ab40fb43b4dfe244492576e932fe8c8df9f30b494558bdf0d",
         "scripts/lib/cleanup.mjs": "92d37747b5456b00cf16640f8ea7ed0d29b1209bf09b4b06c0e8f95d127ebd16",
         "scripts/lib/ci.mjs": "41d39874b3667e9b6de1d6e9e09b5b4010a25122b24a97689b36e4d551bb6f19",
         "scripts/lib/showcase.mjs": "13675a8f849083a16b2713892a85844fe1bf23408f7f56d985ae7bf840ef0641",
-        "scripts/lib/release-cycle.mjs": "c4d807d22f12aef656006960a89b53a84a84fb2417db64751eee82101303caef"
+        "scripts/lib/release-cycle.mjs": "c4d807d22f12aef656006960a89b53a84a84fb2417db64751eee82101303caef",
+        "scripts/lib/questions.mjs": "b83700533cc69e8e8c87001599a6ad43b0395f627832d033772476bea5404f3c"
       }
     },
     ".github/workflows/reusable-quality.yml": {

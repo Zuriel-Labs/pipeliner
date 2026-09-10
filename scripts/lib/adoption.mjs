@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { validateProfile } from "./config.mjs";
 import { digest } from './ci.mjs';
+import { isQuestionInstructionPath, validateQuestionText } from './questions.mjs';
 
 const MANAGED_ROOTS = [
   ".github/ISSUE_TEMPLATE",
@@ -103,14 +104,22 @@ export async function planAdoption({ sourceRoot, targetRoot, profile, reconcilia
   candidates.sort((left, right) => left.relativePath.localeCompare(right.relativePath));
 
   if (reconciliation && (reconciliation.version !== 1 || !reconciliation.files)) throw new Error('invalid reconciliation manifest');
-  const plan = { sourceRoot: source, targetRoot: target, create: [], identical: [], reconciled: [], conflicts: [] };
+  const plan = { sourceRoot: source, targetRoot: target, create: [], identical: [], reconciled: [], conflicts: [], questionConflicts: [] };
+  const inspectQuestions = (candidate, content, origin) => {
+    if (!isQuestionInstructionPath(candidate.relativePath)) return;
+    for (const reason of validateQuestionText(content.toString('utf8'))) {
+      plan.questionConflicts.push({ relativePath: candidate.relativePath, origin, reason });
+    }
+  };
   for (const candidate of candidates) {
     await assertSafeDestination(target, candidate.targetPath);
+    inspectQuestions(candidate, candidate.content, 'source');
     if (!(await exists(candidate.targetPath))) {
       plan.create.push(candidate);
       continue;
     }
     const current = await readFile(candidate.targetPath);
+    inspectQuestions(candidate, current, 'target');
     if (current.equals(candidate.content)) plan.identical.push(candidate);
     else {
       const review = reconciliation?.files[candidate.relativePath];
@@ -123,6 +132,9 @@ export async function planAdoption({ sourceRoot, targetRoot, profile, reconcilia
 }
 
 export async function applyAdoptionPlan(plan) {
+  if (plan.questionConflicts?.length) {
+    throw new Error(`conflicting question instructions; reconcile before installation: ${plan.questionConflicts.map(item => `${item.origin}:${item.relativePath}`).join(', ')}`);
+  }
   if (plan.conflicts.length > 0) {
     const paths = plan.conflicts.map((item) => item.relativePath).join(", ");
     throw new Error(`refusing to overwrite existing files: ${paths}`);

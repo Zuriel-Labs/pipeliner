@@ -5,7 +5,7 @@ description: Create, update, and validate Pipeliner policy, canonical skills, pr
 
 # Maintain Pipeliner
 
-Apply the shared [installed repository home](../pipeliner-maintain/references/home.md) and [message-only questions](../pipeliner-maintain/references/questions.md) contracts. First adoption retains its explicit-target gate.
+Apply the shared [installed repository home](../pipeliner-maintain/references/home.md) and [message-only questions](../pipeliner-maintain/references/questions.md) contracts. First adoption retains its explicit-target gate. When an answer is needed, ask in the final ordinary message and end the turn immediately; no work or tool calls follow until the Human replies.
 
 Use this skill for changes to `AGENTS.md`, provider imports, `.agents/`, `.claude/skills/`, `pipeliner.config.json`, schemas, blueprints, adoption tooling, or alignment validation.
 

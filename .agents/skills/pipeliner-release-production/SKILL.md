@@ -5,7 +5,7 @@ description: Release the exact approved candidate to Production using the config
 
 # Release Production
 
-Apply the shared [installed repository home](../pipeliner-maintain/references/home.md) and [message-only questions](../pipeliner-maintain/references/questions.md) contracts. First adoption retains its explicit-target gate.
+Apply the shared [installed repository home](../pipeliner-maintain/references/home.md) and [message-only questions](../pipeliner-maintain/references/questions.md) contracts. First adoption retains its explicit-target gate. When an answer is needed, ask in the final ordinary message and end the turn immediately; no work or tool calls follow until the Human replies.
 
 Follow [Issue-based communication](../../../AGENTS.md#issue-based-communication): acknowledge approval for the owning Issue, configured release gate, and exact candidate. Report release results and remaining PM Testing against that Issue, with pull-request and deployment evidence as supporting details. Preserve the configured approval phrase.
 

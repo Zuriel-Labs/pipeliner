@@ -5,7 +5,7 @@ description: Build or prepare and verify the exact review or native candidate re
 
 # Release a Candidate
 
-Apply the shared [installed repository home](../pipeliner-maintain/references/home.md) and [message-only questions](../pipeliner-maintain/references/questions.md) contracts. First adoption retains its explicit-target gate.
+Apply the shared [installed repository home](../pipeliner-maintain/references/home.md) and [message-only questions](../pipeliner-maintain/references/questions.md) contracts. First adoption retains its explicit-target gate. When an answer is needed, ask in the final ordinary message and end the turn immediately; no work or tool calls follow until the Human replies.
 
 Follow [Issue-based communication](../../../AGENTS.md#issue-based-communication): report candidate readiness or blockers for the owning Issue. Lead PM Testing and approval requests with its Issue number, then include exact candidate identity and linked pull-request evidence.
 

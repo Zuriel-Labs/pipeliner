@@ -5,7 +5,7 @@ description: Perform a read-only audit of repository, Issue, Project, pull-reque
 
 # Audit Pipeline Health
 
-Apply the shared [installed repository home](../pipeliner-maintain/references/home.md) and [message-only questions](../pipeliner-maintain/references/questions.md) contracts. First adoption retains its explicit-target gate.
+Apply the shared [installed repository home](../pipeliner-maintain/references/home.md) and [message-only questions](../pipeliner-maintain/references/questions.md) contracts. First adoption retains its explicit-target gate. When an answer is needed, ask in the final ordinary message and end the turn immediately; no work or tool calls follow until the Human replies.
 
 Follow [Issue-based communication](../../../AGENTS.md#issue-based-communication): organize work-status findings by owning Issue and its remaining gates, including linked pull-request, check, and deployment evidence. Report unlinked pull requests or missing Issues explicitly without substituting PR numbers for Issue identity.
 

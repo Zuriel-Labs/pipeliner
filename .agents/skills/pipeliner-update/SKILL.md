@@ -5,7 +5,7 @@ description: Update an existing repository's Pipeliner instructions, skills, and
 
 # Update Pipeliner
 
-Apply the shared [installed repository home](../pipeliner-maintain/references/home.md) and [message-only questions](../pipeliner-maintain/references/questions.md) contracts. First adoption retains its explicit-target gate.
+Apply the shared [installed repository home](../pipeliner-maintain/references/home.md) and [message-only questions](../pipeliner-maintain/references/questions.md) contracts. First adoption retains its explicit-target gate. When an answer is needed, ask in the final ordinary message and end the turn immediately; no work or tool calls follow until the Human replies.
 
 Use for a requested update to an existing adoption. First-time installation or repository creation uses `pipeliner-adopt`; edits to the upstream framework itself use `pipeliner-maintain`. Monitoring alone uses `pipeliner-monitor-updates` and does not authorize installation.
 

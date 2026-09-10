@@ -29,12 +29,14 @@ test('selection fails closed on incomplete state, competing active Issues and On
 test('questions stay in messages regardless of native capability; silence never answers', () => {
   for (const elapsedMs of [0, 60000, 86400000]) {
     const pending = clarificationDecision({ nativeAvailable: true, nativePermitted: true, elapsedMs });
-    assert.deepEqual(pending, { channel: 'message', state: 'waiting', timeout: null });
+    assert.deepEqual(pending, { channel: 'message', state: 'waiting', timeout: null, endTurn: true });
   }
   assert.equal(clarificationDecision({ nativeAvailable: true, nativePermitted: false }).channel, 'message');
   assert.equal(clarificationDecision({ nativeAvailable: false }).channel, 'message');
   assert.equal(clarificationDecision({ answered: true }).state, 'answered');
   assert.equal(clarificationDecision({ answered: 'false' }).state, 'waiting');
+  assert.equal(clarificationDecision({ answered: true }).endTurn, false);
+  assert.equal(clarificationDecision({ answered: 'true', independentWork: true }).endTurn, true);
 });
 
 test('review resumes without demanding a reopened merged PR and remediates on same Issue', () => {

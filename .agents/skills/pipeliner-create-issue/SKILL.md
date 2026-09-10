@@ -5,7 +5,7 @@ description: Research, clarify, draft, create, classify, and verify one implemen
 
 # Create an Issue
 
-Apply the shared [installed repository home](../pipeliner-maintain/references/home.md) and [message-only questions](../pipeliner-maintain/references/questions.md) contracts. First adoption retains its explicit-target gate.
+Apply the shared [installed repository home](../pipeliner-maintain/references/home.md) and [message-only questions](../pipeliner-maintain/references/questions.md) contracts. First adoption retains its explicit-target gate. When an answer is needed, ask in the final ordinary message and end the turn immediately; no work or tool calls follow until the Human replies.
 
 Follow [Issue-based communication](../../../AGENTS.md#issue-based-communication): identify the proposed work by its draft title until GitHub assigns an Issue number, then use that Issue number in status and handoffs. Keep the exact draft-creation approval gate; never predict a number or substitute an existing PR number.
 

@@ -42,6 +42,7 @@ function publicPlan(plan) {
     identical: paths(plan.identical),
     reconciled: paths(plan.reconciled),
     conflicts: paths(plan.conflicts),
+    questionConflicts: plan.questionConflicts,
   };
 }
 
@@ -56,6 +57,9 @@ async function main() {
   const plan = await planAdoption({ sourceRoot, targetRoot, profile, reconciliation });
 
   console.log(JSON.stringify(publicPlan(plan), null, 2));
+  if (plan.questionConflicts.length > 0) {
+    throw new Error('conflicting question instructions; reconcile authorized text, preserve unrelated instructions, and rerun the dry-run');
+  }
   if (plan.conflicts.length > 0) {
     throw new Error("adoption has conflicts; reconcile them manually and run the dry-run again");
   }

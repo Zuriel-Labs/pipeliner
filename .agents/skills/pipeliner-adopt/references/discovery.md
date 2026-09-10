@@ -1,6 +1,6 @@
 # Conditional bootstrap checklist and migration
 
-Use [message-only questions](../../pipeliner-maintain/references/questions.md). Read repository evidence and saved answers first. Mark each checklist item resolved, unresolved or not applicable with its reason in the existing target-owned decision record; persist confirmed configuration in the target profile. Do not manufacture names, topology, approval phrases or commands. Ask only applicable unresolved questions and preserve answers across sessions and repeated adoption.
+Use [message-only questions](../../pipeliner-maintain/references/questions.md). Read repository evidence and saved answers first. Mark each checklist item resolved, unresolved or not applicable with its reason in the existing target-owned decision record; persist confirmed configuration in the target profile before asking. Do not manufacture names, topology, approval phrases or commands. Ask only applicable unresolved questions in the final ordinary message and end the turn immediately. No task work or tool calls follow until the Human replies; preserve answers across sessions and repeated adoption. Inspect target/provider question instructions for conflicts, reconcile only authorized text, and rerun the dry-run until `questionConflicts` is empty. Review host-level conflicts manually and report their source without changing global settings.
 
 | Condition | Resolve before dependent mutation |
 |---|---|

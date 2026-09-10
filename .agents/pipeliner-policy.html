@@ -68,7 +68,7 @@
     <section>
       <h2>Project Manager QA</h2>
       <p>Every Issue or aggregate release handoff gives a full Showcase: scope and owning Issue, change summary, Agent findings (explicitly none when empty), test results, exact target, prerequisites, numbered actions paired with expected results, regression checks, limitations, candidate identity, next outcome and the precise configured approval phrase.</p>
-      <p>When evidence cannot resolve a material choice, the agent asks focused questions only in ordinary messages marked <code>Question:</code>; native question controls and structured question tools are prohibited. Required answers wait indefinitely: no timers, reminders or inferred answers. Only dependent work pauses. Actual approval is bound to the exact candidate and gate.</p>
+      <p>When evidence cannot resolve a material choice, the agent asks focused questions only in a final ordinary message marked <code>Question:</code> and ends the turn immediately. All task work and tool calls stop until the Human replies at their own pace. Native question controls, structured question tools, background continuation, polling, sleep loops, timers, reminders and inferred answers are prohibited. Save answers before asking and reuse them on resume. Actual approval is bound to the exact candidate and gate.</p>
       <p>Review resumes while In Progress or In Review. Feedback after merge returns the same Issue to In Progress and the agent creates a fresh supporting PR. Pre-release and final deployment identities are recorded at their respective stages; changed trees or artifacts invalidate earlier approvals.</p>
     </section>
 

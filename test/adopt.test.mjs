@@ -217,3 +217,32 @@ test('adoption refuses a symlink destination before creating files', async t => 
   await symlink(outside, path.join(roots.targetRoot, '.agents'));
   await assert.rejects(planAdoption({ ...roots, profile: validProfile() }), /symlink/);
 });
+
+test('question conflicts block fresh, repeat and hash-reconciled installation without writes', async t => {
+  const roots = await fixture(t);
+  const profile = validProfile();
+  const bad = 'Use request_user_input for clarification.\n';
+  const sourcePath = path.join(roots.sourceRoot, 'CLAUDE.md');
+  const targetPath = path.join(roots.targetRoot, 'CLAUDE.md');
+  await writeFile(sourcePath, bad);
+  const fresh = await planAdoption({ ...roots, profile });
+  assert.ok(fresh.questionConflicts.some(item => item.relativePath === 'CLAUDE.md'));
+  await assert.rejects(applyAdoptionPlan(fresh), /question instructions/);
+  await assert.rejects(readFile(path.join(roots.targetRoot, 'AGENTS.md')), /ENOENT/);
+  await writeFile(targetPath, bad);
+  const repeat = await planAdoption({ ...roots, profile });
+  await assert.rejects(applyAdoptionPlan(repeat), /question instructions/);
+  await writeFile(sourcePath, '@AGENTS.md\n');
+  const hash = value => createHash('sha256').update(value).digest('hex');
+  const reconciliation = { version: 1, files: { 'CLAUDE.md': {
+    sourceSha256: hash('@AGENTS.md\n'), targetSha256: hash(bad), rationale: 'Reviewed custom instructions.' } } };
+  const customized = await planAdoption({ ...roots, profile, reconciliation });
+  assert.equal(customized.conflicts.length, 0);
+  await assert.rejects(applyAdoptionPlan(customized), /question instructions/);
+  assert.equal(await readFile(targetPath, 'utf8'), bad);
+  await writeFile(targetPath, '@AGENTS.md\n');
+  const repaired = await planAdoption({ ...roots, profile });
+  assert.deepEqual(repaired.questionConflicts, []);
+  await applyAdoptionPlan(repaired);
+  assert.equal((await planAdoption({ ...roots, profile })).create.length, 0);
+});

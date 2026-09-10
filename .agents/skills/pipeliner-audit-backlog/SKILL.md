@@ -5,7 +5,7 @@ description: Audit and, when explicitly requested, repair Backlog Issue classifi
 
 # Audit the Backlog
 
-Apply the shared [installed repository home](../pipeliner-maintain/references/home.md) and [message-only questions](../pipeliner-maintain/references/questions.md) contracts. First adoption retains its explicit-target gate.
+Apply the shared [installed repository home](../pipeliner-maintain/references/home.md) and [message-only questions](../pipeliner-maintain/references/questions.md) contracts. First adoption retains its explicit-target gate. When an answer is needed, ask in the final ordinary message and end the turn immediately; no work or tool calls follow until the Human replies.
 
 Follow [Issue-based communication](../../../AGENTS.md#issue-based-communication): lead each finding, recommendation, and status with the Backlog Issue number. Include linked pull requests as supporting evidence and distinguish delivered implementation from an Issue that has passed all completion gates.
 

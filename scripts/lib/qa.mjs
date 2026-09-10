@@ -1,4 +1,5 @@
 import { cleanupComplete } from './cleanup.mjs';
+import { identityMatches, nonempty, renderApproval, showcaseComplete } from './showcase.mjs';
 
 const string = (value, field) => {
   if (typeof value !== 'string' || !value.trim()) throw new Error(`${field} must be a non-empty string`);
@@ -43,6 +44,23 @@ export function validateQA(qa) {
   }
   if ([...environments.keys()].some(id => !qa.turns.some(turn => turn.environment === id))) throw new Error('every QA environment requires a turn');
   if ([...developers.keys()].some(id => !qa.turns.some(turn => turn.developer === id))) throw new Error('every QA developer requires a turn');
+  if (qa.mode !== undefined && qa.mode !== 'circulating') throw new Error('unknown QA mode');
+  if (qa.mode === 'circulating' || qa.pms !== undefined || qa.developers.some(d => d.kind !== undefined || d.github !== undefined)) {
+    if (qa.mode !== 'circulating') throw new Error('paired QA discovery required: circulating mode');
+    const pms = registry(qa.pms, 'qa.pms');
+    for (const pm of pms.values()) if (pm.kind !== 'human') throw new Error('PM must be human');
+    for (const dev of developers.values()) {
+      if (dev.kind !== 'agent') throw new Error('Dev must be agent');
+      string(dev.github, 'developer.github');
+    }
+    if (qa.turns.some(turn => !pms.has(turn.pm))) throw new Error('turn references unknown PM');
+    if ([...pms.keys()].some(id => !qa.turns.some(turn => turn.pm === id))) throw new Error('every PM requires a testing turn');
+  }
+  return qa;
+}
+export function requirePairedQA(qa) {
+  validateQA(qa);
+  if (qa.mode !== 'circulating') throw new Error('paired QA discovery required; resolve Agent Devs and Human PMs before new QA or adoption');
   return qa;
 }
 export function migrateQA(profile, qa) {
@@ -52,8 +70,9 @@ export function migrateQA(profile, qa) {
 function matches(keys, left, right) {
   return keys.every(key => typeof left?.[key] === 'string' && left[key].trim() && left[key] === right?.[key]);
 }
-export function evaluateQA(qa, candidate, records) {
+export function evaluateQA(qa, candidate, records, options = {}) {
   validateQA(qa);
+  if (qa.mode === 'circulating') return evaluateCirculation(qa, candidate, records, options);
   if (!matches(qa.candidateIdentity, candidate, candidate)) throw new Error('incomplete candidate identity');
   if (!Array.isArray(records)) throw new Error('QA records must be an array');
   const ids = records.map(record => record?.turn);
@@ -75,4 +94,59 @@ export function evaluateQA(qa, candidate, records) {
     if (index + 1 < qa.turns.length && record.nextCandidateAvailable !== true) return result('waiting', 'Outgoing owner must verify exact candidate is available to the next environment.');
   }
   return { state: 'complete', baton, current: null, next: null, projectStatus: 'In Review', reason: 'Local QA complete; release and Issue completion gates remain separate.' };
+}
+
+function evaluateCirculation(qa, candidate, records, { currentTurn, scope = 'issue', issue, cleanupResolutions = [] } = {}) {
+  if (!identityMatches(qa.candidateIdentity, candidate, candidate)) throw new Error('incomplete candidate identity');
+  if (!['issue', 'release'].includes(scope)) throw new Error('invalid QA scope');
+  if (!Number.isSafeInteger(issue) || issue < 1) throw new Error('owning Issue number required for QA');
+  const start = qa.turns.findIndex(turn => turn.id === currentTurn);
+  if (start < 0) throw new Error('valid currentTurn required for circulating QA');
+  if (!Array.isArray(records)) throw new Error('QA records must be an array');
+  const latest = new Map(); const rounds = new Set();
+  for (const record of records) {
+    if (!qa.turns.some(t => t.id === record?.turn) || !Number.isSafeInteger(record.round) || record.round < 1) throw new Error('unknown turn or invalid round');
+    const key = `${record.turn}:${record.round}`;
+    if (rounds.has(key)) throw new Error('duplicate QA round');
+    rounds.add(key);
+    if (!latest.has(record.turn) || latest.get(record.turn).round < record.round) latest.set(record.turn, record);
+  }
+  if (!Array.isArray(cleanupResolutions)) throw new Error('cleanup resolutions must be an array');
+  const resolutions = new Map();
+  for (const resolution of cleanupResolutions) {
+    const key = `${resolution?.turn}:${resolution?.round}`;
+    if (!rounds.has(key) || resolutions.has(key) || !cleanupComplete(resolution.cleanup)) throw new Error('invalid or duplicate cleanup resolution');
+    resolutions.set(key, resolution.cleanup);
+  }
+  const cleaned = record => {
+    if (cleanupComplete(record.cleanup)) return true;
+    const resolved = resolutions.get(`${record.turn}:${record.round}`);
+    return resolved && Array.isArray(record.cleanup?.resources) && record.cleanup.resources.every(resource =>
+      resource && ['kind', 'id', 'run', 'owner'].every(key => nonempty(resource[key])) &&
+      resolved.resources.some(item => ['kind', 'id', 'run', 'owner'].every(key => item[key] === resource[key])));
+  };
+  const baton = qa.turns.length > 1;
+  const checks = new Map(qa.turns.map(turn => {
+    const record = latest.get(turn.id);
+    const problem = (state, reason) => [turn.id, { state, reason }];
+    if (!record || !identityMatches(qa.candidateIdentity, candidate, record.candidate)) return problem('pickup', 'Latest candidate requires this pair to review and test.');
+    if (record.developer !== turn.developer || record.environment !== turn.environment) return problem('remediation', 'Wrong owner or environment.');
+    const env = qa.environments.find(e => e.id === turn.environment);
+    if (record.host?.available !== true || record.host.os !== env.os || record.host.architecture !== env.architecture || record.pickedUp !== true || record.candidateAvailable !== true || !nonempty(record.session)) return problem('waiting', 'Compatible host, exact candidate and verified pickup required.');
+    if (!identityMatches(qa.candidateIdentity, candidate, record.review?.candidate) || !nonempty(record.review?.evidence)) return problem('remediation', 'Agent review evidence required.');
+    if (!Array.isArray(record.suite) || record.suite.length !== env.suite.length || env.suite.some((command, i) => record.suite[i]?.command !== command || record.suite[i].exitCode !== 0 || !nonempty(record.suite[i].evidence))) return problem('remediation', 'Complete successful local suite required.');
+    const phrase = renderApproval(turn.approvalPhrase, issue);
+    if (!showcaseComplete(record.showcase, qa.candidateIdentity, candidate, phrase, { scope, issue })) return problem('remediation', 'Complete current-candidate Showcase required.');
+    if (record.pm?.owner !== turn.pm || record.pm.phrase !== phrase || !identityMatches(qa.candidateIdentity, candidate, record.pm.candidate) || !nonempty(record.pm.evidence)) return problem('waiting', 'Partnered Human PM approval required.');
+    if (!cleaned(record)) return problem('waiting', 'Cleanup unresolved.');
+    return [turn.id, null];
+  }));
+  const order = [...qa.turns.slice(start), ...qa.turns.slice(0, start)];
+  // Superseded approval is historical; superseded temporary resources still need cleanup.
+  if (records.some(record => !cleaned(record))) return { state: 'waiting', reason: 'Current or historical test-resource cleanup unresolved.', baton, current: qa.turns[start], next: null, projectStatus: 'In Progress' };
+  const pending = order.find(turn => checks.get(turn.id));
+  if (!pending) return { state: 'complete', reason: 'Every required pair approved the latest candidate.', baton, current: null, next: null, projectStatus: 'In Review' };
+  const current = qa.turns[start];
+  if (pending.id !== current.id && latest.get(current.id)?.nextCandidateAvailable !== true) return { state: 'waiting', reason: 'Outgoing owner must prove next candidate availability.', baton, current, next: pending, projectStatus: 'In Progress' };
+  return { ...checks.get(pending.id), baton, current: pending, next: order.find(turn => turn.id !== pending.id && checks.get(turn.id)) ?? null, projectStatus: 'In Progress' };
 }

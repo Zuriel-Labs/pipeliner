@@ -32,6 +32,14 @@ async function readText(filePath, errors, label = filePath) {
 
 const REQUIRED_SKILLS = ['adopt', 'audit-backlog', 'close-issue', 'create-issue', 'maintain', 'monitor-updates', 'pipeline-health', 'release-candidate', 'release-production', 'review-issue', 'update', 'work-issue'].map(name => `pipeliner-${name}`);
 
+// Detect known superseded directives after reconciliation, not arbitrary natural-language semantics.
+export function validateOperationalText(text) {
+  const errors = [];
+  if (/prefer[^.\n]*native question|use permitted native app questions|questions use native controls|ask focused questions through[^.\n]*native question/i.test(text)) errors.push('superseded native-question directive; use message-only questions');
+  if (/retest from the first turn|restart (?:QA )?from the first turn/i.test(text)) errors.push('superseded fixed QA restart; finish current pair then circulate');
+  return errors;
+}
+
 async function validateLocalLinks(root, files) {
   const errors = [];
   for (const file of files.filter(file => /\.(md|html)$/.test(file))) {
@@ -325,6 +333,10 @@ export async function validateRepository(rootPath, { requireConfig = true } = {}
     for (const name of REQUIRED_SKILLS) if (!skillNames.includes(name)) errors.push(`canonical ${name} skill is required`);
     errors.push(...validateAdoptionContract({ agents, adoptionSkill }));
     errors.push(...await validateLocalLinks(root, [path.join(root, 'AGENTS.md'), ...await walkFiles(skillsRoot), ...await walkFiles(adapterRoot)]));
+    for (const file of [path.join(root, 'AGENTS.md'), path.join(root, '.agents/pipeliner-policy.html'), ...await walkFiles(skillsRoot)]) {
+      if (!/\.(md|html)$/.test(file)) continue;
+      for (const error of validateOperationalText(await readFile(file, 'utf8'))) errors.push(`${path.relative(root, file)}: ${error}`);
+    }
   }
 
   for (const managedText of [agents, policy]) {

@@ -19,6 +19,8 @@ const MANAGED_ROOTS = [
   "schema",
   "scripts/audit-project.mjs",
   "scripts/evaluate-qa.mjs",
+  "scripts/evaluate-release.mjs",
+  "scripts/resolve-home.mjs",
   "scripts/lib",
   "scripts/validate-repository.mjs",
 ];

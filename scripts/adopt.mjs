@@ -3,7 +3,8 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { readFile } from 'node:fs/promises';
-import { validateQA } from './lib/qa.mjs';
+import { requirePairedQA } from './lib/qa.mjs';
+import { verifyRepository } from './lib/home.mjs';
 
 import { applyAdoptionPlan, planAdoption } from "./lib/adoption.mjs";
 import { loadProfile } from "./lib/config.mjs";
@@ -50,7 +51,7 @@ async function main() {
   const sourceRoot = path.resolve(options.source ?? path.join(scriptDirectory, ".."));
   const targetRoot = path.resolve(options.target);
   const profile = await loadProfile(path.resolve(options.config));
-  validateQA(profile.qa);
+  requirePairedQA(profile.qa);
   const reconciliation = options.reconciliation ? JSON.parse(await readFile(options.reconciliation, 'utf8')) : undefined;
   const plan = await planAdoption({ sourceRoot, targetRoot, profile, reconciliation });
 
@@ -59,6 +60,9 @@ async function main() {
     throw new Error("adoption has conflicts; reconcile them manually and run the dry-run again");
   }
   if (options.dryRun) return;
+
+  // Dry-run can inspect a proposed destination. Writes require the actual target identity.
+  await verifyRepository(targetRoot, profile);
 
   const result = await applyAdoptionPlan(plan);
   console.log(`Adoption complete: ${result.created} created, ${result.identical} already aligned.`);

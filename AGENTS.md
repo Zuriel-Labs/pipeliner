@@ -54,8 +54,8 @@ This repository uses Pipeliner: an evidence-first, agent-managed development and
 
 - Lead every work-status update, blocker, QA handoff, release report, approval request, approval acknowledgment, and completion message with the owning GitHub Issue number and its outcome or remaining gate. Use the Issue title when additional context helps.
 - Keep pull requests critical supporting evidence: include their links or numbers, review/check results, merge state, and exact candidate identity where relevant. A pull-request number must never stand in for the Issue number or define whether the Issue is complete.
-- Bind each approval to the owning Issue, the specific configured gate, and the exact unchanged candidate. Render `{number}` in approval phrases from the Issue number, never the pull-request number. The default completion phrase is `Approved to complete Issue #{number}`. Preserve configured Production and native-candidate phrases; introduce them with the Issue and candidate they authorize. Issue-based wording does not broaden approval or waive any gate.
-- For example, when Issue #42 is implemented by PR #57, say “Issue #42 is In Progress; implementation is in PR #57,” or “Issue #42 is awaiting PM Testing; PR #57 is merged.” Request completion with `Approved to complete Issue #42`, and acknowledge it for Issue #42 and the verified candidate. Say “Issue #42 is complete” only after all completion gates and live readback pass.
+- Bind each approval to the owning Issue, the specific configured gate, and the exact unchanged candidate. The official response for every gate is exactly `Approved`. Put the Issue number, gate, candidate and authorized outcome in the surrounding request, not in the response. Never infer gate scope from identical phrase fields. Issue-based wording does not broaden approval or waive any gate.
+- For example, when Issue #42 is implemented by PR #57, say “Issue #42 is In Progress; implementation is in PR #57,” or “Issue #42 is awaiting PM Testing; PR #57 is merged.” When final acceptance remains, request `Approved`, and acknowledge it for Issue #42 and the verified candidate. Say “Issue #42 is complete” only after all completion gates and live readback pass.
 - If no Issue exists or its linkage is ambiguous, state that limitation and resolve it through the configured Issue workflow. Never invent an Issue number, substitute a PR number, or bypass Issue-creation approval.
 
 ## Canonical lifecycle
@@ -98,6 +98,12 @@ Follow the shared [release-cycle contract](.agents/skills/pipeliner-maintain/ref
 - Record a known-good rollback target before deployment. A documented non-destructive application or GitOps rollback may be agent-owned; destructive schema or data recovery always requires explicit PM approval.
 
 ## PM Testing handoff
+
+### One approval per tested outcome
+
+- For source-only (`none`) and native-only delivery without Production, the final required PM QA approval (such as `Approved`) also authorizes exact-candidate integration, verified publication, Issue closure and cleanup. Never request an additional Issue-completion approval for that same outcome. All configured pairs must approve the latest candidate first; intermediate approvals advance the baton only.
+- The Showcase must explain this outcome before requesting approval. Continue automatically after approval through merge, verification, closure and cleanup; stop only for failed evidence, a changed candidate or an actual external control. Preserve original QA records and prove exact-tree/artifact continuity after integration.
+- Production authorization, testing of a newly deployed environment, and release-phase readiness can be distinct decisions. Each final PM acceptance also authorizes its corresponding closure or phase transition; never append an administrative completion confirmation to an already approved final candidate. Existing completion phrase fields name a final acceptance gate where one exists, not a mandatory extra gate. This rule governs the default completion examples elsewhere in this contract.
 
 `pipeliner-adopt` and `pipeliner-update` are exempt from PM Testing and PM acceptance. Do not request PM Testing steps, a PM test session, or a bootstrap-completion approval phrase. The agent runs the configured test suites and agent testing, remediates findings, reruns affected checks until clean, verifies publication and cleanup, then reports completion. Configure future application QA without starting or waiting for its PM turns during bootstrap. This exception overrides generic handoff/completion rules for these operations only; application development/release gates, material-choice clarification, and existing repository protections still apply.
 

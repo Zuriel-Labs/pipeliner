@@ -40,10 +40,10 @@ function validProfile() {
       branchPattern: "issue/{number}-{slug}",
       issueReference: "Refs #{number}",
       approvalPhrases: {
-        issueCreation: "Approved to create this exact GitHub Issue",
-        production: "Approved to merge and deploy production",
-        completion: "Approved to complete Issue #{number}",
-        nativeCandidate: "Beta approved",
+        issueCreation: "Approved",
+        production: "Approved",
+        completion: "Approved",
+        nativeCandidate: "Approved",
       },
       pmTesting: {
         required: true,
@@ -72,7 +72,7 @@ function validProfile() {
           buildCommand: "npm run build",
           deployCommand: "npm run deploy",
           verifyCommand: "npm run verify:live",
-          approvalPhrase: "Approved to complete Issue #{number}",
+          approvalPhrase: "Approved",
           promoteWithoutRebuild: false,
         },
       ],
@@ -111,6 +111,20 @@ async function fixture(t) {
 test("validateProfile accepts a complete supported profile", () => {
   const profile = validProfile();
   assert.equal(validateProfile(profile), profile);
+});
+
+test('adoption requires the official approval word without rewriting legacy evidence', async (t) => {
+  const roots = await fixture(t);
+  for (const phrase of ['Beta approved', 'approved', 'Approved ', 'Approved to complete Issue #{number}']) {
+    const profile = validProfile();
+    profile.workflow.approvalPhrases.completion = phrase;
+    assert.equal(validateProfile(profile), profile); // Legacy profiles remain readable.
+    await assert.rejects(planAdoption({ ...roots, profile }), /exactly Approved/);
+    assert.equal(profile.workflow.approvalPhrases.completion, phrase);
+  }
+  const profile = validProfile();
+  profile.release.environments[0].approvalPhrase = 'Deploy approved';
+  await assert.rejects(planAdoption({ ...roots, profile }), /exactly Approved/);
 });
 
 test("validateProfile rejects a missing repository identity", () => {

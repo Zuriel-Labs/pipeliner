@@ -10,7 +10,7 @@
     { "id": "macos", "os": "macos", "architecture": "arm64", "prerequisites": ["Native macOS host and project SDK"], "setup": ["./scripts/setup-qa.sh"], "suite": ["./scripts/test.sh", "./scripts/build.sh", "./scripts/smoke.sh"], "teardown": ["./scripts/cleanup-qa.sh"] }
   ],
   "turns": [
-    { "id": "windows", "developer": "developer-a", "environment": "windows", "pm": "project-manager", "approvalPhrase": "Windows QA approved" },
-    { "id": "macos", "developer": "developer-a", "environment": "macos", "pm": "project-manager", "approvalPhrase": "macOS QA approved" }
+    { "id": "windows", "developer": "developer-a", "environment": "windows", "pm": "project-manager", "approvalPhrase": "Approved" },
+    { "id": "macos", "developer": "developer-a", "environment": "macos", "pm": "project-manager", "approvalPhrase": "Approved" }
   ]
 }

@@ -21,26 +21,26 @@ function qa(count = 3) {
     developers: ids.map(id => ({ id, kind: 'agent', github: `account-${id}`, environments: ['local'] })),
     pms: ids.map(id => ({ id: `pm-${id}`, kind: 'human' })),
     environments: [{ id: 'local', os: 'linux', architecture: 'x64', prerequisites: [], setup: [], suite: ['test'], teardown: [] }],
-    turns: ids.map(id => ({ id, developer: id, pm: `pm-${id}`, environment: 'local', approvalPhrase: 'QA approved' })) };
+    turns: ids.map(id => ({ id, developer: id, pm: `pm-${id}`, environment: 'local', approvalPhrase: 'Approved' })) };
 }
 function record(id, candidate = c1, round = 1, scope = 'issue') {
   return { turn: id, round, candidate, developer: id, environment: 'local', session: `session-${round}-${id}`,
     host: { available: true, os: 'linux', architecture: 'x64' }, pickedUp: true, candidateAvailable: true, nextCandidateAvailable: true,
     review: { candidate, evidence: 'Agent reviewed full diff and behavior' },
     suite: [{ command: 'test', exitCode: 0, evidence: 'full log' }],
-    pm: { owner: `pm-${id}`, phrase: 'QA approved', candidate, evidence: 'Actual PM reply' },
+    pm: { owner: `pm-${id}`, phrase: 'Approved', candidate, evidence: 'Actual PM reply' },
     cleanup: { verified: true, evidence: 'empty inventory verified', resources: [] },
     showcase: { scope, issue: 9, candidate, summary: 'Changes in this candidate', findings: [], testResults: ['test: passed'],
       target: 'local verified artifact', prerequisites: [], steps: [{ action: 'Exercise changed behavior', expected: 'Correct result' }],
-      regressions: ['Existing behavior preserved'], limitations: [], nextOutcome: 'Next pair or release gate', approvalPhrase: 'QA approved' } };
+      regressions: ['Existing behavior preserved'], limitations: [], nextOutcome: 'Next pair or release gate', approvalPhrase: 'Approved' } };
 }
 function profile() {
   return { repository: { owner: 'Example', name: 'app', defaultBranch: 'main' }, qa: qa(), release: {
     candidateIdentity: ['sourceCommit', 'gitTree'], environments: [{ name: 'preview' }, { name: 'production' }],
     cycle: { phases: [
-      { id: 'alpha', kind: 'development', branch: 'develop', environments: ['preview'], approvalPhrase: 'Alpha ready', readiness: ['scope complete'], promotion: 'source', forwardPortTo: [] },
-      { id: 'beta', kind: 'stabilization', branch: 'release/1.0', environments: ['preview'], approvalPhrase: 'Beta ready', readiness: ['no blockers'], promotion: 'same-artifact', forwardPortTo: ['alpha'] },
-      { id: 'stable', kind: 'production', branch: 'main', environments: ['production'], approvalPhrase: 'Release accepted', readiness: ['verified'], promotion: 'same-artifact', forwardPortTo: [] }
+      { id: 'alpha', kind: 'development', branch: 'develop', environments: ['preview'], approvalPhrase: 'Approved', readiness: ['scope complete'], promotion: 'source', forwardPortTo: [] },
+      { id: 'beta', kind: 'stabilization', branch: 'release/1.0', environments: ['preview'], approvalPhrase: 'Approved', readiness: ['no blockers'], promotion: 'same-artifact', forwardPortTo: ['alpha'] },
+      { id: 'stable', kind: 'production', branch: 'main', environments: ['production'], approvalPhrase: 'Approved', readiness: ['verified'], promotion: 'same-artifact', forwardPortTo: [] }
     ] } } };
 }
 test('native capability never changes message-only indefinite waiting', () => {
@@ -124,7 +124,7 @@ function phaseState() {
   return { target: '1.0', releaseIssue: 9, phase: 'alpha', candidate, currentTurn: 'c',
     issues: [{ number: 10, accepted: true, evidence: 'verified phase integration' }], frozenIssues: [10], blockers: [],
     records: ['a', 'b', 'c'].map(id => record(id, candidate, 1, 'release')),
-    approvals: ['a', 'b', 'c'].map(id => ({ pm: `pm-${id}`, phase: 'alpha', candidate, phrase: 'Alpha ready', evidence: 'actual readiness approval' })),
+    approvals: ['a', 'b', 'c'].map(id => ({ pm: `pm-${id}`, phase: 'alpha', candidate, phrase: 'Approved', evidence: 'actual readiness approval' })),
     readiness: [{ criterion: 'scope complete', passed: true, evidence: 'scope verified' }],
     verification: { candidate, passed: true, evidence: 'integrated behavior passed', environments: [{ name: 'preview', candidate, passed: true, evidence: 'preview verified' }] }, rollback: { target: 'known-good', evidence: 'verified target' }, forwardPorts: [] };
 }
@@ -149,6 +149,19 @@ test('first and last pairs circulate until latest candidate coverage converges',
     assert.notEqual(evaluateQA(q, c2, history, { issue: 9, currentTurn: 'a' }).state, 'complete');
   }
 });
+test('official approval word remains bound to Human, Issue and exact candidate', () => {
+  const q = qa(1);
+  for (const phrase of ['approved', 'Beta approved', 'Approved to complete Issue #9', 'Approved ']) {
+    const r = record('a'); r.pm.phrase = phrase;
+    assert.notEqual(evaluateQA(q, c1, [r], { issue: 9, currentTurn: 'a' }).state, 'complete');
+  }
+  for (const mutate of [r => { r.pm.owner = 'another-pm'; }, r => { r.pm.candidate = c2; }, r => { r.showcase.issue = 10; }]) {
+    const r = record('a'); mutate(r);
+    assert.notEqual(evaluateQA(q, c1, [r], { issue: 9, currentTurn: 'a' }).state, 'complete');
+  }
+  assert.equal(evaluateQA(q, c1, [record('a')], { issue: 9, currentTurn: 'a' }).state, 'complete');
+});
+
 test('one Agent across environments and shared PM still require independent full turns', () => {
   const q = qa(2); q.developers = [q.developers[0]]; q.pms = [q.pms[0]];
   q.environments.push({ ...q.environments[0], id: 'second', os: 'macos' });
@@ -173,7 +186,7 @@ test('stabilization requires verified forward-port and approved identical artifa
   const p = profile(), s = phaseState(); s.phase = 'beta';
   s.candidate.releaseScope = releaseScopeKey(s); s.candidate.artifactDigest = 'sha256:abc';
   s.readiness = [{ criterion: 'no blockers', passed: true, evidence: 'verified' }];
-  s.approvals.forEach(a => { a.phase = 'beta'; a.phrase = 'Beta ready'; a.artifactDigest = 'sha256:abc'; });
+  s.approvals.forEach(a => { a.phase = 'beta'; a.phrase = 'Approved'; a.artifactDigest = 'sha256:abc'; });
   s.artifact = { candidate: s.candidate, digest: 'sha256:abc', previousDigest: 'sha256:abc', verified: true, evidence: 'manifest' };
   assert.equal(evaluatePhase(p, s).state, 'waiting');
   s.forwardPorts = [{ phase: 'alpha', sourceCandidate: s.candidate, commit: c2.sourceCommit, gitTree: c2.gitTree, verified: true, evidence: 'forward integration passed' }];

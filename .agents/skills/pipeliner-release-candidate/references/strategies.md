@@ -1,6 +1,8 @@
 # Release strategies
 
-Read only the section selected by `release.strategy`.
+With `release.cycle`, first apply the [cycle contract](../../pipeliner-maintain/references/release-cycle.md) for phase branches, scope, aggregate QA and approvals. The sections below describe simple delivery strategies; within a cycle use the configured phase branch instead of default-branch assumptions. Development-Issue completion is phase integration, not Production. Production authorization precedes mutation and is separate from final production-phase approval and completion acceptance. See the exact [evidence format](../../pipeliner-maintain/references/evidence.md).
+
+Read the section selected by `release.strategy` within that routing. Final phase `kind=production` does not change the four strategies or imply a service destination: native-only `multi-environment` may deliver Stable through configured native roles. Use candidate preparation, distribution/integration verification and aggregate all-PM acceptance through review/close; invoke `pipeliner-release-production` only for an actual configured Production destination.
 
 ## Identity and approval stages
 
@@ -26,7 +28,7 @@ Use workflow.approvalPhrases.production for Production mutation and workflow.app
 - Candidate review happens through local testing, CI, exact tree identity, and any configured preview—not through an invented Canary.
 - Complete configured local QA turns and cleanup, then request workflow.approvalPhrases.production against the pre-release source/tree and any configured prebuilt artifact. This authorizes the planned merge/deploy; it is not acceptance of a future Production deployment. No invented Canary or deployment ID.
 - After actual authorization, merge only the exact reviewed tree using the repository's approved merge method.
-- Deploy the exact clean default-branch revision, record the previous Production version, and verify the new Production identity and behavior.
+- Deploy the exact clean configured production-phase branch revision (default branch for a simple release), record the previous Production version, and verify the new Production identity and behavior.
 - Keep the Issue In Review after a healthy deployment. Project Manager QA occurs against Production; only the configured completion approval permits Done and closure.
 
 ## `multi-environment`

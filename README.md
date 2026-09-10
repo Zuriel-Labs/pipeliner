@@ -38,7 +38,7 @@ For a new repository, say that you want one created. The agent asks for missing 
 1. Verify the exact local checkout and GitHub repository identity.
 2. Read the target's instructions, Git state, existing work, workflows, checks, release process, environments, security controls, labels, branch protections, and Project.
 3. Follow the target's existing Issue, branch, and pull-request governance. If none exists, bootstrap through a focused branch and pull request unless the PM explicitly authorizes another supported path.
-4. Build `pipeliner.config.json` from evidence and ask about unresolved application type, runtime OS/architectures, developers and their available systems, ordered local QA turns and PM owners, prerequisites, release destinations and approval gates. Wait for material answers.
+4. Follow the [conditional discovery checklist](.agents/skills/pipeliner-adopt/references/discovery.md), reuse saved answers, and build `pipeliner.config.json` from evidence and ask about unresolved application type, runtime OS/architectures, developers and their available systems, ordered local QA turns and PM owners, prerequisites, release destinations and approval gates. Wait for material answers.
 5. Run a dry-run, reconcile every collision without blind overwrites, and apply only a conflict-free plan.
 6. Align canonical policy, skills, provider adapters, repository workflows, labels, and the GitHub Project without weakening stronger target-specific rules.
 7. Run Pipeliner validation and every target quality gate, publish the focused changes, and read back the repository, Issue, pull request, checks, and Project state.
@@ -55,7 +55,7 @@ Branch protection and rulesets are **opt-in and never enabled by default**. Duri
 - Specification and test-first implementation for material changes.
 - Exact candidate identity across source, tree, artifact, configuration, deployment, platform, and validation session as applicable.
 - Separate automated evidence, deployment health, and PM acceptance.
-- Clear, numbered, change-specific `PM Testing steps` at every review and release handoff.
+- A full change-specific Showcase at each Issue/release handoff: summary, Agent findings, test results, target, prerequisites, numbered action/expected-result PM Testing steps, regressions, limitations, candidate and next approval/outcome.
 - Focused PM clarification when repository evidence cannot resolve an important choice.
 - Safe adoption that refuses to overwrite an existing file.
 - Canonical skills plus provider adapters that prevent copied policy from drifting.
@@ -215,11 +215,11 @@ Apply the label taxonomy in `blueprints/github-labels.json` with `gh label creat
 
 ## Release strategies
 
-QA ownership is independent of these strategies. Declare `qa` with application type, runtime platforms, developers and their available environments, each environment's prerequisites/setup/full suite/teardown, ordered turns and PM approval phrases. The four examples under `blueprints/qa/` cover one developer/one environment, one developer across Windows/macOS, two developers sharing Windows, and separate Windows/macOS developers. Example commands and IDs must be replaced with verified target values.
+QA ownership is independent of these strategies. Declare `qa.mode=circulating`, explicit Agent Devs (`kind=agent`, accountable `github` login), Human PMs in `qa.pms` (`kind=human`), and ordered developer/environment/PM pairs. Declare application type, runtime platforms and each environment's prerequisites/setup/full suite/teardown. Several pairs may share a PM. Cover every participating Dev and PM and every required QA environment; explicitly list required Dev/environment combinations as turns. Available environments describe capabilities; they do not require a turn for every accessible Dev/environment combination. The four examples under `blueprints/qa/` cover one developer/one environment, one developer across Windows/macOS, two developers sharing Windows, and separate Windows/macOS developers. Example commands and IDs must be replaced with verified target values.
 
-Existing version 1 profiles remain readable without `qa`, but adoption requires explicit discovery and migration. `migrateQA(profile, resolvedQA)` adds confirmed QA without changing release settings. Pipeliner itself uses one confirmed local macOS arm64 turn with its configured PM; adopters must discover their own topology.
+Version 1 profiles and legacy linear evidence remain readable. Missing explicit paired identities or circulating mode requires [discovery and explicit migration](.agents/skills/pipeliner-adopt/references/discovery.md) before adoption/update or new QA. Reuse saved answers and preserve local release settings; never invent participants or turn historical evidence into new approvals.
 
-Run native builds on compatible local hosts; containerized web QA must specify dependencies, ports, fixtures, readiness and teardown. Missing hosts stay pending. Follow [local QA execution and evidence](.agents/skills/pipeliner-work-issue/references/local-qa.md). Every turn records full suite results, exact candidate, PM approval and cleanup; self-handoff and same-OS handoff require independent turns. Waiting remains In Progress. Changed candidates invalidate prior QA. Task-owned test resources are cleaned after success, failure and PM Testing; unrelated data and resources remain intact.
+Run native builds on compatible local hosts; containerized web QA must specify dependencies, ports, fixtures, readiness and teardown. Missing hosts stay pending. Follow [local QA execution and evidence](.agents/skills/pipeliner-work-issue/references/local-qa.md). The current pair finishes full testing, Agent review, Showcase, Human approval and cleanup on the latest candidate, then circulation moves to the next stale pair and wraps through the configured order. All pairs must pass on that same candidate. Latest rounds override older passes; documentation/evidence changes also invalidate prior shared QA. Every turn records full suite results, exact candidate, PM approval and cleanup; self-handoff and same-OS handoff require independent turns. Waiting remains In Progress. Changed candidates invalidate prior QA. Task-owned test resources are cleaned after success, failure and PM Testing; unrelated data and resources remain intact.
 
 ### Immutable promotion
 
@@ -239,11 +239,23 @@ Use `none` for documentation or tooling repositories that have no application de
 
 `release.preReleaseIdentity` separates evidence available for merge/release authorization from final `release.candidateIdentity`. Do not invent a deployment ID before deployment. Legacy none/direct profiles default to source/tree before release; immutable/native profiles retain full identity until stage ownership is resolved. Preserve stronger existing artifact and configuration approval requirements. The [strategy reference](.agents/skills/pipeliner-release-candidate/references/strategies.md) defines exact gate ordering and expected merge/deployment transitions.
 
+## Optional release cycles
+
+The same 12 skills support a simple Issue loop or explicit `release.cycle`. A cycle defines ordered development, optional stabilization and final production phases with unique branches, declared environments, readiness and approval phrases. A release target/milestone groups development Issues; a Release Issue owns frozen scope, aggregate paired QA, all-PM approval and final acceptance. Phase names never become Project Status values.
+
+Development Issues integrate into the configured phase branch and complete their own acceptance gate without claiming Production release. Stabilization freezes feature scope and requires verified forward-ports into nonempty declared development targets. The Release Issue stays active through phase transitions; only the Human PM can pause it for another blocking Issue. Production authorization remains separate from final production-phase approval and release acceptance.
+
+A final phase with `kind=production` can also mean native Stable distribution under `multi-environment`, using native-role environments. It requires candidate/distribution verification and aggregate all-PM acceptance; it does not invent a service Production URL or invoke the Production skill without a configured Production destination. All four release strategies remain unchanged.
+
+See the shared [cycle contract](.agents/skills/pipeliner-maintain/references/release-cycle.md) for routing, freeze and `source`/`same-artifact`/`distinct-artifact` continuity, and the [evidence format](.agents/skills/pipeliner-maintain/references/evidence.md) for the exact CLI/state contract.
+
 ## Agent-led work and questions
 
 Tell the agent to start work, work an Issue number, or review the active Issue. It honors active work, selects ready Backlog work by configured priority order and then lowest Issue number when unspecified, and invokes subsequent skills through the next actual PM gate. Testing approval or feedback resumes the same Issue without another start command. After merge, feedback uses a new supporting PR on that Issue. Read-only audits never start implementation, and completion does not automatically begin unrelated work.
 
-Questions use permitted native app controls when available and a clearly marked message otherwise. Required answers wait indefinitely: no timers, reminders or defaults inferred from silence. Agents preserve previous answers and continue independent authorized work. Exact approval phrases and real access/host/repository controls still apply.
+All questions use ordinary agent messages marked `Question:`. Native question controls and structured question tools are never used. Required answers wait indefinitely: no timers, reminders or defaults inferred from silence. Agents preserve previous answers and continue independent authorized work. Exact approval phrases and real access/host/repository controls still apply.
+
+Installed skills resolve their own repository from the canonical installation and verify Git root, profile and all fetch/push origin identities. They do not ask for the home location again or infer auxiliary repositories; first adoption still requires an explicit target. Run the installed `scripts/resolve-home.mjs` with no arguments, using its absolute path when outside that checkout. See [home verification](.agents/skills/pipeliner-maintain/references/home.md).
 
 Installed validators require Node.js 22+ independently of the application's stack. AGENTS.md takes application commands from the target profile; adoption does not install npm package scripts or the installer itself. Run the installer from a reviewed upstream source checkout.
 ## PM Testing standard
@@ -267,6 +279,8 @@ jobs:
 Pin `PINNED_PIPELINER_COMMIT` to a reviewed full commit SHA. Existing callers must remove the old inputs when upgrading. Review all target workflow command chains and record workflow/transitive file hashes in `.agents/ci-review.json`; the repository validator blocks missing or stale review coverage. The ledger records review freshness, not an automatic proof of arbitrary program behavior. Keep lightweight security checks; publish real local evidence without fabricating GitHub check results. [GitHub documents reusable workflow inputs and calls](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows).
 
 ## Provider compatibility
+
+See the shared [provider discovery reference](.agents/skills/pipeliner-maintain/references/providers.md) for official Claude/OpenCode sources and the distinction between documentation checks and live execution. OpenCode supports the canonical `.agents/skills/` tree; no copied OpenCode policy is needed.
 
 - ChatGPT/Codex and compatible Agent Skills hosts use `.agents/skills/` as the canonical packages.
 - [Claude Code](https://code.claude.com/docs/en/skills) discovers `.claude/skills/<name>/SKILL.md`; Pipeliner adapters link back to the canonical package and remain ordinary files for cross-platform Git behavior.

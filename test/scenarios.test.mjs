@@ -90,3 +90,24 @@ test('installed validation rejects a broken reference and missing lifecycle skil
   await rm(path.join(root, '.claude/skills/pipeliner-review-issue'), { recursive: true });
   assert.ok((await validateRepository(root)).some(error => error.includes('canonical pipeliner-review-issue skill is required')));
 });
+
+test('CLI adoption verifies target identity and installed home works outside the target cwd', async t => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), 'pipeliner-home-cli-'));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const target = path.join(parent, 'target'); await mkdir(target);
+  const profile = JSON.parse(await readFile(path.join(sourceRoot, 'blueprints/profiles/direct-production.config.json')));
+  const config = path.join(parent, 'profile.json'); await writeFile(config, JSON.stringify(profile));
+  const args = [path.join(sourceRoot, 'scripts/adopt.mjs'), '--target', target, '--config', config];
+  execFileSync('git', ['init', target], { stdio: 'ignore' });
+  execFileSync('git', ['-C', target, 'remote', 'add', 'origin', 'https://github.com/Wrong/repository.git']);
+  assert.throws(() => execFileSync(process.execPath, args, { stdio: 'pipe' }), /identity mismatch/);
+  assert.deepEqual(await readdir(target), ['.git']);
+  execFileSync('git', ['-C', target, 'remote', 'set-url', 'origin', `https://github.com/${profile.repository.owner}/${profile.repository.name}.git`]);
+  execFileSync(process.execPath, args, { stdio: 'pipe' });
+  const home = JSON.parse(execFileSync(process.execPath, [path.join(target, 'scripts/resolve-home.mjs')], { cwd: parent, encoding: 'utf8' }));
+  assert.equal(home.repository, `${profile.repository.owner}/${profile.repository.name}`);
+  execFileSync(process.execPath, args, { stdio: 'pipe' });
+  const legacy = structuredClone(profile); delete legacy.qa.mode; delete legacy.qa.pms; legacy.qa.developers.forEach(d => { delete d.kind; delete d.github; });
+  await writeFile(config, JSON.stringify(legacy));
+  assert.throws(() => execFileSync(process.execPath, args, { stdio: 'pipe' }), /paired QA discovery/);
+});

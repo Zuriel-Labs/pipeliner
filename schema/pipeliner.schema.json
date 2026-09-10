@@ -133,11 +133,32 @@
         "environments": {
           "type": "array",
           "items": { "$ref": "#/$defs/environment" }
-        }
+        },
+        "cycle": { "$ref": "#/$defs/releaseCycle" }
       }
     }
   },
   "$defs": {
+    "releaseCycle": {
+      "type": "object", "additionalProperties": false, "required": ["phases"],
+      "properties": {
+        "phases": { "type": "array", "minItems": 2, "items": { "$ref": "#/$defs/releasePhase" } }
+      }
+    },
+    "releasePhase": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "kind", "branch", "environments", "approvalPhrase", "readiness", "promotion", "forwardPortTo"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyString" },
+        "kind": { "enum": ["development", "stabilization", "production"] },
+        "branch": { "$ref": "#/$defs/nonEmptyString" },
+        "environments": { "allOf": [{ "$ref": "#/$defs/strings" }], "minItems": 1, "description": "Names of existing release.environments entries; references are checked by profile validation." },
+        "approvalPhrase": { "$ref": "#/$defs/nonEmptyString" },
+        "readiness": { "allOf": [{ "$ref": "#/$defs/strings" }], "minItems": 1 },
+        "promotion": { "enum": ["source", "same-artifact", "distinct-artifact"] },
+        "forwardPortTo": { "$ref": "#/$defs/strings", "description": "Existing phase IDs receiving fixes; references are checked by profile validation." }
+      }
+    },
     "strings": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/nonEmptyString" } },
     "platform": {
       "type": "object", "additionalProperties": false, "required": ["os", "architecture"],
@@ -146,14 +167,31 @@
     "qa": {
       "type": "object", "additionalProperties": false,
       "required": ["applicationType", "runtimePlatforms", "candidateIdentity", "developers", "environments", "turns"],
+      "allOf": [{
+        "if": { "anyOf": [
+          { "required": ["mode"] }, { "required": ["pms"] },
+          { "properties": { "developers": { "contains": { "anyOf": [{ "required": ["kind"] }, { "required": ["github"] }] } } }, "required": ["developers"] }
+        ] },
+        "then": { "required": ["mode", "pms"], "properties": { "developers": { "items": { "required": ["kind", "github"] } } } }
+      }],
       "properties": {
+        "mode": { "const": "circulating" },
+        "pms": {
+          "type": "array", "minItems": 1, "items": {
+            "type": "object", "additionalProperties": false, "required": ["id", "kind"],
+            "properties": { "id": { "$ref": "#/$defs/nonEmptyString" }, "kind": { "const": "human" } }
+          }
+        },
         "applicationType": { "enum": ["native", "web", "library", "tooling"] },
         "runtimePlatforms": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/platform" } },
         "candidateIdentity": { "type": "array", "minItems": 2, "uniqueItems": true, "items": { "$ref": "#/$defs/nonEmptyString" } },
         "developers": {
           "type": "array", "minItems": 1, "items": {
             "type": "object", "additionalProperties": false, "required": ["id", "environments"],
-            "properties": { "id": { "$ref": "#/$defs/nonEmptyString" }, "environments": { "allOf": [{ "$ref": "#/$defs/strings" }], "minItems": 1 } }
+            "properties": {
+              "id": { "$ref": "#/$defs/nonEmptyString" }, "kind": { "const": "agent" }, "github": { "$ref": "#/$defs/nonEmptyString" },
+              "environments": { "allOf": [{ "$ref": "#/$defs/strings" }], "minItems": 1 }
+            }
           }
         },
         "environments": {

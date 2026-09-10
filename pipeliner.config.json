@@ -63,10 +63,12 @@
     "environments": []
   },
   "qa": {
+    "mode": "circulating",
+    "pms": [{ "id": "brimdor", "kind": "human" }],
     "applicationType": "tooling",
     "runtimePlatforms": [{ "os": "macos", "architecture": "arm64" }],
     "candidateIdentity": ["sourceCommit", "gitTree"],
-    "developers": [{ "id": "brimdor", "environments": ["local-mac"] }],
+    "developers": [{ "id": "brimdor", "kind": "agent", "github": "brimdor", "environments": ["local-mac"] }],
     "environments": [{
       "id": "local-mac", "os": "macos", "architecture": "arm64",
       "prerequisites": ["Apple Silicon Mac with Node.js 22+, Git and authenticated GitHub CLI"],

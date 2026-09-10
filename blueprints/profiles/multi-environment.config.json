@@ -115,6 +115,8 @@
     ]
   },
   "qa": {
+    "mode": "circulating",
+    "pms": [{ "id": "project-manager", "kind": "human" }],
     "applicationType": "native",
     "runtimePlatforms": [
       {
@@ -133,12 +135,16 @@
     "developers": [
       {
         "id": "developer-a",
+        "kind": "agent",
+        "github": "developer-a",
         "environments": [
           "windows"
         ]
       },
       {
         "id": "developer-b",
+        "kind": "agent",
+        "github": "developer-b",
         "environments": [
           "macos"
         ]

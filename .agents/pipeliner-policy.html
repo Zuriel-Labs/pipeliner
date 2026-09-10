@@ -66,8 +66,8 @@
 
     <section>
       <h2>Project Manager QA</h2>
-      <p>Every review or release handoff gives the PM the exact target, prerequisites, numbered actions, expected results, regression checks, candidate identity, limitations, and the precise approval phrase when approval is the next gate.</p>
-      <p>When evidence cannot resolve a material choice, the agent asks focused questions using permitted native app controls, or a clearly marked message if unavailable. Required answers wait indefinitely: no timers, reminders or inferred answers. Only dependent work pauses. Actual approval is bound to the exact candidate and gate.</p>
+      <p>Every Issue or aggregate release handoff gives a full Showcase: scope and owning Issue, change summary, Agent findings (explicitly none when empty), test results, exact target, prerequisites, numbered actions paired with expected results, regression checks, limitations, candidate identity, next outcome and the precise configured approval phrase.</p>
+      <p>When evidence cannot resolve a material choice, the agent asks focused questions only in ordinary messages marked <code>Question:</code>; native question controls and structured question tools are prohibited. Required answers wait indefinitely: no timers, reminders or inferred answers. Only dependent work pauses. Actual approval is bound to the exact candidate and gate.</p>
       <p>Review resumes while In Progress or In Review. Feedback after merge returns the same Issue to In Progress and the agent creates a fresh supporting PR. Pre-release and final deployment identities are recorded at their respective stages; changed trees or artifacts invalidate earlier approvals.</p>
     </section>
 
@@ -75,14 +75,14 @@
       <h2>Repository discovery</h2>
       <p>Branch protection and rulesets are optional and never enabled by default. The agent asks the PM whether protection is wanted and, if so, which branches and rules to enforce. Existing controls remain unchanged until an explicit decision. Agent quality gates and PM approval still apply without branch protection.</p>
       <p>Begin with an explicit target or intent to create a repository. The agent resolves missing name, purpose, owner, visibility and destination, then verifies access and identity. Failed access is not proof of absence. Existing customized policies and unrelated work remain protected.</p>
-      <p>The interview establishes runtime systems, developer availability, required local QA turns, PM ownership, setup, cleanup and release destinations. Material unanswered choices pause dependent work. Bootstrap does not deploy the application.</p>
+      <p>The conditional interview reuses saved answers and asks only unresolved applicable questions about runtime systems, Agent Dev/Human PM pairs, local QA, setup, cleanup, release destinations and optional cycles. Legacy profiles remain readable but require explicit participant/circulating migration before a new QA sequence; old approvals are never synthesized into new passes. Material unanswered choices pause dependent work. Bootstrap does not deploy the application.</p>
       <p>Installed commands come from the target profile, with Node.js 22+ required only for framework tooling. The installer runs from a reviewed upstream checkout. Project audits use the target identity and mapped fields, support user and organization owners, and fetch complete pages. Missing visibility policy preserves the observed value; Pipeliner's public example is never an adopter default.</p>
     </section>
 
     <section>
       <h2>Local QA and ownership</h2>
-      <p>QA turns are independent of release destinations. One developer may test Windows and macOS; two developers may both test Windows. Each required turn runs the full suite locally and records the exact candidate, owner, environment, session, results, PM Testing and cleanup.</p>
-      <p>One developer on one environment needs no baton. Otherwise, the outgoing owner verifies every gate and confirms the exact candidate is available to the next environment. The incoming owner verifies identity and acknowledges pickup. Waiting remains In Progress on the same Issue; missing hosts never count as a pass.</p>
+      <p>QA turns are independent of release destinations. Devs are Agents with accountable GitHub logins; PMs are explicitly registered Humans. Each turn pairs an Agent, environment and Human PM; several pairs may share a PM. One Agent may test Windows and macOS; two Agents may both test Windows. Each required turn runs the full suite locally and records the exact candidate, owner, environment, session, results, PM Testing and cleanup.</p>
+      <p>The current pair finishes on the latest candidate before the next stale pair, scanning forward and wrapping through configured order. Every pair must pass on that candidate; latest rounds never fall back to an older pass after failure. Candidate changes invalidate all shared QA, including documentation/evidence-only changes. One pair needs no transfer bookkeeping. Otherwise, the outgoing owner verifies every gate and confirms the exact candidate is available to the next environment. The incoming owner verifies identity and acknowledges pickup. Waiting remains In Progress on the same Issue; missing hosts never count as a pass.</p>
       <p>Application, native-package and container-image builds stay on compatible local systems. GitHub Actions retains reviewed lightweight checks, including inspection of every indirect command chain. Local evidence never fabricates a GitHub check result.</p>
       <p>Track test-owned processes, containers, images, volumes, artifacts and workspaces by exact identity. Clean up after successful and failed runs, preserve unrelated resources, and verify removal. Resources retained for PM Testing need an owner and cleanup trigger; final removal remains a required gate.</p>
     </section>
@@ -92,6 +92,20 @@
       <p>Adoption and framework updates require no PM Testing, PM acceptance, or bootstrap-completion approval. The agent runs test suites and agent testing, remediates findings, reruns affected checks, verifies publication and cleanup, and reports completion. Future application QA and release PM gates remain configured but do not block bootstrap.</p>
       <p>Use <code>pipeliner-update</code> to incorporate a reviewed upstream revision into an existing repository. Preserve its configuration and custom policies, validate the reconciled installation, record the applied framework commit, and publish the verified maintenance update. Framework updates and update-monitor setup run directly without creating or requiring GitHub Issues, consuming the active slot, or asking for Issue approval. Existing repository protections still apply. Missing historical provenance remains unknown until verified.</p>
       <p>Use <code>pipeliner-monitor-updates</code> only when the user requests scheduled detection. The agent discovers the environment's supported scheduler, resolves the schedule, avoids duplicate jobs, and verifies the saved automation. Unsupported environments receive an honest limitation. Monitoring reports meaningful changes and never installs updates; adoption does not create a monitor automatically.</p>
+    </section>
+
+    <section>
+      <h2>Installed repository home</h2>
+      <p>Installed skills use their own canonical installation, Git root, AGENTS.md and repository profile, verifying every fetch and push origin identity. The no-argument installed home resolver is anchored to its script location, not the caller's working directory. First adoption still needs an explicit target; auxiliary repositories are never inferred.</p>
+    </section>
+
+    <section>
+      <h2>Optional release cycles</h2>
+      <p>A cycle uses the same 12 skills and explicitly ordered development, stabilization and final production phases, each with its own branch, environments, readiness, approval and promotion identity. Phases never become Project Status values. A target/milestone groups development Issues and a Release Issue owns aggregate validation.</p>
+      <p>Development Issues complete after their own paired QA, full Showcase, exact phase-branch integration and acceptance. This does not accept or deploy the aggregate release. Freeze exact scope before aggregate phase approval; stabilization rejects new features and requires verified forward-ports into declared development phases. Development and production phases have no forward-port targets.</p>
+      <p>Every pair and Human PM validates the latest aggregate candidate. Keep the Release Issue open through phase advancement, blockers, cleanup and final acceptance. Only the Human PM can pause it to free the single active slot for a blocker. Production mutation requires separate pre-release authorization; final production-phase approval and completion cover the verified released candidate.</p>
+      <p>The final phase kind production may mean native Stable distribution under the multi-environment strategy, with native-role environments. Verify the candidate and configured distribution, then complete aggregate QA and all-Human acceptance. Do not invent a service Production URL or invoke the Production skill without an actual configured Production destination. All four release strategies retain their meanings.</p>
+      <p>Source promotion proves source/tree continuity. Same-artifact promotion reuses the exact approved digest without rebuilding. Distinct-artifact promotion requires declared channel inputs, separately verified bytes and every PM's approval of the resulting digest. Preserve original QA records and separately prove intended merge/deployment transitions.</p>
     </section>
 
     <section>

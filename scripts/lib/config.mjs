@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { validateQA } from "./qa.mjs";
+import { validateCycle } from './release-cycle.mjs';
 
 const RELEASE_STRATEGIES = new Set([
   "none",
@@ -147,6 +148,7 @@ export function validateProfile(profile) {
     throw new Error("multi-environment requires at least two environments");
   }
 
+  validateCycle(profile);
   return profile;
 }
 

@@ -11,7 +11,7 @@ Read the live Issue, Project, matching PR(s), candidate and actual PM messages. 
 
 ## Questions and approval
 
-Discover actual native question capabilities and obey tool permissions. Prefer a supported native question; fall back to a clearly marked `Question:` message if unavailable or unsuitable. Keep questions focused, explain tradeoffs and avoid repeating answered choices. Required answers wait indefinitely, without timers, reminders or silence-based defaults. `clarificationDecision` has no deadline or auto-answer behavior. A native tool timeout is not a PM response. Never submit a proposed answer on the PM's behalf.
+Follow [message-only questions](../../pipeliner-maintain/references/questions.md): use ordinary messages marked `Question:`, never native question controls. Preserve answers and wait indefinitely; `clarificationDecision` has no deadline or auto-answer behavior. Tool timeouts never supply a PM response.
 
 Approval requests show the exact candidate and configured phrase in a standalone code block. An approval belongs to that gate and unchanged candidate. A test pass, recommended answer, previous candidate's approval or absence of feedback never substitutes for actual approval. Do not use tools to contact other PMs without explicit authorization; use available authorized coordination channels and report the required owner's pending turn.
 
@@ -19,9 +19,11 @@ Approval requests show the exact candidate and configured phrase in a standalone
 
 `reviewRoute` accepts the mapped active Status and OPEN/MERGED PR state plus whether actual findings exist. OPEN routes to review/remediation. MERGED without findings routes to checking release/acceptance evidence: verify any pending authorized release before PM acceptance, never presume deployment succeeded. MERGED with findings routes to a fresh remediation PR. Unknown/closed-unmerged PR state blocks for diagnosis.
 
-Move the same Issue to In Progress before remediation. Before merge, use its existing supporting branch. After merge, start from the current default branch using a fresh suffix on the configured Issue branch pattern, create a new supporting PR with the same non-closing Issue reference, and retain the prior release/PR as history. Never try to push fixes into an already merged PR or reopen a completed Issue silently. Invalidate affected evidence, repeat configured QA and obtain fresh approvals.
+Move the same Issue to In Progress before remediation. Before merge, use its existing supporting branch. After merge, resolve the owning phase branch using [release-cycle routing](../../pipeliner-maintain/references/release-cycle.md), or the current default branch without a cycle, and start there using a fresh suffix on the configured Issue branch pattern, create a new supporting PR with the same non-closing Issue reference, and retain the prior release/PR as history. Never try to push fixes into an already merged PR or reopen a completed Issue silently. Invalidate affected evidence, repeat configured QA and obtain fresh approvals.
 
 ## Release progression
+
+Resolve [installed home](../../pipeliner-maintain/references/home.md), then any configured [cycle](../../pipeliner-maintain/references/release-cycle.md) before simple strategy routing. `issueBranch(profile, {phase, kind})` returns the permitted base and forward-port branches for `kind=feature/fix/release`; unknown phases, frozen features and production feature/fix routing are rejected. Production findings enter governed development/stabilization. Development Issue integration does not require Production. Aggregate phase readiness belongs to the Release Issue. Final `kind=production` can be native Stable distribution: use candidate preparation and configured distribution verification through review/close, with aggregate all-PM acceptance. Only an actual configured Production destination invokes the Production skill and its separate mutation authorization.
 
 Follow the matching [strategy](../../pipeliner-release-candidate/references/strategies.md) in order. `releaseStages(strategy, {hasProduction})` lists the ordered milestones; `identityKeys(profile, phase)` selects `pre-release` or `released` identity. Agents verify prerequisites, PM ownership, source and artifacts independently; milestone lists are not a security enforcement engine.
 

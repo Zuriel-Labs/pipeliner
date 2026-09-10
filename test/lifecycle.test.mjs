@@ -26,10 +26,10 @@ test('selection fails closed on incomplete state, competing active Issues and On
   assert.equal(selectWork(profile, { issues: [issue(1), issue(1)] }).state, 'blocked');
 });
 
-test('native prompting respects tool permissions; silence never times out into an answer', () => {
+test('questions stay in messages regardless of native capability; silence never answers', () => {
   for (const elapsedMs of [0, 60000, 86400000]) {
     const pending = clarificationDecision({ nativeAvailable: true, nativePermitted: true, elapsedMs });
-    assert.deepEqual(pending, { channel: 'native', state: 'waiting', timeout: null });
+    assert.deepEqual(pending, { channel: 'message', state: 'waiting', timeout: null });
   }
   assert.equal(clarificationDecision({ nativeAvailable: true, nativePermitted: false }).channel, 'message');
   assert.equal(clarificationDecision({ nativeAvailable: false }).channel, 'message');

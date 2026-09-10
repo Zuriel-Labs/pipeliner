@@ -18,8 +18,8 @@ export function selectWork(profile, { issues, requested, intent = 'start' }) {
   return ready.length ? { state: 'start', issue: ready[0] } : { state: 'blocked', reason: 'No ready Issue in scope.' };
 }
 
-export function clarificationDecision({ answered = false, nativeAvailable = false, nativePermitted = false } = {}) {
-  return { channel: nativeAvailable === true && nativePermitted === true ? 'native' : 'message', state: answered === true ? 'answered' : 'waiting', timeout: null };
+export function clarificationDecision({ answered = false } = {}) {
+  return { channel: 'message', state: answered === true ? 'answered' : 'waiting', timeout: null };
 }
 
 export function reviewRoute({ status, pullRequestState, findings = false }, statuses = { inProgress: 'In Progress', inReview: 'In Review' }) {

@@ -1,0 +1,9 @@
+{
+  "name": "pipeliner-desktop-prototype",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Issue #21 synthetic Chat-First Desktop experience prototype",
+  "main": "main.cjs",
+  "scripts": { "start": "electron .", "qualify": "electron . --qualify" },
+  "devDependencies": { "electron": "44.4.5" }
+}

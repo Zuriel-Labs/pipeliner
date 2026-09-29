@@ -78,6 +78,12 @@ module.exports = async function qualify(window) {
       return document.querySelector('#setting-detail').textContent.includes('Target changed. Review the proposal again.');
     })()`);
     check('wrong-target-proposal-denied', stale);
+    const pending = await contents.executeJavaScript(`(() => {
+      [...document.querySelectorAll('.category-button')].find(button => button.textContent.includes('Scheduling')).click();
+      return document.querySelector('#setting-detail').textContent.includes('proposal is still pending')
+        && document.querySelector('#setting-detail').textContent.includes('Example Studio');
+    })()`);
+    check('pending-proposal-kept-on-navigation', pending);
     const scoped = await contents.executeJavaScript(`({ status: document.querySelector('#evidence-status').textContent,
       detail: document.querySelector('#evidence-detail').textContent,
       transcript: document.querySelector('#transcript').textContent })`);
@@ -94,6 +100,18 @@ module.exports = async function qualify(window) {
       repositoriesVisible: getComputedStyle(document.querySelector('#repositories')).display !== 'none' })`);
     check('narrow-reflow-150-percent', !narrow.overflow && narrow.focusable > 15 && narrow.settingsVisible
       && narrow.evidenceClosed && narrow.repositoriesVisible, narrow);
+    const drawerOpen = await contents.executeJavaScript(`(() => {
+      document.querySelector('#evidence-nav').click();
+      return document.querySelector('#main').inert && document.querySelector('.rail').inert
+        && document.activeElement.id === 'close-evidence';
+    })()`);
+    contents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+    contents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
+    await new Promise(resolve => setTimeout(resolve, 30));
+    const drawerClosed = await contents.executeJavaScript(`document.querySelector('#evidence').classList.contains('closed')
+      && !document.querySelector('#main').inert && !document.querySelector('.rail').inert
+      && document.activeElement.id === 'evidence-nav'`);
+    check('narrow-drawer-keyboard-and-focus', drawerOpen && drawerClosed, { drawerOpen, drawerClosed });
     if (output) {
       mkdirSync(path.dirname(output), { recursive: true });
       writeFileSync(path.join(path.dirname(output), 'narrow.png'), (await contents.capturePage()).toPNG());

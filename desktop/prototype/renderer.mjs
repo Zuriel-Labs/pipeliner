@@ -57,7 +57,18 @@ function setView(view) {
   if (view === 'settings') { renderCategories(); renderSetting(); byId('settings-title').focus(); }
   else byId('work-title').focus();
 }
-function openEvidence() { byId('evidence').classList.remove('closed'); byId('evidence-title').focus(); }
+function closeEvidence() {
+  byId('evidence').classList.add('closed');
+  byId('main').inert = false; document.querySelector('.rail').inert = false;
+  byId('evidence-nav').focus();
+}
+function openEvidence() {
+  byId('evidence').classList.remove('closed');
+  if (matchMedia('(max-width: 1130px)').matches) {
+    byId('main').inert = true; document.querySelector('.rail').inert = true;
+  }
+  byId('close-evidence').focus();
+}
 
 function addMessage(kind, label, content, action) {
   const article = node('article', '', `message ${kind}`);
@@ -104,6 +115,13 @@ function renderSetting() {
   detail.append(effective, node('p', `Default: ${setting.value}`, 'small'), node('p', `Scope: ${setting.scope}`, 'small'), node('p', `Timing: ${setting.timing}`, 'small'));
   if (!setting.available) { detail.append(node('p', 'Unavailable in this prototype. This control needs the qualified product runtime.', 'availability')); return; }
   if (scope === 'global') { detail.append(node('p', 'Global changes are read-only in this prototype. Return to selected repository to rehearse a proposal.', 'availability')); return; }
+  if (state.pending && state.pending.settingId !== setting.id) {
+    const old = settings.find(item => item.id === state.pending.settingId);
+    detail.append(node('p', `A ${old.name} proposal is still pending for ${repositories.find(item => item.id === state.pending.repositoryId).name}. Review or discard it before starting another.`, 'availability'));
+    const review = node('button', 'Review pending proposal', 'secondary'); review.type = 'button';
+    review.addEventListener('click', () => { state.settingId = old.id; renderCategories(); renderSetting(); });
+    detail.append(review); return;
+  }
   if (state.pending && state.pending.settingId === setting.id) {
     const proposal = node('section', '', 'proposal');
     proposal.append(node('h3', 'Example proposal · simulated'), node('p', `Target: ${repositories.find(item => item.id === state.pending.repositoryId)?.name ?? 'Unknown'}`),
@@ -130,7 +148,8 @@ function renderSetting() {
 byId('work-nav').addEventListener('click', () => setView('work'));
 byId('settings-nav').addEventListener('click', () => setView('settings'));
 byId('evidence-nav').addEventListener('click', openEvidence);
-byId('close-evidence').addEventListener('click', () => { byId('evidence').classList.add('closed'); byId('evidence-nav').focus(); });
+byId('close-evidence').addEventListener('click', closeEvidence);
+document.addEventListener('keydown', event => { if (event.key === 'Escape' && !byId('evidence').classList.contains('closed')) closeEvidence(); });
 byId('settings-search').addEventListener('input', renderCategories);
 byId('scope').addEventListener('change', () => { renderSetting(); announce(`${byId('scope').selectedOptions[0].textContent} shown.`); });
 byId('composer').addEventListener('submit', event => {
@@ -145,5 +164,13 @@ byId('composer').addEventListener('submit', event => {
 });
 byId('work-title').tabIndex = -1; byId('settings-title').tabIndex = -1; byId('evidence-title').tabIndex = -1;
 if (matchMedia('(max-width: 1130px)').matches) byId('evidence').classList.add('closed');
-matchMedia('(max-width: 1130px)').addEventListener('change', event => { if (event.matches) byId('evidence').classList.add('closed'); });
+matchMedia('(max-width: 1130px)').addEventListener('change', event => {
+  if (event.matches) {
+    const focusWasInDrawer = byId('evidence').contains(document.activeElement);
+    byId('evidence').classList.add('closed');
+    byId('main').inert = false; document.querySelector('.rail').inert = false;
+    if (focusWasInDrawer) byId('evidence-nav').focus();
+  }
+  else { byId('main').inert = false; document.querySelector('.rail').inert = false; }
+});
 renderRepositories(); renderContext(); renderTranscript(); renderJourneys(); renderCategories(); renderSetting();

@@ -58,3 +58,16 @@ test('transport outage and cancellation never return a dispatchable message', as
     await new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => reject(new Error('aborted'))));
   }, 10), /timeout/);
 });
+
+test('Cloud request uses the exact fixed destination and bearer header', async () => {
+  const key = 'synthetic-key';
+  const response = await api('/api/chat', key, { body: { model: 'synthetic' } }, async (url, options) => {
+    assert.equal(url, 'https://ollama.com/api/chat');
+    assert.equal(options.method, 'POST');
+    assert.equal(options.headers.Authorization, `Bearer ${key}`);
+    assert.equal(options.redirect, 'error');
+    return { ok: true, status: 200 };
+  });
+  assert.equal(response.status, 200);
+  await assert.rejects(api('/unapproved', key), /endpoint-denied/);
+});

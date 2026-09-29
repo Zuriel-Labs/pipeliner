@@ -213,6 +213,7 @@ export async function probeUnauthenticated() {
     assert.equal(await exists(join(home, 'auth.json')), false);
     report.checks.push('cancel-leaves-no-account-or-file');
     report.unexpectedServerRequests = server.unexpectedRequests;
+    report.passed = report.checks.length === 8 && server.unexpectedRequests.length === 0;
     return report;
   } finally {
     if (server) await server.close();
@@ -273,7 +274,10 @@ export async function probeBrowserLogin() {
         ? 'credential-persist-failed' : /timeout|timed out/i.test(String(completed.error))
           ? 'timeout' : /cancel/i.test(String(completed.error)) ? 'cancelled' : 'other',
     };
-    if (completed.success !== true) return report;
+    if (completed.success !== true) {
+      report.passed = false;
+      return report;
+    }
     const account = await server.request('account/read', { refreshToken: false });
     assert.equal(account.account?.type, 'chatgpt');
     assert.equal(await exists(join(home, 'auth.json')), false);
@@ -303,6 +307,8 @@ export async function probeBrowserLogin() {
     } catch (error) { report.turnFailure = error.message; }
     report.unexpectedServerRequests = server.unexpectedRequests;
     report.providerHomeRetained = true;
+    report.passed = report.checks.length === 7 && server.unexpectedRequests.length === 0 &&
+      !report.turnFailure && !report.threadReadFailure && !report.threadResumeFailure;
     return report;
   } finally {
     if (server) {
@@ -459,6 +465,9 @@ export async function probeConnected() {
     } catch (error) { report.interruptFailure = error.message; }
     report.toolCalls = server.toolCalls;
     report.unexpectedServerRequests = server.unexpectedRequests;
+    report.passed = report.checks.length === 5 && report.interruptStatus === 'interrupted' &&
+      server.toolCalls.length === 3 && server.toolCalls[2].allowed &&
+      server.unexpectedRequests.length === 0;
     return report;
   } finally {
     if (server) await server.close();
@@ -512,6 +521,7 @@ export async function probeLogout() {
       await rm(home, { recursive: true, force: true });
       assert.equal(await exists(home), false);
       report.checks.push('task-provider-home-removed');
+      report.passed = report.checks.length === 4;
     }
   }
 }
@@ -529,6 +539,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       await writeFile(output, `${JSON.stringify(report, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
     }
     process.stdout.write(`${JSON.stringify(report)}\n`);
+    if (!report.passed) process.exitCode = 1;
   } catch (error) {
     process.stderr.write(`${error.message}\n`);
     process.exitCode = 1;

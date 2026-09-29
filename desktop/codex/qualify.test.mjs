@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { authorizeRequest, brokerWriteMarker, isAllowedAuthUrl, isolatedEnv } from './qualify.mjs';
@@ -40,10 +40,11 @@ test('only expected HTTPS login destinations can open', () => {
   assert.equal(isAllowedAuthUrl('file:///tmp/auth'), false);
 });
 
-test('provider child inherits only task-owned environment fields', () => {
+test('provider child isolates Codex home while preserving macOS Keychain lookup', () => {
   const env = isolatedEnv('/tmp/synthetic-codex-home');
   assert.equal(env.CODEX_HOME, '/tmp/synthetic-codex-home');
-  assert.equal(env.HOME, env.CODEX_HOME);
+  assert.equal(env.HOME, homedir());
+  assert.notEqual(env.HOME, env.CODEX_HOME);
   assert.equal(Object.hasOwn(env, 'OPENAI_API_KEY'), false);
   assert.equal(Object.hasOwn(env, 'CODEX_ACCESS_TOKEN'), false);
 });

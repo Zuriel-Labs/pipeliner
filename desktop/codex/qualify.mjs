@@ -1,18 +1,20 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdtemp, realpath, rm, stat, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
+import { randomUUID } from 'node:crypto';
 
 const CLI = '/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex';
 const EXPECTED_CLI_VERSION = 'codex-cli 0.158.0-alpha.2.1';
+const PROVIDER_HOME = join(homedir(), '.codex', 'pipeliner-evidence', 'issue-19', 'provider-home');
 const expectedKeys = ['epoch', 'issue', 'operation', 'repo', 'run'];
 
 export function isolatedEnv(home) {
   return {
-    PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: home, CODEX_HOME: home,
+    PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: homedir(), CODEX_HOME: home,
     TMPDIR: home, LANG: 'en_US.UTF-8',
   };
 }
@@ -44,8 +46,10 @@ class AppServer {
   notifications = [];
   events = [];
   unexpectedRequests = [];
+  toolCalls = [];
 
-  constructor(home) {
+  constructor(home, brokerContext) {
+    this.brokerContext = brokerContext;
     const env = isolatedEnv(home);
     this.#child = spawn(CLI, ['app-server', '--listen', 'stdio://', '--strict-config'], {
       env, stdio: ['pipe', 'pipe', 'pipe'],
@@ -69,13 +73,29 @@ class AppServer {
           const category = detail.includes('method not found') ? 'method-not-found'
             : detail.includes('not found') ? 'not-found'
               : detail.includes('not logged in') || detail.includes('authentication') ? 'auth-required'
-                : detail.includes('invalid') ? 'invalid-request' : 'other';
+                : detail.includes('no active turn to interrupt') ? 'no-active-turn'
+                  : detail.includes('invalid') ? 'invalid-request' : 'other';
           pending.reject(new Error(`RPC ${pending.method} failed: ${message.error.code} (${category})`));
         }
         else pending.resolve(message.result);
       } else if (message.id !== undefined && message.method) {
-        this.unexpectedRequests.push(message.method);
-        this.send({ id: message.id, error: { code: -32000, message: 'Denied by qualification client' } });
+        if (message.method === 'item/tool/call' && this.brokerContext) {
+          const request = message.params?.tool === 'pipeliner_probe' &&
+            message.params.threadId === this.brokerContext.threadId &&
+            message.params.turnId === this.brokerContext.turnId ? message.params.arguments : null;
+          const reply = (allowed) => {
+            this.toolCalls.push({ allowed, requestedRepoMatches: request?.repo === this.brokerContext.repo });
+            if (this.brokerContext.holdResponse && allowed) return;
+            this.send({ id: message.id, result: {
+              contentItems: [{ type: 'inputText', text: allowed ? 'allowed' : 'denied' }], success: allowed,
+            } });
+          };
+          void brokerWriteMarker(request, this.brokerContext)
+            .then(({ allowed }) => reply(allowed), () => reply(false));
+        } else {
+          this.unexpectedRequests.push(message.method);
+          this.send({ id: message.id, error: { code: -32000, message: 'Denied by qualification client' } });
+        }
       } else if (message.method) {
         this.notifications.push(message.method);
         this.events.push({ method: message.method, params: message.params });
@@ -128,8 +148,8 @@ async function exists(path) {
 }
 
 export async function probeUnauthenticated() {
-  const home = await mkdtemp(join(tmpdir(), 'pipeliner-d03-'));
   const report = { cli: checkedCliVersion(), transport: 'stdio JSONL', checks: [] };
+  const home = await mkdtemp(join(tmpdir(), 'pipeliner-d03-'));
   let server;
   try {
     await writeFile(join(home, 'config.toml'), 'cli_auth_credentials_store = "ephemeral"\nforced_login_method = "chatgpt"\n', { mode: 0o600 });
@@ -209,11 +229,14 @@ export function isAllowedAuthUrl(value) {
 }
 
 export async function probeBrowserLogin() {
-  const home = await mkdtemp(join(tmpdir(), 'pipeliner-d03-login-'));
+  const home = PROVIDER_HOME;
   const report = { cli: checkedCliVersion(), storage: 'keyring', checks: [] };
+  assert.equal(await exists(home), false, 'task provider home already exists');
+  await mkdir(home, { mode: 0o700 });
   let server;
   let loginId;
   let cleanupSafe = false;
+  let connected = false;
   try {
     await writeFile(join(home, 'config.toml'), 'cli_auth_credentials_store = "keyring"\nforced_login_method = "chatgpt"\n', { mode: 0o600 });
     server = new AppServer(home);
@@ -244,30 +267,65 @@ export async function probeBrowserLogin() {
 
     const completed = await server.waitForNotification('account/login/completed',
       (params) => params?.loginId === loginId, 120000);
-    assert.equal(completed.success, true);
+    report.loginCompletion = {
+      success: completed.success ?? null,
+      errorCategory: /keyring|keychain|credentials could not be saved locally/i.test(String(completed.error))
+        ? 'credential-persist-failed' : /timeout|timed out/i.test(String(completed.error))
+          ? 'timeout' : /cancel/i.test(String(completed.error)) ? 'cancelled' : 'other',
+    };
+    if (completed.success !== true) return report;
     const account = await server.request('account/read', { refreshToken: false });
     assert.equal(account.account?.type, 'chatgpt');
     assert.equal(await exists(join(home, 'auth.json')), false);
     report.checks.push('chatgpt-connected-no-auth-file');
+    connected = true;
+    try {
+      const models = await server.request('model/list', { limit: 20, includeHidden: false });
+      const model = models.data.find((entry) => entry.isDefault)?.model ?? models.data[0]?.model;
+      const thread = await server.request('thread/start', {
+        model, cwd: home, approvalPolicy: 'never', sandbox: 'read-only', environments: [],
+      });
+      const started = await server.request('turn/start', {
+        threadId: thread.thread.id, input: [{ type: 'text', text: 'Reply with exactly one word: ready.' }],
+      }, 30000);
+      await server.waitForNotification('turn/completed',
+        (params) => params?.threadId === thread.thread.id && params?.turn?.id === started.turn?.id, 120000);
+      report.checks.push('no-environment-turn-completed');
+      report.eventMethods = [...new Set(server.notifications.filter((name) => name.startsWith('turn/') || name.startsWith('item/')))];
+      try {
+        await server.request('thread/read', { threadId: thread.thread.id, includeTurns: true });
+        report.checks.push('authenticated-thread-read');
+      } catch (error) { report.threadReadFailure = error.message; }
+      try {
+        await server.request('thread/resume', { threadId: thread.thread.id, environments: [] });
+        report.checks.push('authenticated-thread-resume');
+      } catch (error) { report.threadResumeFailure = error.message; }
+    } catch (error) { report.turnFailure = error.message; }
     report.unexpectedServerRequests = server.unexpectedRequests;
+    report.providerHomeRetained = true;
     return report;
   } finally {
     if (server) {
-      if (loginId) {
+      if (loginId && !connected) {
         try { await server.request('account/login/cancel', { loginId }); } catch {}
       }
-      try {
-        const account = await server.request('account/read', { refreshToken: false });
-        if (account.account?.type === 'chatgpt') {
-          await server.request('account/logout');
-          report.checks.push('isolated-account-logout');
-        }
-        const finalAccount = await server.request('account/read', { refreshToken: false });
-        cleanupSafe = (finalAccount.account ?? null) === null;
-      } catch { report.cleanupError = 'isolated-account-cleanup-unverified'; }
+      if (!connected) {
+        try {
+          const account = await server.request('account/read', { refreshToken: false });
+          if (account.account?.type === 'chatgpt') {
+            await server.request('account/logout');
+            report.checks.push('isolated-account-logout');
+          }
+          const finalAccount = await server.request('account/read', { refreshToken: false });
+          cleanupSafe = (finalAccount.account ?? null) === null;
+        } catch { report.cleanupError = 'isolated-account-cleanup-unverified'; }
+      } else {
+        cleanupSafe = true;
+        report.providerHomeRetained = true;
+      }
       await server.close();
     } else cleanupSafe = true;
-    if (cleanupSafe) {
+    if (cleanupSafe && !connected) {
       await rm(home, { recursive: true, force: true });
       assert.equal(await exists(home), false);
     }
@@ -275,10 +333,195 @@ export async function probeBrowserLogin() {
   }
 }
 
+export async function probeConnected() {
+  const home = PROVIDER_HOME;
+  const report = { cli: checkedCliVersion(), storage: 'keyring', checks: [] };
+  assert.equal(await exists(home), true, 'isolated provider home is missing');
+  const workspace = await mkdtemp(join(tmpdir(), 'pipeliner-d03-connected-'));
+  const brokerContext = {
+    repo: 'synthetic/repo', issue: 19, run: 'qualification', epoch: 1,
+    markerPath: join(workspace, 'broker-marker'),
+  };
+  let server;
+  try {
+    server = new AppServer(home, brokerContext);
+    const init = await server.request('initialize', {
+      clientInfo: { name: 'pipeliner_d03_probe', title: 'Pipeliner D-03 probe', version: '0.1.0' },
+      capabilities: { experimentalApi: true },
+    });
+    assert.equal(init.codexHome, await realpath(home));
+    server.send({ method: 'initialized', params: {} });
+    const account = await server.request('account/read', { refreshToken: false });
+    assert.equal(account.account?.type, 'chatgpt');
+    assert.equal(await exists(join(home, 'auth.json')), false);
+    report.checks.push('keyring-session-reopened-without-auth-file');
+
+    const models = await server.request('model/list', { limit: 20, includeHidden: false });
+    const model = models.data.find((entry) => entry.isDefault)?.model ?? models.data[0]?.model;
+    const toolSpec = {
+      type: 'function', name: 'pipeliner_probe',
+      description: 'Request one synthetic broker operation. No other filesystem access.',
+      inputSchema: {
+        type: 'object', properties: {
+          repo: { type: 'string' }, issue: { type: 'integer' }, run: { type: 'string' },
+          epoch: { type: 'integer' }, operation: { type: 'string' },
+        },
+        required: expectedKeys, additionalProperties: false,
+      },
+    };
+    const thread = await server.request('thread/start', {
+      model, cwd: workspace, approvalPolicy: 'never', sandbox: 'read-only', environments: [],
+      dynamicTools: [toolSpec],
+    });
+    const id = thread.thread.id;
+    brokerContext.threadId = id;
+    const started = await server.request('turn/start', {
+      threadId: id,
+      input: [{ type: 'text', text: 'Call pipeliner_probe once with {"repo":"synthetic/repo","issue":19,"run":"qualification","epoch":1,"operation":"write-marker"}. Then say done.' }],
+    }, 30000);
+    brokerContext.turnId = started.turn.id;
+    await server.waitForNotification('turn/completed',
+      (params) => params?.threadId === id && params?.turn?.id === started.turn?.id, 120000);
+    if (server.toolCalls.length === 1 && server.toolCalls[0].allowed &&
+        await exists(brokerContext.markerPath) &&
+        await readFile(brokerContext.markerPath, 'utf8') === 'worker-ok\n') {
+      report.checks.push('live-dynamic-tool-broker-write');
+    }
+    report.eventMethods = [...new Set(server.notifications.filter((name) =>
+      name.startsWith('turn/') || name.startsWith('item/')))];
+
+    const deniedTurn = await server.request('turn/start', {
+      threadId: id,
+      input: [{ type: 'text', text: 'Call pipeliner_probe once with {"repo":"other/repo","issue":19,"run":"qualification","epoch":1,"operation":"write-marker"}. Report its result.' }],
+    }, 30000);
+    brokerContext.turnId = deniedTurn.turn.id;
+    await server.waitForNotification('turn/completed',
+      (params) => params?.threadId === id && params?.turn?.id === deniedTurn.turn?.id, 120000);
+    if (server.toolCalls.length === 2 && !server.toolCalls[1].allowed &&
+        !server.toolCalls[1].requestedRepoMatches && await exists(brokerContext.markerPath) &&
+        await readFile(brokerContext.markerPath, 'utf8') === 'worker-ok\n') {
+      report.checks.push('live-broker-wrong-repository-denied');
+    }
+
+    const nonce = randomUUID();
+    const readPath = join(workspace, 'read-probe');
+    await writeFile(readPath, nonce, { mode: 0o600 });
+    const readThread = await server.request('thread/start', {
+      model, cwd: workspace, approvalPolicy: 'never', sandbox: 'read-only', environments: [],
+    });
+    const readStarted = await server.request('turn/start', {
+      threadId: readThread.thread.id,
+      input: [{ type: 'text', text: `Use any available tool to read the file at ${readPath}. Report its exact contents. Do not guess.` }],
+    }, 30000);
+    await server.waitForNotification('turn/completed',
+      (params) => params?.threadId === readThread.thread.id && params?.turn?.id === readStarted.turn?.id, 120000);
+    const readEvents = server.events.filter(({ params }) =>
+      params?.threadId === readThread.thread.id);
+    const responseText = readEvents.filter(({ method }) => method === 'item/agentMessage/delta')
+      .map(({ params }) => params?.delta ?? '').join('');
+    report.builtinReadProbe = {
+      nonceObserved: responseText.includes(nonce),
+      responsePresent: responseText.length > 0,
+      toolCalls: server.toolCalls.length,
+      serverRequests: server.unexpectedRequests,
+    };
+    if (report.builtinReadProbe.responsePresent && !report.builtinReadProbe.nonceObserved &&
+        server.unexpectedRequests.length === 0 && server.toolCalls.length === 2) {
+      report.checks.push('no-environment-read-probe-did-not-access-file');
+    }
+
+    const interruptThread = await server.request('thread/start', {
+      model, cwd: workspace, approvalPolicy: 'never', sandbox: 'read-only', environments: [],
+      dynamicTools: [toolSpec],
+    });
+    brokerContext.threadId = interruptThread.thread.id;
+    brokerContext.markerPath = join(workspace, 'interrupt-marker');
+    brokerContext.holdResponse = true;
+    const interruptTurn = await server.request('turn/start', {
+      threadId: interruptThread.thread.id,
+      input: [{ type: 'text', text: 'Call pipeliner_probe once with {"repo":"synthetic/repo","issue":19,"run":"qualification","epoch":1,"operation":"write-marker"}. Wait for its result.' }],
+    }, 30000);
+    brokerContext.turnId = interruptTurn.turn.id;
+    try {
+      const deadline = Date.now() + 60000;
+      while (server.toolCalls.length < 3 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      assert.equal(server.toolCalls.length, 3, 'interrupt tool call was not observed');
+      await server.request('turn/interrupt', {
+        threadId: interruptThread.thread.id, turnId: interruptTurn.turn.id,
+      }, 30000);
+      const completed = await server.waitForNotification('turn/completed',
+        (params) => params?.threadId === interruptThread.thread.id &&
+          params?.turn?.id === interruptTurn.turn.id, 60000);
+      report.interruptStatus = completed.turn?.status ?? null;
+      report.checks.push('turn-interrupt-accepted');
+    } catch (error) { report.interruptFailure = error.message; }
+    report.toolCalls = server.toolCalls;
+    report.unexpectedServerRequests = server.unexpectedRequests;
+    return report;
+  } finally {
+    if (server) await server.close();
+    await rm(workspace, { recursive: true, force: true });
+    assert.equal(await exists(workspace), false);
+  }
+}
+
+export async function probeLogout() {
+  const home = PROVIDER_HOME;
+  assert.equal(await exists(home), true, 'isolated provider home is missing');
+  const report = { cli: checkedCliVersion(), checks: [] };
+  let server;
+  let safeToRemove = false;
+  const connect = async () => {
+    const instance = new AppServer(home);
+    try {
+      const init = await instance.request('initialize', {
+        clientInfo: { name: 'pipeliner_d03_probe', title: 'Pipeliner D-03 probe', version: '0.1.0' },
+        capabilities: { experimentalApi: true },
+      });
+      assert.equal(init.codexHome, await realpath(home));
+      instance.send({ method: 'initialized', params: {} });
+      return instance;
+    } catch (error) {
+      await instance.close();
+      throw error;
+    }
+  };
+  try {
+    server = await connect();
+    const before = await server.request('account/read', { refreshToken: true }, 30000);
+    assert.equal(before.account?.type, 'chatgpt');
+    report.checks.push('refresh-read-connected');
+    await server.request('account/logout');
+    const after = await server.request('account/read', { refreshToken: false });
+    assert.equal(after.account ?? null, null);
+    report.checks.push('logout-clears-live-account');
+    await server.close();
+    server = null;
+    server = await connect();
+    const reopened = await server.request('account/read', { refreshToken: false });
+    assert.equal(reopened.account ?? null, null);
+    assert.equal(await exists(join(home, 'auth.json')), false);
+    report.checks.push('logout-persists-after-restart-no-auth-file');
+    safeToRemove = true;
+    return report;
+  } finally {
+    if (server) await server.close();
+    if (safeToRemove) {
+      await rm(home, { recursive: true, force: true });
+      assert.equal(await exists(home), false);
+      report.checks.push('task-provider-home-removed');
+    }
+  }
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     const report = process.argv.includes('--browser-login')
-      ? await probeBrowserLogin() : await probeUnauthenticated();
+      ? await probeBrowserLogin() : process.argv.includes('--connected')
+        ? await probeConnected() : process.argv.includes('--logout')
+          ? await probeLogout() : await probeUnauthenticated();
     const outputIndex = process.argv.indexOf('--output');
     if (outputIndex !== -1) {
       const output = process.argv[outputIndex + 1];

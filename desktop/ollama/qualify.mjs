@@ -5,14 +5,15 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
-const ORIGIN = 'https://ollama.com';
+const ORIGINS = { cloud: 'https://ollama.com', 'local-cloud': 'http://127.0.0.1:11434' };
+const MODELS = { cloud: 'deepseek-v4.1-flash', 'local-cloud': 'deepseek-v4.1-flash:cloud' };
 const LIMIT = 1024 * 1024;
 const fixture = 'fixture-ok';
 
 export async function parseStream(body) {
   const reader = body.getReader();
   const decoder = new TextDecoder('utf-8', { fatal: true });
-  let pending = '', size = 0, done = false;
+  let pending = '', size = 0, done = false, responseModel = null, doneReason = null;
   const message = { role: 'assistant', content: '', thinking: '', tool_calls: [] };
   const usage = { input: null, output: null };
   const line = (text) => {
@@ -20,9 +21,14 @@ export async function parseStream(body) {
     let part;
     try { part = JSON.parse(text); } catch { throw new Error('malformed-stream'); }
     if (!part || typeof part !== 'object' || Array.isArray(part)) throw new Error('malformed-stream');
+    if (part.model !== undefined) {
+      if (typeof part.model !== 'string' || (responseModel && part.model !== responseModel)) throw new Error('model-mismatch');
+      responseModel = part.model;
+    }
     const chunk = part.message;
     if (chunk !== undefined) {
       if (!chunk || typeof chunk !== 'object' || Array.isArray(chunk)) throw new Error('malformed-message');
+      if (chunk.role !== undefined && chunk.role !== 'assistant') throw new Error('malformed-message');
       for (const key of ['content', 'thinking']) {
         if (chunk[key] !== undefined) {
           if (typeof chunk[key] !== 'string') throw new Error('malformed-message');
@@ -36,8 +42,9 @@ export async function parseStream(body) {
     }
     if (part.done === true) {
       done = true;
-      if (Number.isSafeInteger(part.prompt_eval_count)) usage.input = part.prompt_eval_count;
-      if (Number.isSafeInteger(part.eval_count)) usage.output = part.eval_count;
+      doneReason = typeof part.done_reason === 'string' ? part.done_reason : null;
+      if (Number.isSafeInteger(part.prompt_eval_count) && part.prompt_eval_count >= 0) usage.input = part.prompt_eval_count;
+      if (Number.isSafeInteger(part.eval_count) && part.eval_count >= 0) usage.output = part.eval_count;
     } else if (part.done !== false) throw new Error('missing-done-field');
   };
   try {
@@ -58,7 +65,7 @@ export async function parseStream(body) {
     pending += decoder.decode();
     if (pending.trim()) throw new Error('incomplete-line');
     if (!done) throw new Error('missing-terminal');
-    return { ...message, usage };
+    return { ...message, usage, responseModel, doneReason };
   } catch (error) {
     await reader.cancel().catch(() => {});
     throw error;
@@ -86,7 +93,8 @@ export async function checkpoint(path, state) {
   assert.equal(typeof state.target, 'string');
   assert.equal(typeof state.nonce, 'string');
   assert.equal(Number.isSafeInteger(state.epoch), true);
-  const data = { version: 1, model: state.model, target: state.target, nonce: state.nonce,
+  assert.equal(Object.hasOwn(ORIGINS, state.route), true);
+  const data = { version: 1, model: state.model, route: state.route, target: state.target, nonce: state.nonce,
     epoch: state.epoch, applied: true, messages: state.messages };
   const temp = `${path}.${randomUUID()}.tmp`;
   try {
@@ -97,7 +105,7 @@ export async function checkpoint(path, state) {
 
 export async function resume(path, expected) {
   const data = JSON.parse(await readFile(path, 'utf8'));
-  if (data.version !== 1 || data.applied !== true || typeof data.model !== 'string' ||
+  if (data.version !== 1 || data.applied !== true || data.model !== expected.model || data.route !== expected.route ||
     data.target !== expected.target || data.nonce !== expected.nonce || data.epoch !== expected.epoch ||
     !Array.isArray(data.messages) || data.messages.length !== 3 ||
     data.messages[0]?.role !== 'user' || typeof data.messages[0].content !== 'string' ||
@@ -110,20 +118,29 @@ export async function resume(path, expected) {
 }
 
 export async function api(path, key, options = {}, send = fetch, timeoutMs = 30000) {
-  if (path !== '/api/tags' && path !== '/api/chat') throw new Error('endpoint-denied');
+  const route = options.route ?? 'cloud';
+  if (!Object.hasOwn(ORIGINS, route)) throw new Error('route-denied');
+  const paths = route === 'local-cloud' ? ['/api/tags', '/api/chat', '/api/version', '/api/show'] : ['/api/tags', '/api/chat'];
+  if (!paths.includes(path)) throw new Error('endpoint-denied');
   const controller = new AbortController();
+  const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await send(`${ORIGIN}${path}`, {
+    signal.throwIfAborted();
+    const response = await send(`${ORIGINS[route]}${path}`, {
       method: options.body ? 'POST' : 'GET',
-      headers: { Authorization: `Bearer ${key}`, ...(options.body ? { 'Content-Type': 'application/json' } : {}) },
+      headers: { ...(route === 'cloud' ? { Authorization: `Bearer ${key}` } : {}),
+        ...(options.body ? { 'Content-Type': 'application/json' } : {}) },
       body: options.body ? JSON.stringify(options.body) : undefined,
       redirect: 'error',
-      signal: controller.signal,
+      signal,
     });
     if (!response.ok) throw new Error(`http-${response.status}`);
-    return options.consume ? await options.consume(response) : response;
+    const result = options.consume ? await options.consume(response) : response;
+    signal.throwIfAborted();
+    return result;
   } catch (error) {
+    if (options.signal?.aborted) throw new Error('cancelled');
     if (controller.signal.aborted) throw new Error('timeout');
     if (/^http-\d+$/.test(error.message)) throw error;
     throw new Error('transport-failed');
@@ -148,35 +165,61 @@ async function readBounded(body) {
   } finally { reader.releaseLock(); }
 }
 
-async function catalog(key) {
-  const text = await api('/api/tags', key, { consume: (response) => readBounded(response.body) });
+async function catalog(key, route) {
+  const text = await api('/api/tags', key, { route, consume: (response) => readBounded(response.body) });
   let result;
   try { result = JSON.parse(text); } catch { throw new Error('catalog-malformed'); }
   if (!Array.isArray(result.models)) throw new Error('catalog-malformed');
-  return result.models.map((model) => model.name).filter((name) => typeof name === 'string');
+  return result.models;
 }
 
-async function chat(key, model, messages, tools) {
-  return api('/api/chat', key, { body: {
-    model, messages, tools, stream: true, options: { temperature: 0, num_predict: 128 },
-  }, consume: (response) => parseStream(response.body) });
+export function selectedModel(models, route) {
+  const model = models.find((entry) => entry?.name === MODELS[route]);
+  if (!model || (route === 'local-cloud' &&
+    (model.remote_host !== 'https://ollama.com' || model.remote_model !== MODELS.cloud))) throw new Error('selected-model-unavailable');
+  return model;
+}
+
+async function chat(key, model, messages, tools, route, options = {}) {
+  const result = await api('/api/chat', key, { route, ...options, body: {
+    model, messages, tools, stream: true, think: false, options: { temperature: 0, num_predict: 128 },
+  }, consume: options.consume ?? ((response) => parseStream(response.body)) });
+  if (result.responseModel !== model && result.responseModel !== MODELS.cloud) throw new Error('model-mismatch');
+  if (result.doneReason === 'length') throw new Error('output-truncated');
+  return result;
 }
 
 async function live() {
-  const key = process.env.OLLAMA_API_KEY;
-  if (!key) throw new Error('key-unavailable');
-  const models = await catalog(key).catch((error) => { throw new Error(`catalog-${error.message}`); });
-  const model = models.includes('gemma4:31b') ? 'gemma4:31b' : models[0];
-  if (!model) throw new Error('catalog-empty');
-  const context = { target: 'synthetic-pipeliner-repo', nonce: randomUUID(), epoch: 1, applied: false };
+  const args = process.argv.slice(2);
+  if (args.some((arg) => arg !== '--route=local-cloud' && arg !== '--route=cloud')) throw new Error('argument-denied');
+  if (args.length > 1) throw new Error('argument-denied');
+  const route = args[0]?.slice('--route='.length) ?? 'cloud';
+  const key = route === 'cloud' ? process.env.OLLAMA_API_KEY : undefined;
+  if (route === 'cloud' && !key) throw new Error('key-unavailable');
+  const models = await catalog(key, route).catch((error) => { throw new Error(`catalog-${error.message}`); });
+  const metadata = selectedModel(models, route);
+  const model = metadata.name;
+  let serviceVersion = null, capabilities = null;
+  if (route === 'local-cloud') {
+    const getJson = (path, body) => api(path, key, { route, body,
+      consume: async (response) => JSON.parse(await readBounded(response.body)) });
+    serviceVersion = (await getJson('/api/version')).version;
+    const shown = await getJson('/api/show', { model });
+    capabilities = shown.capabilities;
+    if (!capabilities?.includes('tools') || !shown.thinking?.values?.includes(false)) throw new Error('capability-unavailable');
+  }
+  const context = { model, route, target: 'synthetic-pipeliner-repo', nonce: randomUUID(), epoch: 1, applied: false };
   const tool = { type: 'function', function: { name: 'lookup_fixture', description: 'Read one synthetic fixture.',
     parameters: { type: 'object', required: ['target', 'nonce', 'epoch'], properties: {
       target: { type: 'string' }, nonce: { type: 'string' }, epoch: { type: 'integer' },
     } } } };
   const prompt = `Call lookup_fixture once with target ${context.target}, nonce ${context.nonce}, epoch ${context.epoch}. Use the tool before answering.`;
-  const first = await chat(key, model, [{ role: 'user', content: prompt }], [tool])
+  const started = performance.now();
+  const first = await chat(key, model, [{ role: 'user', content: prompt }], [tool], route)
     .catch((error) => { throw new Error(`first-chat-${error.message}`); });
-  const report = { model, catalogCount: models.length, streamedTerminal: true,
+  const report = { route, model, serviceVersion, capabilities, manifestDigest: metadata.digest ?? null,
+    responseModel: first.responseModel, doneReason: first.doneReason,
+    catalogCount: models.length, streamedTerminal: true, firstRequestMs: Math.round(performance.now() - started),
     toolCalls: first.tool_calls.length, usage: first.usage, brokerAllowed: false, resumed: false };
   if (first.tool_calls.length === 1) {
     const result = broker(first.tool_calls[0], context);
@@ -193,19 +236,43 @@ async function live() {
         await checkpoint(path, { model, ...context, messages });
         const restored = await resume(path, context);
         if (broker(first.tool_calls[0], restored).allowed) throw new Error('replay-allowed');
-        const next = await chat(key, model, restored.messages, undefined)
+        const resumedAt = performance.now();
+        const next = await chat(key, model, restored.messages, undefined, route)
           .catch((error) => { throw new Error(`resume-chat-${error.message}`); });
-        report.resumed = Boolean(next.content || next.thinking);
+        report.resumed = next.content.includes(fixture) && next.tool_calls.length === 0;
+        report.resumeRequestMs = Math.round(performance.now() - resumedAt);
         report.resumeUsage = next.usage;
       } finally { await rm(dir, { recursive: true }); }
     }
   }
-  try { await api('/api/chat', 'deliberately-invalid-pipeliner-probe', { body: {
-    model, messages: [{ role: 'user', content: 'Hi' }], stream: false,
-  } }); report.invalidKeyRejected = false; }
-  catch (error) { report.invalidKeyRejected = error.message === 'http-401'; }
+  const denied = await chat(key, model, [{ role: 'user', content: prompt.replace(context.target, 'different-fixture-repo') }], [tool], route);
+  report.wrongTargetDenied = denied.tool_calls.length === 1 &&
+    !broker(denied.tool_calls[0], { ...context, applied: false }).allowed;
+  const cancellation = new AbortController();
+  let responseBytesSeen = false;
+  try {
+    await chat(key, model, [{ role: 'user', content: 'Count to eight in one sentence.' }], undefined, route, {
+      signal: cancellation.signal,
+      consume(response) {
+        return parseStream(response.body.pipeThrough(new TransformStream({ transform(chunk, controller) {
+          responseBytesSeen = true;
+          cancellation.abort();
+          controller.enqueue(chunk);
+        } })));
+      },
+    });
+    report.cancelledAfterBytes = false;
+  } catch (error) { report.cancelledAfterBytes = responseBytesSeen && error.message === 'cancelled'; }
+  report.invalidKeyRejected = null;
+  if (route === 'cloud') {
+    try { await api('/api/chat', 'deliberately-invalid-pipeliner-probe', { body: {
+      model, messages: [{ role: 'user', content: 'Hi' }], stream: false,
+    } }); report.invalidKeyRejected = false; }
+    catch (error) { report.invalidKeyRejected = error.message === 'http-401'; }
+  }
   console.log(JSON.stringify(report));
-  if (!report.brokerAllowed || !report.resumed || !report.invalidKeyRejected) process.exitCode = 1;
+  if (!report.brokerAllowed || !report.resumed || !report.wrongTargetDenied || !report.cancelledAfterBytes ||
+    (route === 'cloud' && !report.invalidKeyRejected)) process.exitCode = 1;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

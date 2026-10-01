@@ -6,6 +6,7 @@ const path = require('node:path');
 const os = require('node:os');
 const assert = require('node:assert/strict');
 const { isDeepStrictEqual } = require('node:util');
+if (!process.argv.includes('--managed')) throw new Error('Use the task-owned desktop-github runner');
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pipeliner-d05-'));
 app.setPath('userData', directory);
 app.setPath('crashDumps', path.join(directory, 'crashes'));
@@ -16,13 +17,13 @@ let flow, credentials;
 const permittedError = error => /^(http-\d{3}|cancelled|timeout|transport-failed|authorization-[a-z-]+|device-[a-z-]+|invalid-[a-z-]+|account-mismatch|installation-mismatch|repository-mismatch|incomplete-list|read-failed|reauthentication-required|token-request-denied)$/.test(error?.message)
   ? error.message : 'connection-check-failed';
 app.on('before-quit', () => { cancellation.abort(); flow?.cancel(); credentials = null; });
-app.on('will-quit', () => fs.rmSync(directory, { recursive: true, force: true }));
 app.whenReady().then(async () => {
   assert.equal(process.platform, 'darwin');
   assert.equal(process.arch, 'arm64');
   // Native parent is required for cancellable macOS sheets; no web renderer or IPC is created.
   const window = new BaseWindow({ width: 660, height: 480, title: 'Pipeliner · GitHub connection' });
   window.on('closed', () => app.quit());
+  if (process.argv.includes('--native-failure-check')) throw new Error('synthetic-failure');
   if (process.argv.includes('--native-check')) {
     const control = new AbortController();
     const timer = setTimeout(() => control.abort(), 500);
@@ -68,6 +69,5 @@ app.whenReady().then(async () => {
 }).catch(error => {
   console.log(JSON.stringify({ failed: permittedError(error) }));
   credentials = null;
-  process.exitCode = 1;
   app.quit();
 });

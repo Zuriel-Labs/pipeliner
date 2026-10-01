@@ -83,7 +83,13 @@ export async function qualifyAccess(accessToken, { send = fetch, signal, onResul
       !(isDeepStrictEqual(installation.permissions, expected) || isDeepStrictEqual(installation.permissions, appPermissions))) throw new Error('installation-mismatch');
     const repositories = await list(`/user/installations/${installation.id}/repositories`, 'repositories');
     if (repositories.length !== 1 || repositories[0].id !== fixture.id || repositories[0].node_id !== fixture.node ||
-      repositories[0].full_name !== `${fixture.owner}/${fixture.name}` || repositories[0].private !== true) throw new Error('repository-mismatch');
+      repositories[0].full_name !== `${fixture.owner}/${fixture.name}` || repositories[0].private !== true) {
+      onResult?.({ fixture: `${fixture.owner}/${fixture.name}`, operation: 'repository-binding', status: 'failed', detail: {
+        count: repositories.length, idMatches: repositories[0]?.id === fixture.id, nodeMatches: repositories[0]?.node_id === fixture.node,
+        pathMatches: repositories[0]?.full_name === `${fixture.owner}/${fixture.name}`, privateMatches: repositories[0]?.private === true,
+      } });
+      throw new Error('repository-mismatch');
+    }
   }
   async function record(fixture, operation, action) {
     const started = performance.now();

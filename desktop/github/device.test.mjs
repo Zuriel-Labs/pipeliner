@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { readApp, startDevice, refreshDevice } from './device.mjs';
+import { readApp, startDevice, refreshDevice, startSetupDevice, refreshSetupDevice } from './device.mjs';
 
 const clientId = 'Iv1.syntheticclient';
 const device = { device_code: 'synthetic-device-code-only', user_code: 'ABCD-EFGH',
@@ -112,4 +112,34 @@ test('device-issued token refresh needs no secret and rejects broad token substi
   } });
   assert.equal(refreshed.accessToken, 'ghu_synthetic_rotated');
   await assert.rejects(refreshDevice(clientId, 'ghp_wrong-kind'), /invalid-refresh-token/);
+});
+
+test('separate setup device flow requests only approved OAuth scopes and requires expiring tokens', async () => {
+  const oauth = { ...token, access_token: 'gho_synthetic_setup', scope: 'project,repo' };
+  const calls = [], replies = [device, oauth];
+  const flow = await startSetupDevice(clientId, { wait: async () => {}, send: async (url, request) => {
+    calls.push(new URLSearchParams(request.body)); return response(replies.shift());
+  } });
+  const connected = await flow.authorize();
+  assert.equal(connected.accessToken, oauth.access_token);
+  assert.equal(calls[0].get('scope'), 'repo project offline_access');
+  assert.equal(calls[1].has('repository_id'), false);
+  assert.equal(calls.every(body => !body.has('client_secret')), true);
+  const refreshed = await refreshSetupDevice(clientId, oauth.refresh_token, { send: async (url, request) => {
+    assert.equal(new URLSearchParams(request.body).has('scope'), false);
+    return response({ ...oauth, access_token: 'gho_synthetic_rotated', scope: 'repo' });
+  } });
+  assert.equal(refreshed.accessToken, 'gho_synthetic_rotated');
+  for (const invalid of [token, { ...oauth, scope: 'project' }, { ...oauth, scope: 'repo,project,admin:org' },
+    { ...oauth, scope: 'repo,repo,project' }, { ...oauth, expires_in: undefined }, { ...oauth, refresh_token: undefined }]) {
+    const replies = [device, invalid];
+    const rejected = await startSetupDevice(clientId, { wait: async () => {}, send: async () => response(replies.shift()) });
+    await assert.rejects(rejected.authorize(), /invalid-token-response/);
+  }
+  let dispatched = false;
+  await assert.rejects(startSetupDevice(clientId, { repositoryId: 1, send: async () => { dispatched = true; } }), /invalid-repository/);
+  assert.equal(dispatched, false);
+  const appReplies = [device, oauth];
+  const app = await startDevice(clientId, { wait: async () => {}, send: async () => response(appReplies.shift()) });
+  await assert.rejects(app.authorize(), /invalid-token-response/);
 });

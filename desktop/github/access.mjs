@@ -16,8 +16,146 @@ export const appPermissions = Object.freeze({ actions: 'read', checks: 'read', c
 const existingSelection = Object.freeze({ id: 1363240768, node: 'R_kgDOUUFnQA', owner: 'Zuriel-Labs', name: 'pipeliner', private: false });
 const matchesRepository = (actual, expected) => actual?.id === expected.id && actual.node_id === expected.node &&
   actual.full_name === `${expected.owner}/${expected.name}` && actual.private === (expected.private ?? true);
-const safeError = error => /^(http-\d{3}|graphql-(forbidden|rejected)|readback-mismatch|write-result-uncertain|response-invalid|response-too-large|cancelled|read-failed|fixture-collision|dependency-unqualified)$/.test(error?.message)
+const safeError = error => /^(http-\d{3}|graphql-(forbidden|rejected|insufficient-scopes|validation|not-found)|readback-mismatch|write-result-uncertain|response-invalid|response-too-large|cancelled|read-failed|fixture-collision|dependency-unqualified)$/.test(error?.message)
   ? error.message : 'qualification-failed';
+
+export const setupTargets = Object.freeze(fixtures.map(fixture => Object.freeze({
+  owner: fixture.owner, ownerNode: fixture.ownerNode, type: fixture.type,
+  name: fixture.type === 'User' ? 'pipeliner-d05-26-oauth-personal' : 'pipeliner-d05-26-oauth-org',
+  title: `Pipeliner D-05 #26 OAuth ${fixture.type === 'User' ? 'Personal' : 'Organization'} Fixture`,
+  ...(fixture.type === 'User' ? { existing: Object.freeze({ id: 1400801012, node: 'R_kgDOU36G9A',
+    issue: Object.freeze({ number: 1, id: 5670334810, node: 'I_kwDOU36G9M8AAAABUfpxWg' }) }) } : {}),
+})));
+const setupToken = token => typeof token === 'string' && /^gho_[A-Za-z0-9_]{8,200}$/.test(token);
+
+// Separate trusted setup entry point. Repository/Git worker entry points require App tokens.
+export async function qualifySetup(accessToken, { send = fetch, signal, onResult } = {}) {
+  if (!setupToken(accessToken)) throw new Error('setup-token-required');
+  const request = makeRequest(accessToken, send, signal);
+  const account = await request('GET', '/user');
+  if (account.login !== 'brimdor' || account.id !== 1202831 || account.node_id !== fixtures[0].ownerNode ||
+    account.type !== 'User') throw new Error('account-mismatch');
+  await verifySetupOrganization(request);
+  for (const target of setupTargets) {
+    let repositories, projects;
+    for (const collection of ['repositories', 'projectsV2']) {
+      try {
+        const values = await readOwnerCollection(request, target, collection);
+        if (collection === 'repositories') repositories = values; else projects = values;
+      } catch (error) {
+        onResult?.({ fixture: `${target.owner}/${target.name}`, operation: `${collection}-discovery`,
+          status: 'failed', detail: { code: safeError(error), fields: error.fields ?? [] } });
+        throw error;
+      }
+    }
+    const named = repositories.filter(repository => repository.nameWithOwner === `${target.owner}/${target.name}`);
+    if ((target.existing ? named.length !== 1 || named[0].id !== target.existing.node || named[0].isPrivate !== true : named.length !== 0) ||
+      projects.some(project => project.title === target.title)) throw new Error('fixture-collision');
+    let absent = false;
+    try {
+      const actual = await request('GET', `/repos/${target.owner}/${target.name}`);
+      if (target.existing && !matchesRepository(actual, { ...target, ...target.existing })) throw new Error('repository-mismatch');
+    }
+    catch (error) { if (error.message !== 'http-404') throw error; absent = true; }
+    if (absent === Boolean(target.existing)) throw new Error('fixture-collision');
+  }
+  const rows = [], owned = [];
+  const confirm = (read, identity, matches) => confirmRead(read, identity, matches, signal);
+  async function record(target, operation, action) {
+    const started = performance.now();
+    try {
+      const detail = await action();
+      const row = { fixture: `${target.owner}/${target.name}`, operation, status: 'passed', detail,
+        milliseconds: performance.now() - started };
+      rows.push(row); onResult?.(row); return detail;
+    } catch (error) {
+      onResult?.({ fixture: `${target.owner}/${target.name}`, operation, status: 'failed', detail: safeError(error),
+        milliseconds: performance.now() - started });
+      throw new Error(safeError(error));
+    }
+  }
+  for (const target of setupTargets) {
+    const prefix = `/repos/${target.owner}/${target.name}`;
+    const fixture = await record(target, target.existing ? 'owned-repository-readback' : 'repository-create-readback', async () => {
+      if (target.existing) {
+        const fixture = { ...target, ...target.existing };
+        if (!matchesRepository(await request('GET', prefix), fixture)) throw new Error('repository-mismatch');
+        return fixture;
+      }
+      const created = await request('POST', target.type === 'User' ? '/user/repos' : `/orgs/${target.owner}/repos`, {
+        name: target.name, private: true, auto_init: true,
+        description: 'Disposable synthetic OAuth qualification fixture for Pipeliner Issue #26 (D-05); remove after qualification.',
+      });
+      if (!Number.isSafeInteger(created.id) || created.id < 1 || typeof created.node_id !== 'string' ||
+        !/^R_[A-Za-z0-9_-]+$/.test(created.node_id) || created.full_name !== `${target.owner}/${target.name}` ||
+        created.private !== true) throw new Error('readback-mismatch');
+      const fixture = { ...target, id: created.id, node: created.node_id };
+      onResult?.({ fixture: `${target.owner}/${target.name}`, operation: 'repository-created', status: 'passed',
+        detail: { id: created.id, node: created.node_id, private: true } });
+      const actual = await request('GET', prefix);
+      if (!matchesRepository(actual, fixture)) throw new Error('readback-mismatch');
+      return fixture;
+    });
+    const issue = await record(target, 'setup-issue-readback', async () => {
+      const issue = fixture.issue ? await request('GET', `${prefix}/issues/${fixture.issue.number}`)
+        : await request('POST', `${prefix}/issues`, { title: 'D-05 synthetic setup Issue',
+          body: 'Task-owned OAuth Project linkage fixture for Pipeliner Issue #26. No product or private data.', assignees: ['brimdor'] });
+      if (!Number.isSafeInteger(issue.id) || issue.id < 1 || !Number.isSafeInteger(issue.number) || issue.number < 1 ||
+        typeof issue.node_id !== 'string' || !/^I_[A-Za-z0-9_-]+$/.test(issue.node_id)) throw new Error('readback-mismatch');
+      if (fixture.issue && (issue.id !== fixture.issue.id || issue.number !== fixture.issue.number ||
+        issue.node_id !== fixture.issue.node || issue.title !== 'D-05 synthetic setup Issue')) throw new Error('readback-mismatch');
+      const actual = await request('GET', `${prefix}/issues/${issue.number}`);
+      if (actual.id !== issue.id || actual.node_id !== issue.node_id || actual.number !== issue.number || actual.state !== 'open' ||
+        !Array.isArray(actual.assignees) || actual.assignees.length !== 1 || actual.assignees[0].login !== 'brimdor') throw new Error('readback-mismatch');
+      return { id: actual.id, number: actual.number, node_id: actual.node_id };
+    });
+    const project = await record(target, 'project-create-fields-status-readback', () =>
+      setupProject(request, fixture, issue, target.title, onResult, confirm));
+    owned.push({ fixture, project });
+  }
+  return { setup: 'passed', rows, async verify(token) {
+    if (!setupToken(token)) throw new Error('setup-token-required');
+    const read = makeRequest(token, send, signal);
+    const account = await read('GET', '/user');
+    if (account.login !== 'brimdor' || account.id !== 1202831 || account.node_id !== fixtures[0].ownerNode ||
+      account.type !== 'User') throw new Error('account-mismatch');
+    await verifySetupOrganization(read);
+    for (const { fixture, project } of owned) {
+      if (!matchesRepository(await read('GET', `/repos/${fixture.owner}/${fixture.name}`), fixture)) throw new Error('repository-mismatch');
+      const projects = await readOwnerCollection(read, fixture, 'projectsV2');
+      if (projects.filter(actual => actual.id === project.id && actual.title === fixture.title && actual.public === false).length !== 1) {
+        throw new Error('readback-mismatch');
+      }
+    }
+    return { resources: owned.length, readOnly: true };
+  } };
+}
+
+async function verifySetupOrganization(request) {
+  const organization = await request('GET', '/orgs/Zuriel-Labs');
+  if (organization.node_id !== fixtures[1].ownerNode || organization.login !== fixtures[1].owner ||
+    organization.type !== 'Organization') throw new Error('readback-mismatch');
+}
+
+async function readOwnerCollection(request, target, collection) {
+  const values = await collectConnection(async cursor => {
+    const data = await request('POST', '/graphql', { query:
+      `query($owner:ID!,$cursor:String){node(id:$owner){... on ${target.type}{id ${collection}(first:100,after:$cursor${collection === 'repositories' ? ',ownerAffiliations:[OWNER]' : ''}){totalCount nodes{${collection === 'projectsV2' ? 'id title public' : 'id nameWithOwner isPrivate'}} pageInfo{hasNextPage endCursor}}}}}`,
+      variables: { owner: target.ownerNode, cursor } });
+    if (data.data?.node?.id !== target.ownerNode) throw new Error('readback-mismatch');
+    return data.data.node[collection];
+  }).catch(error => {
+    if (/^(incomplete Project connection|Project connection changed during pagination; retry audit|unreadable Project node|duplicate Project node during pagination|incomplete or inconsistent Project connection|invalid or repeated pagination cursor)$/.test(error.message)) {
+      throw new Error('incomplete-list');
+    }
+    throw error;
+  });
+  if (values.some(value => collection === 'projectsV2'
+    ? typeof value.title !== 'string' || !value.title || typeof value.public !== 'boolean'
+    : typeof value.nameWithOwner !== 'string' || !value.nameWithOwner.startsWith(`${target.owner}/`) ||
+      typeof value.isPrivate !== 'boolean')) throw new Error('response-invalid');
+  return values;
+}
 
 export async function qualifyAccess(accessToken, { fixtureId, readOnly = false, send = fetch, signal, onResult } = {}) {
   if (typeof accessToken !== 'string' || !/^ghu_[A-Za-z0-9_]{8,200}$/.test(accessToken)) throw new Error('app-token-required');
@@ -25,50 +163,7 @@ export async function qualifyAccess(accessToken, { fixtureId, readOnly = false, 
   const selectedFixtures = fixtureId === undefined ? fixtures : fixtures.filter(fixture => fixture.id === fixtureId);
   if (!selectedFixtures.length) throw new Error('fixture-not-approved');
   const rows = [];
-  async function request(method, path, body, upload = false) {
-    const combined = signal ? AbortSignal.any([signal, AbortSignal.timeout(30000)]) : AbortSignal.timeout(30000);
-    let reader, dispatched = false;
-    const mutation = method !== 'GET' && !(path === '/graphql' && body?.query?.startsWith('query('));
-    try {
-      combined.throwIfAborted();
-      dispatched = true;
-      const response = await send(`https://${upload ? 'uploads' : 'api'}.github.com${path}`, { method, redirect: 'error', signal: combined,
-        headers: { Accept: 'application/vnd.github+json', Authorization: `Bearer ${accessToken}`,
-          'X-GitHub-Api-Version': '2026-03-10', 'User-Agent': 'Pipeliner-D05-Qualification',
-          ...(body ? { 'Content-Type': upload ? 'application/octet-stream' : 'application/json' } : {}) },
-        body: body ? upload ? body : JSON.stringify(body) : undefined });
-      if (!response.ok) {
-        await response.body?.cancel().catch(() => {});
-        throw new Error(`http-${response.status}`);
-      }
-      reader = response.body?.getReader();
-      if (!reader) throw new Error('response-invalid');
-      const decoder = new TextDecoder('utf-8', { fatal: true });
-      let bytes = 0, text = '';
-      while (true) {
-        const part = await reader.read();
-        combined.throwIfAborted();
-        if (part.done) break;
-        bytes += part.value.byteLength;
-        if (bytes > 1048576) throw new Error('response-too-large');
-        text += decoder.decode(part.value, { stream: true });
-      }
-      text += decoder.decode();
-      let data;
-      try { data = JSON.parse(text); } catch { throw new Error('response-invalid'); }
-      combined.throwIfAborted();
-      if (!data || typeof data !== 'object') throw new Error('response-invalid');
-      if (data.errors?.length) throw new Error(data.errors.some(e => e.type === 'FORBIDDEN') ? 'graphql-forbidden' : 'graphql-rejected');
-      return data;
-    } catch (error) {
-      await reader?.cancel().catch(() => {});
-      if (signal?.aborted) throw new Error(mutation && dispatched ? 'write-result-uncertain' : 'cancelled');
-      if (/^(http-\d{3}|graphql-(forbidden|rejected))$/.test(error?.message)) throw error;
-      if (!mutation && /^(response-invalid|response-too-large)$/.test(error?.message)) throw error;
-      // A lost write reply never authorizes another dispatch.
-      throw new Error(mutation && dispatched ? 'write-result-uncertain' : 'read-failed');
-    } finally { reader?.releaseLock(); }
-  }
+  const request = makeRequest(accessToken, send, signal);
   async function list(path, key) {
     const values = [];
     let total;
@@ -85,15 +180,7 @@ export async function qualifyAccess(accessToken, { fixtureId, readOnly = false, 
     }
     throw new Error('incomplete-list');
   }
-  async function confirm(read, identity, matches) {
-    for (let attempt = 0; attempt < 5; attempt++) {
-      const actual = await read();
-      if (!identity(actual)) throw new Error('readback-mismatch');
-      if (matches(actual)) return actual;
-      if (attempt < 4) await delay(500, undefined, { signal }).catch(() => { throw new Error('cancelled'); });
-    }
-    throw new Error('readback-mismatch');
-  }
+  const confirm = (read, identity, matches) => confirmRead(read, identity, matches, signal);
   if ((await request('GET', '/user')).login !== 'brimdor') throw new Error('account-mismatch');
   const installations = (await list('/user/installations', 'installations')).filter(i => i.app_id === 5148613);
   if (installations.length < selectedFixtures.length || installations.length > fixtures.length ||
@@ -252,90 +339,7 @@ export async function qualifyAccess(accessToken, { fixtureId, readOnly = false, 
     await record(fixture, 'project-create-fields-status-readback', async () => {
       if (!fixtureIssue || !projectAbsent) throw new Error('dependency-unqualified');
       const title = `Pipeliner D-05 #26 ${fixture.type === 'User' ? 'Personal' : 'Organization'} Fixture`;
-      const created = await request('POST', '/graphql', { query:
-        'mutation($owner:ID!,$title:String!,$repository:ID!){createProjectV2(input:{ownerId:$owner,title:$title,repositoryId:$repository}){projectV2{id number title public owner{... on User{login} ... on Organization{login}}}}}',
-        variables: { owner: fixture.ownerNode, title, repository: fixture.node } });
-      const project = created.data?.createProjectV2?.projectV2;
-      if (typeof project?.id !== 'string' || !Number.isSafeInteger(project.number) || project.number < 1 ||
-        project.title !== title || project.public !== false || project.owner?.login !== fixture.owner) throw new Error('readback-mismatch');
-      onResult?.({ fixture: `${fixture.owner}/${fixture.name}`, operation: 'project-created', status: 'passed',
-        detail: { id: project.id, number: project.number, private: true } });
-      const readFields = () => collectConnection(async cursor => {
-        const data = await request('POST', '/graphql', { query:
-          'query($id:ID!,$cursor:String){node(id:$id){... on ProjectV2{id fields(first:100,after:$cursor){totalCount nodes{... on ProjectV2Field{id name} ... on ProjectV2SingleSelectField{id name options{id name}} ... on ProjectV2IterationField{id name}} pageInfo{hasNextPage endCursor}}}}}',
-          variables: { id: project.id, cursor } });
-        if (data.data?.node?.id !== project.id) throw new Error('readback-mismatch');
-        return data.data.node.fields;
-      });
-      const initial = await readFields();
-      const statusFields = initial.filter(field => field.name === 'Status');
-      if (statusFields.length !== 1 || !Array.isArray(statusFields[0].options)) throw new Error('readback-mismatch');
-      const definitions = [
-        { name: 'Status', choices: ['Backlog', 'In Progress', 'In Review', 'Pending Review', 'Done'], value: 'In Progress' },
-        { name: 'Priority', choices: ['P0', 'P1', 'P2', 'P3'], value: 'P0' },
-        { name: 'Impact', choices: ['High', 'Medium', 'Low'], value: 'High' },
-        { name: 'Effort', choices: ['XS', 'S', 'M', 'L', 'XL'], value: 'L' },
-      ];
-      const fields = new Map();
-      for (const definition of definitions) {
-        if (definition.name !== 'Status' && initial.some(field => field.name === definition.name)) throw new Error('fixture-collision');
-        const options = definition.choices.map(name => ({ name, color: 'BLUE', description: 'Synthetic D-05 fixture option' }));
-        const updating = definition.name === 'Status';
-        const data = await request('POST', '/graphql', { query: updating
-          ? 'mutation($field:ID!,$options:[ProjectV2SingleSelectFieldOptionInput!]!){updateProjectV2Field(input:{fieldId:$field,singleSelectOptions:$options}){projectV2Field{... on ProjectV2SingleSelectField{id name options{id name}}}}}'
-          : 'mutation($project:ID!,$name:String!,$options:[ProjectV2SingleSelectFieldOptionInput!]!){createProjectV2Field(input:{projectId:$project,dataType:SINGLE_SELECT,name:$name,singleSelectOptions:$options}){projectV2Field{... on ProjectV2SingleSelectField{id name options{id name}}}}}',
-          variables: updating ? { field: statusFields[0].id, options } : { project: project.id, name: definition.name, options } });
-        const field = data.data?.[updating ? 'updateProjectV2Field' : 'createProjectV2Field']?.projectV2Field;
-        if (typeof field?.id !== 'string' || field.name !== definition.name || !Array.isArray(field.options) ||
-          !isDeepStrictEqual(field.options.map(option => option.name), definition.choices) ||
-          field.options.some(option => typeof option.id !== 'string' || !option.id) ||
-          new Set(field.options.map(option => option.id)).size !== field.options.length) throw new Error('readback-mismatch');
-        fields.set(definition.name, field);
-      }
-      const actualFields = await readFields();
-      for (const [name, expected] of fields) {
-        const actual = actualFields.filter(field => field.name === name);
-        if (actual.length !== 1 || !isDeepStrictEqual(actual[0], expected)) throw new Error('readback-mismatch');
-      }
-      const added = await request('POST', '/graphql', { query:
-        'mutation($project:ID!,$issue:ID!){addProjectV2ItemById(input:{projectId:$project,contentId:$issue}){item{id}}}',
-        variables: { project: project.id, issue: fixtureIssue.node_id } });
-      const item = added.data?.addProjectV2ItemById?.item?.id;
-      if (typeof item !== 'string' || !item) throw new Error('readback-mismatch');
-      for (const definition of definitions) {
-        const field = fields.get(definition.name);
-        const data = await request('POST', '/graphql', { query:
-          'mutation($project:ID!,$item:ID!,$field:ID!,$option:String!){updateProjectV2ItemFieldValue(input:{projectId:$project,itemId:$item,fieldId:$field,value:{singleSelectOptionId:$option}}){projectV2Item{id}}}',
-          variables: { project: project.id, item, field: field.id, option: field.options.find(option => option.name === definition.value).id } });
-        if (data.data?.updateProjectV2ItemFieldValue?.projectV2Item?.id !== item) throw new Error('readback-mismatch');
-      }
-      const readItem = async () => {
-        const items = await readProject(project.id, (query, variables) => request('POST', '/graphql', { query, variables }));
-        if (items.length !== 1 || items[0].id !== item || items[0].content?.id !== fixtureIssue.node_id ||
-          items[0].content.repository?.id !== fixture.node || items[0].content.state !== 'OPEN') throw new Error('readback-mismatch');
-        return items[0];
-      };
-      const statusField = fields.get('Status'), statuses = ['In Progress'];
-      for (const next of ['In Review', 'Pending Review', 'In Progress']) {
-        const current = await confirm(readItem, () => true, item =>
-          item.fieldValues.nodes.find(value => value.field?.id === statusField.id)?.name === statuses.at(-1));
-        const status = current.fieldValues.nodes.find(value => value.field?.id === statusField.id)?.name;
-        if (status !== statuses.at(-1)) throw new Error('readback-mismatch');
-        const scope = { repository: { owner: fixture.owner, name: fixture.name, id: fixture.node },
-          issue: { id: fixtureIssue.node_id, number: fixtureIssue.number }, runId: 'd05-26-fixture', epoch: 1, policyVersion: 1,
-          project: { id: project.id, itemId: item, statusFieldId: statusField.id,
-            statuses: Object.fromEntries(statusField.options.map(option => [option.name, option.id])) } };
-        const plan = planOperation({ operation: 'project-status', payload: { status: next }, repositoryId: fixture.node,
-          issueId: fixtureIssue.node_id, runId: scope.runId, epoch: scope.epoch, policyVersion: scope.policyVersion }, scope,
-        { complete: true, repositoryId: fixture.node, issueId: fixtureIssue.node_id, projectId: project.id, itemId: item,
-          statusFieldId: statusField.id, activeIssueIds: [fixtureIssue.node_id], issueState: 'OPEN', status });
-        const data = await request(plan.method, plan.path, plan.body);
-        if (data.data?.updateProjectV2ItemFieldValue?.projectV2Item?.id !== item) throw new Error('readback-mismatch');
-        statuses.push(next);
-      }
-      await confirm(readItem, () => true, item => definitions.every(definition => item.fieldValues.nodes.some(value =>
-        value.field?.id === fields.get(definition.name).id && value.name === definition.value)));
-      return { id: project.id, number: project.number, item, fields: definitions.map(field => field.name), statuses };
+      return setupProject(request, fixture, fixtureIssue, title, onResult, confirm);
     });
   }
   return { installations: 'passed', rows, limitations: [
@@ -343,4 +347,165 @@ export async function qualifyAccess(accessToken, { fixtureId, readOnly = false, 
     'Each Project row reports actual setup access. PM Ready origin, required-check execution, protected-branch denial, release download/publication, revocation and full native product integration remain separately qualified. Git transport has separate native receipts.',
     'Uncertain writes require reconciliation before a later attempt; this function never retries them.',
   ] };
+}
+
+function makeRequest(accessToken, send, signal) {
+  return async function request(method, path, body, upload = false) {
+    const combined = signal ? AbortSignal.any([signal, AbortSignal.timeout(30000)]) : AbortSignal.timeout(30000);
+    let reader, dispatched = false;
+    const mutation = method !== 'GET' && !(path === '/graphql' && body?.query?.startsWith('query('));
+    try {
+      combined.throwIfAborted();
+      dispatched = true;
+      const response = await send(`https://${upload ? 'uploads' : 'api'}.github.com${path}`, { method, redirect: 'error', signal: combined,
+        headers: { Accept: 'application/vnd.github+json', Authorization: `Bearer ${accessToken}`,
+          'X-GitHub-Api-Version': '2026-03-10', 'User-Agent': 'Pipeliner-D05-Qualification',
+          ...(body ? { 'Content-Type': upload ? 'application/octet-stream' : 'application/json' } : {}) },
+        body: body ? upload ? body : JSON.stringify(body) : undefined });
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => {});
+        throw new Error(`http-${response.status}`);
+      }
+      reader = response.body?.getReader();
+      if (!reader) throw new Error('response-invalid');
+      const decoder = new TextDecoder('utf-8', { fatal: true });
+      let bytes = 0, text = '';
+      while (true) {
+        const part = await reader.read();
+        combined.throwIfAborted();
+        if (part.done) break;
+        bytes += part.value.byteLength;
+        if (bytes > 1048576) throw new Error('response-too-large');
+        text += decoder.decode(part.value, { stream: true });
+      }
+      text += decoder.decode();
+      let data;
+      try { data = JSON.parse(text); } catch { throw new Error('response-invalid'); }
+      combined.throwIfAborted();
+      if (!data || typeof data !== 'object') throw new Error('response-invalid');
+      if (data.errors?.length) {
+        const kind = data.errors.some(error => error.type === 'FORBIDDEN') ? 'forbidden'
+          : data.errors.some(error => error.type === 'INSUFFICIENT_SCOPES') ? 'insufficient-scopes'
+          : data.errors.some(error => error.type === 'NOT_FOUND') ? 'not-found'
+          : data.errors.some(error => ['undefinedField', 'argumentNotAccepted', 'variableMismatch', 'missingRequiredArguments'].includes(error.extensions?.code)) ? 'validation' : 'rejected';
+        const error = new Error(`graphql-${kind}`);
+        error.fields = [...new Set(data.errors.flatMap(error => Array.isArray(error.path) ? error.path : [])
+          .filter(field => ['id', 'login', 'repositories', 'projectsV2', 'owner', 'createProjectV2'].includes(field)))];
+        throw error;
+      }
+      return data;
+    } catch (error) {
+      await reader?.cancel().catch(() => {});
+      if (signal?.aborted) throw new Error(mutation && dispatched ? 'write-result-uncertain' : 'cancelled');
+      if (/^(http-\d{3}|graphql-(forbidden|rejected|insufficient-scopes|validation|not-found))$/.test(error?.message)) throw error;
+      if (!mutation && /^(response-invalid|response-too-large)$/.test(error?.message)) throw error;
+      // A lost write reply never authorizes another dispatch.
+      throw new Error(mutation && dispatched ? 'write-result-uncertain' : 'read-failed');
+    } finally { reader?.releaseLock(); }
+  };
+}
+
+async function confirmRead(read, identity, matches, signal) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const actual = await read();
+    if (!identity(actual)) throw new Error('readback-mismatch');
+    if (matches(actual)) return actual;
+    if (attempt < 4) await delay(500, undefined, { signal }).catch(() => { throw new Error('cancelled'); });
+  }
+  throw new Error('readback-mismatch');
+}
+
+async function setupProject(request, fixture, fixtureIssue, title, onResult, confirm) {
+  const created = await request('POST', '/graphql', { query:
+    'mutation($owner:ID!,$title:String!,$repository:ID!){createProjectV2(input:{ownerId:$owner,title:$title,repositoryId:$repository}){projectV2{id number title public owner{... on User{id} ... on Organization{id}}}}}',
+    variables: { owner: fixture.ownerNode, title, repository: fixture.node } });
+  const project = created.data?.createProjectV2?.projectV2;
+  if (typeof project?.id !== 'string' || !Number.isSafeInteger(project.number) || project.number < 1 ||
+    project.title !== title || project.public !== false || project.owner?.id !== fixture.ownerNode) throw new Error('readback-mismatch');
+  onResult?.({ fixture: `${fixture.owner}/${fixture.name}`, operation: 'project-created', status: 'passed',
+    detail: { id: project.id, number: project.number, private: true } });
+  const readFields = () => collectConnection(async cursor => {
+    const data = await request('POST', '/graphql', { query:
+      'query($id:ID!,$cursor:String){node(id:$id){... on ProjectV2{id fields(first:100,after:$cursor){totalCount nodes{... on ProjectV2Field{id name} ... on ProjectV2SingleSelectField{id name options{id name}} ... on ProjectV2IterationField{id name}} pageInfo{hasNextPage endCursor}}}}}',
+      variables: { id: project.id, cursor } });
+    if (data.data?.node?.id !== project.id) throw new Error('readback-mismatch');
+    return data.data.node.fields;
+  });
+  const initial = await readFields();
+  const statusFields = initial.filter(field => field.name === 'Status');
+  if (statusFields.length !== 1 || !Array.isArray(statusFields[0].options)) throw new Error('readback-mismatch');
+  const definitions = [
+    { name: 'Status', choices: ['Backlog', 'In Progress', 'In Review', 'Pending Review', 'Done'], value: 'In Progress' },
+    { name: 'Priority', choices: ['P0', 'P1', 'P2', 'P3'], value: 'P0' },
+    { name: 'Impact', choices: ['High', 'Medium', 'Low'], value: 'High' },
+    { name: 'Effort', choices: ['XS', 'S', 'M', 'L', 'XL'], value: 'L' },
+  ];
+  const fields = new Map();
+  for (const definition of definitions) {
+    if (definition.name !== 'Status' && initial.some(field => field.name === definition.name)) throw new Error('fixture-collision');
+    const options = definition.choices.map(name => ({ name, color: 'BLUE', description: 'Synthetic D-05 fixture option' }));
+    const updating = definition.name === 'Status';
+    const data = await request('POST', '/graphql', { query: updating
+      ? 'mutation($field:ID!,$options:[ProjectV2SingleSelectFieldOptionInput!]!){updateProjectV2Field(input:{fieldId:$field,singleSelectOptions:$options}){projectV2Field{... on ProjectV2SingleSelectField{id name options{id name}}}}}'
+      : 'mutation($project:ID!,$name:String!,$options:[ProjectV2SingleSelectFieldOptionInput!]!){createProjectV2Field(input:{projectId:$project,dataType:SINGLE_SELECT,name:$name,singleSelectOptions:$options}){projectV2Field{... on ProjectV2SingleSelectField{id name options{id name}}}}}',
+      variables: updating ? { field: statusFields[0].id, options } : { project: project.id, name: definition.name, options } });
+    const field = data.data?.[updating ? 'updateProjectV2Field' : 'createProjectV2Field']?.projectV2Field;
+    if (typeof field?.id !== 'string' || field.name !== definition.name || !Array.isArray(field.options) ||
+      !isDeepStrictEqual(field.options.map(option => option.name), definition.choices) ||
+      field.options.some(option => typeof option.id !== 'string' || !option.id) ||
+      new Set(field.options.map(option => option.id)).size !== field.options.length) throw new Error('readback-mismatch');
+    fields.set(definition.name, field);
+  }
+  const actualFields = await readFields();
+  for (const [name, expected] of fields) {
+    const actual = actualFields.filter(field => field.name === name);
+    if (actual.length !== 1 || !isDeepStrictEqual(actual[0], expected)) throw new Error('readback-mismatch');
+  }
+  const added = await request('POST', '/graphql', { query:
+    'mutation($project:ID!,$issue:ID!){addProjectV2ItemById(input:{projectId:$project,contentId:$issue}){item{id}}}',
+    variables: { project: project.id, issue: fixtureIssue.node_id } });
+  const item = added.data?.addProjectV2ItemById?.item?.id;
+  if (typeof item !== 'string' || !item) throw new Error('readback-mismatch');
+  for (const definition of definitions) {
+    const field = fields.get(definition.name);
+    const data = await request('POST', '/graphql', { query:
+      'mutation($project:ID!,$item:ID!,$field:ID!,$option:String!){updateProjectV2ItemFieldValue(input:{projectId:$project,itemId:$item,fieldId:$field,value:{singleSelectOptionId:$option}}){projectV2Item{id}}}',
+      variables: { project: project.id, item, field: field.id, option: field.options.find(option => option.name === definition.value).id } });
+    if (data.data?.updateProjectV2ItemFieldValue?.projectV2Item?.id !== item) throw new Error('readback-mismatch');
+  }
+  const readItem = async () => {
+    const items = await readProject(project.id, (query, variables) => request('POST', '/graphql', { query, variables }));
+    // Only the verified new addition may be temporarily absent. Wrong identities still fail immediately.
+    if (items.length === 0) return null;
+    if (items.length !== 1 || items[0].id !== item || items[0].content?.id !== fixtureIssue.node_id ||
+      items[0].content.repository?.id !== fixture.node || items[0].content.state !== 'OPEN') {
+      onResult?.({ fixture: `${fixture.owner}/${fixture.name}`, operation: 'project-item-binding', status: 'failed', detail: {
+        count: items.length, itemMatches: items[0]?.id === item, issueMatches: items[0]?.content?.id === fixtureIssue.node_id,
+        repositoryMatches: items[0]?.content?.repository?.id === fixture.node, openState: items[0]?.content?.state === 'OPEN',
+      } });
+      throw new Error('readback-mismatch');
+    }
+    return items[0];
+  };
+  const statusField = fields.get('Status'), statuses = ['In Progress'];
+  for (const next of ['In Review', 'Pending Review', 'In Progress']) {
+    const current = await confirm(readItem, () => true, item =>
+      item?.fieldValues.nodes.find(value => value.field?.id === statusField.id)?.name === statuses.at(-1));
+    const status = current.fieldValues.nodes.find(value => value.field?.id === statusField.id)?.name;
+    if (status !== statuses.at(-1)) throw new Error('readback-mismatch');
+    const scope = { repository: { owner: fixture.owner, name: fixture.name, id: fixture.node },
+      issue: { id: fixtureIssue.node_id, number: fixtureIssue.number }, runId: 'd05-26-fixture', epoch: 1, policyVersion: 1,
+      project: { id: project.id, itemId: item, statusFieldId: statusField.id,
+        statuses: Object.fromEntries(statusField.options.map(option => [option.name, option.id])) } };
+    const plan = planOperation({ operation: 'project-status', payload: { status: next }, repositoryId: fixture.node,
+      issueId: fixtureIssue.node_id, runId: scope.runId, epoch: scope.epoch, policyVersion: scope.policyVersion }, scope,
+    { complete: true, repositoryId: fixture.node, issueId: fixtureIssue.node_id, projectId: project.id, itemId: item,
+      statusFieldId: statusField.id, activeIssueIds: [fixtureIssue.node_id], issueState: 'OPEN', status });
+    const data = await request(plan.method, plan.path, plan.body);
+    if (data.data?.updateProjectV2ItemFieldValue?.projectV2Item?.id !== item) throw new Error('readback-mismatch');
+    statuses.push(next);
+  }
+  await confirm(readItem, () => true, item => Boolean(item) && definitions.every(definition => item.fieldValues.nodes.some(value =>
+    value.field?.id === fields.get(definition.name).id && value.name === definition.value)));
+  return { id: project.id, number: project.number, item, fields: definitions.map(field => field.name), statuses };
 }

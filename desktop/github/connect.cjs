@@ -14,7 +14,7 @@ app.setName('Pipeliner Desktop · GitHub connection');
 fs.writeFileSync(path.join(directory, 'ownership.json'), JSON.stringify({ issue: 26, pid: process.pid, directory }));
 const cancellation = new AbortController();
 let flow, credentials, fixtureLabel, busy = true, phase = 'native-start';
-const permittedError = error => /^(http-\d{3}|cancelled|timeout|transport-failed|authorization-[a-z-]+|device-[a-z-]+|invalid-[a-z-]+|account-mismatch|installation-mismatch|repository-mismatch|incomplete-list|read-failed|reauthentication-required|token-request-denied)$/.test(error?.message)
+const permittedError = error => /^(http-\d{3}|cancelled|timeout|transport-failed|authorization-[a-z-]+|device-[a-z-]+|invalid-[a-z-]+|account-mismatch|installation-mismatch|repository-mismatch|readback-mismatch|fixture-collision|response-(invalid|too-large)|write-result-uncertain|graphql-(forbidden|rejected|insufficient-scopes|validation|not-found)|setup-token-required|incomplete-list|read-failed|reauthentication-required|token-request-denied)$/.test(error?.message)
   ? error.message : 'connection-check-failed';
 app.on('before-quit', event => { cancellation.abort(); flow?.cancel(); credentials = null; if (busy) event.preventDefault(); });
 process.on('SIGTERM', () => app.quit());
@@ -39,20 +39,25 @@ app.whenReady().then(async () => {
     busy = false; app.quit();
     return;
   }
-  const { readApp, startDevice, refreshDevice } = await import('./device.mjs');
-  const { qualifyAccess, appPermissions, fixtures } = await import('./access.mjs');
+  const { readApp, startDevice, refreshDevice, startSetupDevice, refreshSetupDevice } = await import('./device.mjs');
+  const { qualifyAccess, qualifySetup, appPermissions, fixtures, setupTargets } = await import('./access.mjs');
+  const setup = process.argv.includes('--setup-fixtures');
   phase = 'public-app-read';
-  const selected = await readApp('pipeliner-desktop', { signal: cancellation.signal });
-  if (selected.id !== 5148613 || selected.clientId !== 'Iv23liXNpydn3E3Qt5JK' || selected.owner !== 'Zuriel-Labs' ||
-    selected.ownerType !== 'Organization' || !isDeepStrictEqual(selected.permissions, appPermissions)) throw new Error('installation-mismatch');
+  // Public OAuth identity verified in the owned Zuriel-Labs registration UI; no secret is generated.
+  const selected = setup ? { clientId: 'Ov23liqnTj1cUOMnqW1l' }
+    : await readApp('pipeliner-desktop', { signal: cancellation.signal });
+  if (!setup && (selected.id !== 5148613 || selected.clientId !== 'Iv23liXNpydn3E3Qt5JK' || selected.owner !== 'Zuriel-Labs' ||
+    selected.ownerType !== 'Organization' || !isDeepStrictEqual(selected.permissions, appPermissions))) throw new Error('installation-mismatch');
   const fixtureId = process.argv.includes('--organization-fixture') ? fixtures.find(f => f.type === 'Organization').id : undefined;
-  const targets = fixtureId === undefined ? fixtures : fixtures.filter(f => f.id === fixtureId);
+  const targets = setup ? setupTargets : fixtureId === undefined ? fixtures : fixtures.filter(f => f.id === fixtureId);
   fixtureLabel = targets.map(f => `${f.owner}/${f.name}`).join(', ');
   phase = 'device-code';
-  flow = await startDevice(selected.clientId, { signal: cancellation.signal });
-  const detail = `Issue #26 · Verify the designated Pipeliner Desktop GitHub App.\n\nCode: ${flow.userCode}\n\nAt github.com/login/device, use your brimdor account. GitHub retains the existing selected-repository access. One sign-in runs the bounded suite for ${fixtureLabel}; private fixture identity checks run before any write.\n\nThis checks synthetic fixtures. The complete Desktop app is still being built. Cancel stops the qualification sequence.`;
+  flow = await (setup ? startSetupDevice : startDevice)(selected.clientId, { signal: cancellation.signal });
+  const detail = setup
+    ? `Issue #26 · Pipeliner Desktop Setup · approved OAuth qualification.\n\nCode: ${flow.userCode}\n\nAt github.com/login/device, use your brimdor account. GitHub grants broader repository and personal/organization Project access. This trusted setup probe qualifies only ${fixtureLabel} and their private synthetic Projects after exact identity and absence checks. It reuses the recorded personal test repository; organization creation is fresh. The scoped App remains the repository connection.\n\nExpiring credentials stay in memory. No secret is requested. Cancel stops this qualification sequence. The complete Desktop app is still being built.`
+    : `Issue #26 · Verify the designated Pipeliner Desktop GitHub App.\n\nCode: ${flow.userCode}\n\nAt github.com/login/device, use your brimdor account. GitHub retains the existing selected-repository access. One sign-in runs the bounded suite for ${fixtureLabel}; private fixture identity checks run before any write.\n\nThis checks synthetic fixtures. The complete Desktop app is still being built. Cancel stops the qualification sequence.`;
   const start = await dialog.showMessageBox(window, { type: 'info', title: 'Pipeliner · Connect GitHub',
-    message: 'Connect the scoped GitHub App', detail, buttons: ['Open GitHub', 'Cancel'], defaultId: 0, cancelId: 1,
+    message: setup ? 'Connect Pipeliner Desktop Setup' : 'Connect the scoped GitHub App', detail, buttons: ['Open GitHub', 'Cancel'], defaultId: 0, cancelId: 1,
     signal: AbortSignal.any([cancellation.signal, AbortSignal.timeout(Math.max(1, flow.expiresAt - Date.now()))]) });
   if (start.response !== 0) throw new Error('cancelled');
   await shell.openExternal(flow.verificationUri);
@@ -64,10 +69,27 @@ app.whenReady().then(async () => {
   phase = 'device-authorize';
   try { credentials = await flow.authorize(); }
   finally { settled = true; waiting.abort(); await pending; }
+  if (setup) console.log(JSON.stringify({ receipt: { fixture: fixtureLabel, operation: 'setup-grant', status: 'passed',
+    detail: { scopes: credentials.scopes, expiresInSeconds: Math.round((credentials.expiresAt - Date.now()) / 1000) } } }));
   phase = 'fixture-preflight';
-  const result = await qualifyAccess(credentials.accessToken, { fixtureId, signal: cancellation.signal,
+  const result = await (setup ? qualifySetup : qualifyAccess)(credentials.accessToken, { fixtureId, signal: cancellation.signal,
     onResult: receipt => console.log(JSON.stringify({ receipt })) });
-  console.log(JSON.stringify({ date: new Date().toISOString(), appId: selected.id, ...result }));
+  console.log(JSON.stringify({ date: new Date().toISOString(), appId: selected.id,
+    ...(setup ? { setup: result.setup, rows: result.rows } : result) }));
+  if (setup) {
+    phase = 'setup-token-refresh';
+    const rotated = await refreshSetupDevice(selected.clientId, credentials.refreshToken, { signal: cancellation.signal });
+    const refresh = { passed: rotated.accessToken !== credentials.accessToken,
+      expiresInSeconds: Math.round((rotated.expiresAt - Date.now()) / 1000) };
+    credentials = rotated;
+    await result.verify(credentials.accessToken);
+    refresh.repositoryAndProjectBinding = 'passed';
+    console.log(JSON.stringify({ receipt: { fixture: fixtureLabel, operation: phase,
+      status: refresh.passed ? 'passed' : 'failed', detail: refresh } }));
+    credentials = null;
+    busy = false; app.quit();
+    return;
+  }
   const { qualifyGit } = await import('./git.mjs');
   for (const fixture of targets) {
     phase = 'git-transport';

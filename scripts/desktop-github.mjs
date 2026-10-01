@@ -5,7 +5,8 @@ import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-const modes = { check: '--native-check', failure: '--native-failure-check', connect: null, 'connect-org': '--organization-fixture' };
+const modes = { check: '--native-check', failure: '--native-failure-check', connect: null,
+  'connect-org': '--organization-fixture', 'connect-setup': '--setup-fixtures' };
 const mode = process.argv[2];
 if (!Object.hasOwn(modes, mode) || process.platform !== 'darwin' || process.arch !== 'arm64') throw new Error('Requires check, failure or connect on an arm64 Mac');
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -58,7 +59,10 @@ try {
         const record = JSON.parse(line);
         if (record && typeof record === 'object' && !Array.isArray(record) &&
           Object.keys(record).every(key => ['nativeDialog', 'versions', 'platform', 'architecture', 'date', 'appId',
-            'installations', 'rows', 'limitations', 'refresh', 'receipt', 'failed'].includes(key))) records.push(record);
+            'installations', 'setup', 'rows', 'limitations', 'refresh', 'receipt', 'failed'].includes(key))) {
+          records.push(record);
+          if (record.receipt) console.log(JSON.stringify(record));
+        }
       } catch { /* Discard runtime diagnostics; never forward arbitrary output. */ }
     }
   });
@@ -67,10 +71,10 @@ try {
   process.removeListener('SIGINT', stop);
   if (interrupted || bytes > 65536 || code !== 0 || records.some(record => record.failed) ||
     (mode === 'check' && !records.some(record => record.nativeDialog === 'opened-and-cancelled')) ||
-    (mode.startsWith('connect') && (!records.some(record => record.installations === 'passed') ||
+    (mode.startsWith('connect') && (!records.some(record => mode === 'connect-setup' ? record.setup === 'passed' : record.installations === 'passed') ||
       records.some(record => record.rows?.some(row => row.status !== 'passed') ||
         ['failed', 'blocked'].includes(record.receipt?.status))))) process.exitCode = 1;
-  for (const record of records) console.log(JSON.stringify(record));
+  for (const record of records.filter(record => !record.receipt)) console.log(JSON.stringify(record));
 } finally {
   // Chromium can write Local State after will-quit; only the parent can remove data after process exit.
   const processes = processList();

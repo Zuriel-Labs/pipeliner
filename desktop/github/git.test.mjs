@@ -15,6 +15,7 @@ test('Git credentials require the exact HTTPS fixture and never answer other des
     assert.throws(() => credentialReply(changed, token, fixture.id), /git-credential-denied/);
   }
   assert.throws(() => credentialReply(input, 'ghp_unapproved', fixture.id), /git-credential-denied/);
+  assert.throws(() => credentialReply(input, 'gho_synthetic_setup', fixture.id), /git-credential-denied/);
   assert.throws(() => credentialReply(input, token, 123), /git-credential-denied/);
 });
 

@@ -81,6 +81,8 @@ export async function readApp(slug, options = {}) {
 
 export async function startDevice(clientId, options = {}) {
   if (!client(clientId)) throw new Error('invalid-client');
+  const repositoryId = options.repositoryId;
+  if (repositoryId !== undefined && !positive(repositoryId)) throw new Error('invalid-repository');
   const now = options.now ?? Date.now;
   const wait = options.wait ?? ((milliseconds, signal) => sleep(milliseconds, undefined, { signal }));
   const cancellation = new AbortController();
@@ -111,7 +113,8 @@ export async function startDevice(clientId, options = {}) {
           if (signal.aborted) throw new Error('cancelled');
           if (lifetime.aborted || now() >= expiresAt) throw new Error('authorization-expired');
           const result = await json(TOKEN_URL, { client_id: clientId, device_code: deviceCode,
-            grant_type: 'urn:ietf:params:oauth:grant-type:device_code' }, { ...transport, signal: flowSignal });
+            grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+            ...(repositoryId === undefined ? {} : { repository_id: repositoryId }) }, { ...transport, signal: flowSignal });
           if (lifetime.aborted || now() >= expiresAt) throw new Error('authorization-expired');
           if (result.error === 'authorization_pending') continue;
           if (result.error === 'slow_down') {

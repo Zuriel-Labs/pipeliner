@@ -13,10 +13,12 @@ app.setPath('crashDumps', path.join(directory, 'crashes'));
 app.setName('Pipeliner Desktop · GitHub connection');
 fs.writeFileSync(path.join(directory, 'ownership.json'), JSON.stringify({ issue: 26, pid: process.pid, directory }));
 const cancellation = new AbortController();
-let flow, credentials;
+let flow, credentials, fixtureLabel, busy = true, phase = 'native-start';
 const permittedError = error => /^(http-\d{3}|cancelled|timeout|transport-failed|authorization-[a-z-]+|device-[a-z-]+|invalid-[a-z-]+|account-mismatch|installation-mismatch|repository-mismatch|incomplete-list|read-failed|reauthentication-required|token-request-denied)$/.test(error?.message)
   ? error.message : 'connection-check-failed';
-app.on('before-quit', () => { cancellation.abort(); flow?.cancel(); credentials = null; });
+app.on('before-quit', event => { cancellation.abort(); flow?.cancel(); credentials = null; if (busy) event.preventDefault(); });
+process.on('SIGTERM', () => app.quit());
+process.on('SIGINT', () => app.quit());
 app.whenReady().then(async () => {
   assert.equal(process.platform, 'darwin');
   assert.equal(process.arch, 'arm64');
@@ -34,16 +36,21 @@ app.whenReady().then(async () => {
       assert.equal(result.response, 0);
       console.log(JSON.stringify({ nativeDialog: 'opened-and-cancelled', versions: process.versions, platform: process.platform, architecture: process.arch }));
     } finally { clearTimeout(timer); }
-    app.quit();
+    busy = false; app.quit();
     return;
   }
   const { readApp, startDevice, refreshDevice } = await import('./device.mjs');
-  const { qualifyAccess, appPermissions } = await import('./access.mjs');
+  const { qualifyAccess, appPermissions, fixtures } = await import('./access.mjs');
+  phase = 'public-app-read';
   const selected = await readApp('pipeliner-desktop', { signal: cancellation.signal });
   if (selected.id !== 5148613 || selected.clientId !== 'Iv23liXNpydn3E3Qt5JK' || selected.owner !== 'Zuriel-Labs' ||
     selected.ownerType !== 'Organization' || !isDeepStrictEqual(selected.permissions, appPermissions)) throw new Error('installation-mismatch');
+  const fixtureId = process.argv.includes('--organization-fixture') ? fixtures.find(f => f.type === 'Organization').id : undefined;
+  const targets = fixtureId === undefined ? fixtures : fixtures.filter(f => f.id === fixtureId);
+  fixtureLabel = targets.map(f => `${f.owner}/${f.name}`).join(', ');
+  phase = 'device-code';
   flow = await startDevice(selected.clientId, { signal: cancellation.signal });
-  const detail = `Issue #26 · Verify the designated Pipeliner Desktop GitHub App.\n\nCode: ${flow.userCode}\n\nAt github.com/login/device, use your brimdor account. Access is restricted to brimdor/pipeliner-d05-26-personal and Zuriel-Labs/pipeliner-d05-26-org.\n\nThis checks synthetic fixtures. The complete Desktop app is still being built. Cancel stops this connection attempt.`;
+  const detail = `Issue #26 · Verify the designated Pipeliner Desktop GitHub App.\n\nCode: ${flow.userCode}\n\nAt github.com/login/device, use your brimdor account. GitHub retains the existing selected-repository access. One sign-in runs the bounded suite for ${fixtureLabel}; private fixture identity checks run before any write.\n\nThis checks synthetic fixtures. The complete Desktop app is still being built. Cancel stops the qualification sequence.`;
   const start = await dialog.showMessageBox(window, { type: 'info', title: 'Pipeliner · Connect GitHub',
     message: 'Connect the scoped GitHub App', detail, buttons: ['Open GitHub', 'Cancel'], defaultId: 0, cancelId: 1,
     signal: AbortSignal.any([cancellation.signal, AbortSignal.timeout(Math.max(1, flow.expiresAt - Date.now()))]) });
@@ -54,20 +61,48 @@ app.whenReady().then(async () => {
   const pending = dialog.showMessageBox(window, { type: 'info', title: 'Pipeliner · GitHub sign-in',
     message: 'Complete sign-in at GitHub', detail, buttons: ['Cancel connection'], cancelId: 0, signal: waiting.signal })
     .then(() => { if (!settled) { flow.cancel(); cancellation.abort(); } });
+  phase = 'device-authorize';
   try { credentials = await flow.authorize(); }
   finally { settled = true; waiting.abort(); await pending; }
-  const result = await qualifyAccess(credentials.accessToken, { signal: cancellation.signal,
+  phase = 'fixture-preflight';
+  const result = await qualifyAccess(credentials.accessToken, { fixtureId, signal: cancellation.signal,
     onResult: receipt => console.log(JSON.stringify({ receipt })) });
-  if (credentials.refreshToken) {
-    const rotated = await refreshDevice(selected.clientId, credentials.refreshToken, { signal: cancellation.signal });
-    result.refresh = { passed: rotated.accessToken !== credentials.accessToken, expiresInSeconds: Math.round((rotated.expiresAt - Date.now()) / 1000) };
-    credentials = rotated;
-  } else result.refresh = { passed: false, detail: 'Provider supplied no refresh token' };
   console.log(JSON.stringify({ date: new Date().toISOString(), appId: selected.id, ...result }));
+  const { qualifyGit } = await import('./git.mjs');
+  for (const fixture of targets) {
+    phase = 'git-transport';
+    const started = performance.now();
+    try {
+      const detail = await qualifyGit(credentials.accessToken, fixture.id, { signal: cancellation.signal });
+      console.log(JSON.stringify({ receipt: { fixture: `${fixture.owner}/${fixture.name}`, operation: phase,
+        status: 'passed', detail, milliseconds: performance.now() - started } }));
+    } catch (error) {
+      console.log(JSON.stringify({ receipt: { fixture: `${fixture.owner}/${fixture.name}`, operation: phase,
+        status: 'failed', detail: /^git-[a-z-]+$/.test(error.message) ? error.message : 'git-operation-failed',
+        milliseconds: performance.now() - started } }));
+      if (cancellation.signal.aborted) throw new Error('cancelled');
+    }
+  }
+  let refresh = { passed: false, detail: 'Provider supplied no refresh token' };
+  if (credentials.refreshToken) {
+    phase = 'device-refresh';
+    const rotated = await refreshDevice(selected.clientId, credentials.refreshToken, { signal: cancellation.signal });
+    refresh = { passed: rotated.accessToken !== credentials.accessToken, expiresInSeconds: Math.round((rotated.expiresAt - Date.now()) / 1000) };
+    credentials = rotated;
+    phase = 'refreshed-fixture-preflight';
+    await qualifyAccess(credentials.accessToken, { fixtureId, readOnly: true, signal: cancellation.signal,
+      onResult: receipt => console.log(JSON.stringify({ receipt })) });
+    refresh.repositoryBinding = 'passed';
+  }
+  console.log(JSON.stringify({ receipt: { fixture: fixtureLabel, operation: 'device-token-refresh',
+    status: refresh.passed ? 'passed' : 'failed', detail: refresh } }));
+  console.log(JSON.stringify({ refresh }));
   credentials = null;
-  app.quit();
+  busy = false; app.quit();
 }).catch(error => {
+  if (fixtureLabel) console.log(JSON.stringify({ receipt: { fixture: fixtureLabel,
+    operation: phase, status: 'failed', detail: permittedError(error) } }));
   console.log(JSON.stringify({ failed: permittedError(error) }));
   credentials = null;
-  app.quit();
+  busy = false; app.quit();
 });

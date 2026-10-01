@@ -59,6 +59,23 @@ test('device cancellation and expiry never return credentials', async () => {
   await assert.rejects(expired.authorize(), /authorization-expired/);
 });
 
+test('device polls retain one validated repository restriction without changing default requests', async () => {
+  const calls = [], replies = [device, { error: 'authorization_pending' }, token];
+  const options = { repositoryId: 1399878351, wait: async () => {}, send: async (url, request) => {
+    calls.push({ url, fields: new URLSearchParams(request.body) }); return response(replies.shift());
+  } };
+  const flow = await startDevice(clientId, options);
+  options.repositoryId = 123;
+  await flow.authorize();
+  assert.equal(calls[0].fields.has('repository_id'), false);
+  for (const call of calls.slice(1)) assert.equal(call.fields.get('repository_id'), '1399878351');
+  for (const repositoryId of [0, -1, 1.5, '1399878351', null, Number.MAX_SAFE_INTEGER + 1]) {
+    let dispatched = false;
+    await assert.rejects(startDevice(clientId, { repositoryId, send: async () => { dispatched = true; return response(device); } }), /invalid-repository/);
+    assert.equal(dispatched, false);
+  }
+});
+
 test('provider destinations, denial, malformed tokens and late abort fail safely', async () => {
   for (const verification_uri of ['https://evil.invalid/login/device', 'https://github.com/login/device?other=1']) {
     await assert.rejects(startDevice(clientId, { send: async () => response({ ...device, verification_uri }) }), /invalid-device-response/);

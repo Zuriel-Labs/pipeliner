@@ -101,7 +101,8 @@ export function openWorkerEnvironment(directory) {
         }
       };
       const timer = setTimeout(() => terminate('Local execution command timed out'), timeout);
-      child.stdout.on('data', data => { bytes += data.length; if (bytes > maximum) terminate('Local execution output limit exceeded'); else output += data; });
+      child.stdout.setEncoding('utf8');
+      child.stdout.on('data', data => { bytes += Buffer.byteLength(data); if (bytes > maximum) terminate('Local execution output limit exceeded'); else output += data; });
       child.stderr.on('data', data => { diagnostic = `${diagnostic}${data}`.slice(-4096); });
       child.once('error', () => { clearTimeout(timer); clearTimeout(force); children.delete(child); reject(new Error('Local execution command unavailable')); });
       // Reject only after actual command closure; a cancellation request is never termination evidence.

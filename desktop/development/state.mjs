@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { protectedFile } from '../core/storage.mjs';
 import { canonicalJSON, immutable, record, validatePipeline } from '../core/settings.mjs';
 import { transact } from '../core/runtime.mjs';
+import { showcaseComplete } from '../../scripts/lib/showcase.mjs';
 
 const hash = value => createHash('sha256').update(canonicalJSON(value)).digest('hex');
 const id = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(value);
@@ -70,7 +71,7 @@ export function openDevelopmentStore(directory) {
     if (value.state.epoch !== binding.epoch) throw new Error('Stale Development epoch');
     return value;
   }
-  const write = state => db.prepare('UPDATE development_runs SET state=?,state_hash=? WHERE id=?').run(canonicalJSON(state), hash(state), state.runId);
+  const write = state => { quota(state.runId, state, 0, true); db.prepare('UPDATE development_runs SET state=?,state_hash=? WHERE id=?').run(canonicalJSON(state), hash(state), state.runId); };
   function request(row) {
     if (!row) throw new Error('Unknown Development request');
     const data = JSON.parse(row.document), result = row.result ? JSON.parse(row.result) : null;
@@ -78,11 +79,11 @@ export function openDevelopmentStore(directory) {
     return immutable({ ...data, state: row.state, result });
   }
   const requests = runId => db.prepare('SELECT * FROM development_requests WHERE run=? ORDER BY rowid').all(runId).map(request);
-  function quota(runId, value, reservedBytes = 0) {
-    const { captured } = read(runId);
+  function quota(runId, value, reservedBytes = 0, replacesState = false) {
+    const { captured, state } = read(runId);
     const used = db.prepare('SELECT COALESCE(SUM(length(CAST(document AS BLOB))+COALESCE(length(CAST(result AS BLOB)),0)),0) AS bytes FROM development_requests WHERE run=?').get(runId).bytes
       + db.prepare('SELECT COALESCE(SUM(length(CAST(document AS BLOB))),0) AS bytes FROM development_outputs WHERE run=?').get(runId).bytes;
-    if (used + Buffer.byteLength(canonicalJSON(value)) + reservedBytes > captured.logBytes) throw new Error('Captured Development log limit exhausted');
+    if (used + (replacesState ? 0 : Buffer.byteLength(canonicalJSON(state))) + Buffer.byteLength(canonicalJSON(value)) + reservedBytes > captured.logBytes) throw new Error('Captured Development log limit exhausted');
   }
   function executing(binding) {
     const value = bound(binding);
@@ -179,7 +180,56 @@ export function openDevelopmentStore(directory) {
         return request(db.prepare('SELECT * FROM development_requests WHERE run=? AND id=?').get(binding.runId, requestId));
       });
     },
-    setCandidate(binding, value) { candidate(value); return transact(db, () => { const { state } = bound(binding); state.candidate = value; write(state); return immutable(state); }); },
+    setCandidate(binding, value) { candidate(value); return transact(db, () => { const { state } = bound(binding);
+      if (canonicalJSON(value) !== canonicalJSON(state.candidate)) { state.qa = null; state.integration = null; }
+      state.candidate = value; write(state); return immutable(state); }); },
+    offerQA(binding, showcase) {
+      canonicalJSON(showcase); candidate(showcase.candidate);
+      return transact(db, () => {
+        const { captured, state } = bound(binding), step = captured.pipeline.steps.find(step => step.id === state.step);
+        if (state.state !== 'candidate' || step?.kind !== 'pm-qa' || showcase.candidate.gitTree !== state.candidate.gitTree
+          || !showcaseComplete(showcase, ['sourceCommit', 'gitTree'], showcase.candidate, 'Approved', { issue: captured.run.issue })) throw new Error('Current Development Showcase unavailable');
+        const fingerprint = hash(showcase);
+        if (state.qa?.hash === fingerprint) return immutable(state.qa);
+        const visits = Object.hasOwn(state.visits, step.id) ? state.visits[step.id] : 0;
+        if (visits >= step.visitLimit) throw new Error('Captured Development QA visit limit exhausted');
+        state.visits[step.id] = visits + 1;
+        state.qa = { hash: fingerprint, step: step.id, showcase, decision: null }; write(state); return immutable(state.qa);
+      });
+    },
+    decideQA(binding, value) {
+      record(value, ['inputId', 'hash', 'decision', 'text']);
+      if (!id(value.inputId) || !sha(value.hash) || !['approve', 'feedback'].includes(value.decision) || !text(value.text, 2000)) throw new Error('Invalid Development PM decision');
+      return transact(db, () => {
+        const { captured, state } = bound(binding), step = captured.pipeline.steps.find(step => step.id === state.step);
+        if (state.state !== 'candidate' || step?.kind !== 'pm-qa' || !state.qa || state.qa.decision || state.qa.hash !== value.hash
+          || state.qa.showcase.candidate.gitTree !== state.candidate.gitTree) throw new Error('Development Showcase changed or decision is not pending');
+        if (state.qaHistory?.some(row => row.inputId === value.inputId)) throw new Error('Duplicate Development PM decision');
+        const decision = { ...value, epoch: binding.epoch, step: state.step, candidate: state.qa.showcase.candidate };
+        state.qaHistory = [...(state.qaHistory ?? []), decision];
+        state.step = step.routes[value.decision === 'approve' ? 'success' : 'feedback'];
+        if (value.decision === 'approve') { state.qa.decision = 'approve'; state.qa.inputId = value.inputId; state.state = 'candidate'; }
+        else { state.feedback = decision; state.qa = null; state.integration = null; state.state = state.step === 'blocked' ? 'blocked' : 'ready'; }
+        state.message = value.decision === 'approve' ? 'Current tested candidate approved for the disclosed outcome.' : value.text;
+        write(state); return immutable(state);
+      });
+    },
+    recordIntegration(binding, value) {
+      record(value, ['candidate', 'source', 'resultHash', 'pullRequest']); candidate(value.candidate); candidate(value.source);
+      if (!sha(value.resultHash) || !Number.isSafeInteger(value.pullRequest) || value.pullRequest < 1) throw new Error('Invalid Development integration');
+      return transact(db, () => {
+        const { captured, state } = bound(binding), step = captured.pipeline.steps.find(step => step.id === state.step);
+        if (state.state !== 'candidate' || step?.kind !== 'pr-integration' || step.routes.success !== 'complete' || value.candidate.gitTree !== state.candidate.gitTree
+          || !state.qa || state.qa.decision !== 'approve' || canonicalJSON(value.source) !== canonicalJSON(state.qa.showcase.candidate)) throw new Error('Development integration does not match the approved candidate');
+        state.integration = value; write(state); return immutable(value);
+      });
+    },
+    complete(binding, resultHash) {
+      return transact(db, () => { const { state } = bound(binding);
+        if (state.state !== 'candidate' || !state.integration || state.integration.resultHash !== resultHash) throw new Error('Verified Development integration required for completion');
+        state.state = 'complete'; state.step = 'complete'; state.message = 'Verified integration and source-only closeout complete.'; write(state); return immutable(state);
+      });
+    },
     advance(binding, result) {
       validateDevelopmentOutput(result);
       return transact(db, () => {

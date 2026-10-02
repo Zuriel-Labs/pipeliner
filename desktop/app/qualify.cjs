@@ -357,6 +357,32 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
         await wait(() => js("document.getElementById('transcript').textContent.includes('qualified Dev')"));
         assert.equal(await js("Boolean(document.getElementById('chat-development-start'))"), true);
       });
+      await check('development-native-QA-card-keyboard-feedback-and-stale-candidate-fences', async () => {
+        const snapshot = development.status(), candidate = { sourceCommit: 'a'.repeat(40), gitTree: 'b'.repeat(40) };
+        const qa = { hash: 'c'.repeat(64), decision: null, showcase: { summary: 'Synthetic source-only QA card. No Human acceptance.', findings: [], testResults: ['Synthetic recorded source check.'],
+          target: 'Source-only synthetic PR target', prerequisites: ['Synthetic display fixture only.'], steps: [{ action: 'Inspect the bounded source change.', expected: 'One corrected value.' }],
+          regressions: ['Original local work preserved.'], limitations: ['No app or installer testing claimed.'], nextOutcome: 'Approval integrates the displayed exact source and closes its Issue.', candidate } };
+        const display = { ...snapshot, revision: snapshot.revision + 100, busy: false, run: { issue: 7, control: 'paused' },
+          development: { state: 'candidate', turns: 4, usage: { input: 100, output: 20 } }, qa, publication: null, pending: [] };
+        window.webContents.send('development:status', display); await wait(() => js("Boolean(document.getElementById('chat-development-qa-approve'))"));
+        assert.equal(await js("document.getElementById('chat-development-run').textContent.includes('None reported.')"), true);
+        assert.equal(await js("document.getElementById('chat-development-run').textContent.includes('No app or installer testing claimed.')"), true);
+        await js("document.getElementById('chat-nav').click();document.getElementById('chat-development-qa-feedback').focus()");
+        assert.equal(await js("document.querySelector('label[for=chat-development-qa-feedback]').textContent"), 'Corrections for this candidate');
+        await js("document.getElementById('chat-development-qa-feedback').value='ghu_syntheticQaFixtureOnly123';document.getElementById('chat-development-qa-send').click()");
+        assert.equal(await js("document.getElementById('transcript').textContent.includes('ghu_syntheticQaFixtureOnly123')"), false);
+        assert.equal(await js("document.getElementById('chat-development-qa-feedback').value"), '');
+        await js("document.getElementById('chat-development-qa-approve').focus()");
+        window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+        await new Promise(resolve => setTimeout(resolve, 100)); assert.equal(development.status().run, null);
+        assert.equal(await js("document.getElementById('transcript').textContent.includes('Development context changed')"), true);
+        window.setSize(420, 760); window.webContents.setZoomFactor(2); await new Promise(resolve => setTimeout(resolve, 100));
+        assert.equal(await js('document.documentElement.scrollWidth<=innerWidth'), true); window.webContents.setZoomFactor(1); window.setSize(1180, 840);
+        await js("document.getElementById('chat-nav').click();window.scrollTo(0,document.getElementById('chat-development-run').offsetTop-90)");
+        writeFileSync(path.join(directory, 'qa-capture.png'), (await window.webContents.capturePage()).toPNG(), { flag: 'wx', mode: 0o600 });
+        // Restore the real manager after the intentionally forged/stale display fixture.
+        for (let i = 0; i < 110; i++) development.sync(); await wait(() => js("!document.getElementById('chat-development-qa-approve')"));
+      });
     }
     await check('themes-narrow-zoom-high-contrast-reduced-motion', async () => {
       if (developmentScope) await js("document.getElementById('settings-nav').click();document.getElementById('settings-agents').click()");
@@ -392,12 +418,12 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
       assert.equal(folderCancelled, true);
     });
   } catch { const snapshot = workspaces.status(); workspaceEvidence = { checkpoint: workspaceStage, busy: snapshot.busy, state: snapshot.draft?.state, error: snapshot.draft?.error, folderSelected: Boolean(snapshot.draft?.folder), projectCount: snapshot.draft?.projects?.length ?? 0 }; process.exitCode = 1; }
-  const report = { desktopQualification: developmentScope ? 'development-controls' : pipelineScope ? 'versioned-pipeline-editing' : 'protected-issue-intake', checks, passed: checks.length === (developmentScope ? 21 : pipelineScope ? 23 : issueScope ? 18 : 21) && checks.every(c => c.passed), milliseconds: Math.round(performance.now() - started), windowReadyFromMainEntryMs: windowReadyMs, measurements,
+  const report = { desktopQualification: developmentScope ? 'development-controls' : pipelineScope ? 'versioned-pipeline-editing' : 'protected-issue-intake', checks, passed: checks.length === (developmentScope ? 22 : pipelineScope ? 23 : issueScope ? 18 : 21) && checks.every(c => c.passed), milliseconds: Math.round(performance.now() - started), windowReadyFromMainEntryMs: windowReadyMs, measurements,
     versions: { electron: process.versions.electron, chromium: process.versions.chrome, node: process.versions.node, sqlite: process.versions.sqlite, os: process.platform, architecture: process.arch },
     nativeEvidence, workspaceEvidence, folderFailure, folderCancelled, synthetic: 'Synthetic GitHub/model replies and first folder selection; actual native secure field, folder-panel cancellation, protected storage, local Git and own window',
     notRun: issueScope ? ['Unchanged Codex unauthenticated discovery', 'Unchanged public GitHub App qualification', 'Unchanged invalid Cloud key probe'] : [],
     pending: ['Human native folder selection', 'Authenticated provider/GitHub PM journeys', 'Human task observation', 'Screen reader', 'Windows/Linux', 'Stable signed package storage identity'], captureAvailable: Boolean(capture),
-    nativeCaptureAvailable: existsSync(path.join(directory, 'secure-field.png')) };
+    nativeCaptureAvailable: existsSync(path.join(directory, 'secure-field.png')), qaCaptureAvailable: existsSync(path.join(directory, 'qa-capture.png')) };
   console.log(JSON.stringify(report)); if (!report.passed) process.exitCode = 1;
   if (window.isDestroyed()) app.exit(report.passed ? 0 : 1);
   else { window.once('closed', () => app.exit(report.passed ? 0 : 1)); window.close(); }

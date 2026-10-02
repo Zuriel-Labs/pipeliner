@@ -21,6 +21,45 @@ function fixture(edit = () => {}) {
 }
 const output = evidence => ({ outcome: 'success', summary: 'Verified source examined.', evidence, documents: [], findings: [] });
 
+function qaCandidate(f) {
+  for (const [kind, result] of [['source', {}], ['implementation', {}], ['tests', { name: 'Repository checks', command: 'node --test', exitCode: 0 }], ['review', {}]]) {
+    f.store.begin(f.binding); f.store.turn(f.binding);
+    const request = f.store.prepare(f.binding, kind, kind, {}); f.store.dispatch(f.binding, request.id);
+    f.store.finish(f.binding, request.id, { candidate: source, result }); f.store.advance(f.binding, output([request.id]));
+  }
+  f.store.begin(f.binding);
+  return { scope: 'issue', issue: 1, summary: 'Synthetic unit candidate.', findings: [], testResults: ['Repository checks passed.'],
+    target: 'Synthetic unit source', prerequisites: [], steps: [{ action: 'Inspect the source.', expected: 'Scoped value change.' }], regressions: ['Original source preserved.'],
+    limitations: ['Synthetic unit test; no Human QA.'], nextOutcome: 'Integrate the exact source and close the Issue.', approvalPhrase: 'Approved', candidate: source };
+}
+
+test('PM QA decisions bind to the current Showcase; feedback preserves counters and invalidates approval', () => {
+  const f = fixture();
+  try {
+    const showcase = qaCandidate(f), qa = f.store.offerQA(f.binding, showcase), turns = f.store.status(f.run.id).turns;
+    assert.throws(() => f.store.decideQA(f.binding, { inputId: 'wrong', hash: 'a'.repeat(64), decision: 'approve', text: 'Approved' }), /changed|Showcase/);
+    f.store.decideQA(f.binding, { inputId: 'feedback-one', hash: qa.hash, decision: 'feedback', text: 'The value needs a correction.' });
+    assert.equal(f.store.status(f.run.id).step, 'implement'); assert.equal(f.store.status(f.run.id).state, 'ready');
+    assert.equal(f.store.status(f.run.id).turns, turns); assert.equal(f.store.status(f.run.id).qa, null);
+    assert.equal(f.store.status(f.run.id).qaHistory[0].decision, 'feedback'); f.reopen();
+    assert.equal(f.store.status(f.run.id).feedback.text, 'The value needs a correction.');
+    assert.throws(() => f.store.decideQA(f.binding, { inputId: 'feedback-one', hash: qa.hash, decision: 'approve', text: 'Approved' }), /Showcase|pending|duplicate/);
+  } finally { f.cleanup(); }
+});
+
+test('current direct approval advances only the captured integration route and cannot be replayed', () => {
+  const f = fixture();
+  try {
+    const qa = f.store.offerQA(f.binding, qaCandidate(f));
+    f.store.decideQA(f.binding, { inputId: 'approval-one', hash: qa.hash, decision: 'approve', text: 'I approve this tested version.' });
+    assert.equal(f.store.status(f.run.id).step, 'integrate'); assert.equal(f.store.status(f.run.id).qa.decision, 'approve');
+    assert.throws(() => f.store.decideQA(f.binding, { inputId: 'approval-one', hash: qa.hash, decision: 'approve', text: 'Approved' }), /pending|duplicate/);
+    f.reopen(); assert.equal(f.store.status(f.run.id).qa.decision, 'approve');
+    f.store.setCandidate(f.binding, { ...source, gitTree: 'f'.repeat(40) });
+    assert.equal(f.store.status(f.run.id).qa, null);
+  } finally { f.cleanup(); }
+});
+
 test('persisted dispatch cannot replay after crash; stale epochs and forged evidence fail', () => {
   const f = fixture();
   try {

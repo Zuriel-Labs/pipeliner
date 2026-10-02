@@ -10,6 +10,15 @@ const sha = value => typeof value === 'string' && /^[a-f0-9]{40}$/.test(value);
 const ref = value => typeof value === 'string' && value.length <= 240 && /^[A-Za-z0-9_-][A-Za-z0-9_./-]*[A-Za-z0-9_-]$/.test(value)
   && !value.includes('..') && !value.includes('//') && value.split('/').every(part => !part.startsWith('.') && !part.endsWith('.lock'));
 
+export function candidateJob(ledger, run, previous = false) {
+  const round = (ledger.status(run.id).qaHistory ?? []).filter(row => row.decision === 'feedback').length - Number(previous);
+  return round > 0 ? run.id + '-candidate-' + round : run.id;
+}
+export function developmentPublication(store, ledger, run) {
+  const effect = store.effects(candidateJob(ledger, run)).find(effect => effect.step === 'pull-request' && effect.state === 'verified');
+  return effect ? { ...effect.result, baseBranch: effect.result.baseBranch ?? effect.binding.payload?.base, candidate: { sourceCommit: effect.result.head, gitTree: effect.binding.candidate.gitTree } } : null;
+}
+
 export function candidateEvidence(ledger, run, source, files) {
   const captured = ledger.captured(run.id), state = ledger.status(run.id), records = ledger.evidence({ runId: run.id, epoch: run.epoch }), outputs = ledger.outputs(run.id);
   checkedFiles(source); checkedFiles(files);
@@ -31,6 +40,8 @@ export function candidateEvidence(ledger, run, source, files) {
 // Git data and an owned ref only. No arbitrary host Git command, hooks or credential helper.
 export async function publishDevelopmentCandidate({ store, ledger, lease, workspace, run, source, files, profile, title, authority }) {
   const evidence = candidateEvidence(ledger, run, source, files), captured = ledger.captured(run.id), prefix = '/repos/' + workspace.slug;
+  const job = candidateJob(ledger, run), previous = job === run.id ? null : store.effects(candidateJob(ledger, run, true)).find(effect => effect.step === 'pull-request' && effect.state === 'verified');
+  if (job !== run.id && !previous) throw new Error('Development prior candidate publication unavailable');
   if (lease.id !== 'github' || typeof authority !== 'function' || typeof title !== 'string' || !title.trim() || title.length > 240 || /[\u0000-\u001f]/.test(title)) throw new Error('Development publication denied');
   const current = () => { lease.check(); authority(); };
   current(); const repository = await readRepository(lease, workspace.slug);
@@ -53,10 +64,10 @@ export async function publishDevelopmentCandidate({ store, ledger, lease, worksp
     current();
     const binding = { kind: 'development', repository: run.repository, repositoryId: workspace.repositoryId, runId: run.id, issue: run.issue,
       source: captured.source, candidate: evidence.candidate, branch, payload };
-    const before = store.prepare(run.id, step, binding);
+    const before = store.prepare(job, step, binding);
     if (before.state === 'verified') return inspect(before.result);
     if (before.state === 'denied') throw new Error('Development remote effect requires explicit recovery');
-    if (store.pending('development').some(value => value.id !== before.id)) throw new Error('Another Development remote effect needs recovery');
+    if (store.pending('development').some(value => value.binding.repository === run.repository && value.id !== before.id)) throw new Error('Another Development remote effect needs recovery');
     if (before.state === 'prepared') {
       await base(); current();
       if (!store.dispatch(before.id)) throw new Error('Development effect dispatch changed');
@@ -64,7 +75,7 @@ export async function publishDevelopmentCandidate({ store, ledger, lease, worksp
       catch (error) { if (error.message !== 'write-result-uncertain') { store.finish(before.id, 'uncertain', { error: 'remote-effect-not-verified' }); throw error; } }
     }
     try {
-      const known = store.effects(run.id).find(value => value.id === before.id).result, result = await inspect(known); current();
+      const known = store.effects(job).find(value => value.id === before.id).result, result = await inspect(known); current();
       store.finish(before.id, 'verified', result); return result;
     } catch (error) {
       store.finish(before.id, 'uncertain', { error: 'remote-effect-readback-required' }); throw error;
@@ -98,20 +109,25 @@ export async function publishDevelopmentCandidate({ store, ledger, lease, worksp
   if (!Number.isSafeInteger(account?.id) || account.id < 1 || !/^[A-Za-z0-9-]{1,39}$/.test(account.login)) throw new Error('Development author unavailable');
   const date = new Date(Math.floor(run.createdAt / 1000) * 1000).toISOString().replace('.000Z', 'Z');
   const author = { name: account.login, email: account.id + '+' + account.login + '@users.noreply.github.com', date };
-  const message = 'Issue #' + run.issue + ': ' + title + '\n', seconds = Date.parse(date) / 1000;
-  const expectedCommit = objectHash('commit', Buffer.from(`tree ${evidence.candidate.gitTree}\nparent ${captured.source.sourceCommit}\nauthor ${author.name} <${author.email}> ${seconds} +0000\ncommitter ${author.name} <${author.email}> ${seconds} +0000\n\n${message}`));
+  const message = 'Issue #' + run.issue + ': ' + title + '\n', seconds = Date.parse(date) / 1000, parent = previous?.result.head ?? captured.source.sourceCommit;
+  const expectedCommit = objectHash('commit', Buffer.from(`tree ${evidence.candidate.gitTree}\nparent ${parent}\nauthor ${author.name} <${author.email}> ${seconds} +0000\ncommitter ${author.name} <${author.email}> ${seconds} +0000\n\n${message}`));
   await effect('commit', { sha: expectedCommit, message, author }, async () => {
-    const result = await request('POST', '/git/commits', { tree: evidence.candidate.gitTree, parents: [captured.source.sourceCommit], message, author, committer: author });
+    const result = await request('POST', '/git/commits', { tree: evidence.candidate.gitTree, parents: [parent], message, author, committer: author });
     if (result.sha !== expectedCommit) throw new Error('Development commit readback mismatch'); return { sha: expectedCommit };
   }, async () => {
     const result = await request('GET', '/git/commits/' + expectedCommit);
     // GitHub's JSON message omits the terminal newline; the exact object SHA verifies raw bytes.
-    if (result.sha !== expectedCommit || result.tree?.sha !== evidence.candidate.gitTree || ![message, message.slice(0, -1)].includes(result.message) || result.parents?.length !== 1 || result.parents[0].sha !== captured.source.sourceCommit
+    if (result.sha !== expectedCommit || result.tree?.sha !== evidence.candidate.gitTree || ![message, message.slice(0, -1)].includes(result.message) || result.parents?.length !== 1 || result.parents[0].sha !== parent
       || canonicalJSON(result.author) !== canonicalJSON(author) || canonicalJSON(result.committer) !== canonicalJSON(author)) throw new Error('Development commit readback mismatch');
     return { sha: expectedCommit, gitTree: result.tree.sha };
   });
   await effect('branch', { ref: 'refs/heads/' + branch, sha: expectedCommit }, async () => {
-    const result = await request('POST', '/git/refs', { ref: 'refs/heads/' + branch, sha: expectedCommit });
+    if (previous) {
+      const before = await request('GET', '/git/ref/heads/' + encodeURIComponent(branch));
+      if (previous.result.branch !== branch || before.ref !== 'refs/heads/' + branch || before.object?.sha !== parent) throw new Error('Development previous branch changed');
+    }
+    const result = previous ? await request('PATCH', '/git/refs/heads/' + encodeURIComponent(branch), { sha: expectedCommit, force: false })
+      : await request('POST', '/git/refs', { ref: 'refs/heads/' + branch, sha: expectedCommit });
     return { ref: result.ref, sha: result.object?.sha ?? null };
   }, async () => {
     const result = await request('GET', '/git/ref/heads/' + encodeURIComponent(branch));
@@ -128,9 +144,15 @@ export async function publishDevelopmentCandidate({ store, ledger, lease, worksp
     if (result.number !== number || result.state !== 'open' || result.title !== pullTitle || result.body !== body || result.html_url?.toLowerCase() !== `https://github.com/${workspace.slug}/pull/${number}`
       || result.head?.ref !== branch || result.head.sha !== expectedCommit || result.head.repo?.id !== workspace.numericId || result.head.repo.node_id !== workspace.repositoryId
       || result.base?.ref !== repository.defaultBranch || result.base.sha !== captured.source.sourceCommit || result.base.repo?.id !== workspace.numericId || result.base.repo.node_id !== workspace.repositoryId) throw new Error('Development PR candidate readback mismatch');
-    return { number, url: result.html_url, head: expectedCommit, branch, base: captured.source.sourceCommit };
+    return { number, url: result.html_url, head: expectedCommit, branch, base: captured.source.sourceCommit, baseBranch: repository.defaultBranch };
   };
   const pullRequest = await effect('pull-request', { title: pullTitle, body, base: repository.defaultBranch, head: branch }, async () => {
+    if (previous) {
+      const before = await request('GET', '/pulls/' + previous.result.number);
+      if (before.state !== 'open' || before.head?.sha !== expectedCommit || before.head.ref !== branch || before.base?.sha !== captured.source.sourceCommit
+        || before.body !== previous.binding.payload.body || before.title !== previous.binding.payload.title) throw new Error('Development previous PR changed');
+      await request('PATCH', '/pulls/' + previous.result.number, { title: pullTitle, body }); return { number: previous.result.number };
+    }
     const existing = await request('GET', '/pulls?state=all&head=' + encodeURIComponent(repository.owner.login + ':' + branch) + '&base=' + encodeURIComponent(repository.defaultBranch) + '&per_page=100');
     if (!Array.isArray(existing) || existing.length) throw new Error('Development PR ownership conflict');
     const result = await request('POST', '/pulls', { title: pullTitle, body, base: repository.defaultBranch, head: branch, draft: false });

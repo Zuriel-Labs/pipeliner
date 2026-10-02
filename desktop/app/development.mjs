@@ -1,7 +1,9 @@
 import { developmentCommand } from './development-commands.mjs';
+import { containsSecret } from './commands.mjs';
 
 export async function initDevelopment({ el, message }) {
   let state, pending = false, lastMessage; const $ = id => document.getElementById(id);
+  const feedbackDrafts = new Map();
   const devLabel = dev => dev?.model ? (dev.connection === 'codex' ? 'Codex' : 'Ollama Cloud') + ' · ' + dev.model : 'No Dev chosen';
   function button(text, operation, extra = {}, id) {
     const node = el('button', text, operation === 'apply' || operation === 'start' ? 'primary' : 'secondary'); node.id = id ?? 'dev-' + operation;
@@ -19,11 +21,12 @@ export async function initDevelopment({ el, message }) {
       for (const [operation, label] of [['pause', 'Pause'], ['resume', 'Resume'], ['stop', 'Stop']]) {
         const node = button(label, operation, {}, prefix + '-' + operation);
         // Local controls remain available while a provider request is running.
-        node.disabled = pending || operation === 'resume' && (!['paused', 'stopped', 'recovery-required'].includes(run.control) || state.pending.length > 0);
+        node.disabled = pending || operation === 'resume' && (!['paused', 'stopped', 'recovery-required'].includes(run.control) || state.pending.length > 0 && state.qa?.decision !== 'approve');
         controls.append(node);
       } card.append(controls);
       if (development) card.append(el('p', 'Model turns: ' + development.turns + '. ' + (development.usage.unavailable ? 'Some token usage is unavailable.' : 'Reported tokens: ' + (development.usage.input + development.usage.output) + '.'), 'small'));
-      if (state.publication) card.append(el('p', 'PR #' + state.publication.number + ' prepared. Head: ' + state.publication.head, 'small'));
+      if (state.publication) card.append(el('p', 'PR #' + state.publication.number + ' prepared. Head: ' + state.publication.head, 'small'), button('Open candidate PR', 'open-candidate', {}, prefix + '-open-candidate'));
+      if (state.qa) card.append(qaCard(prefix));
     } else if (state.workspaceId) {
       card.append(el('p', 'Select a Ready Issue in Issues, then start it here or ask “Start this Issue”. A start request does not add Ready.'), button('Start selected Ready Issue', 'start', {}, prefix + '-start'));
     }
@@ -31,10 +34,35 @@ export async function initDevelopment({ el, message }) {
     if (state.pending.length) card.append(el('p', 'Pending remote readback: ' + state.pending.map(value => value.step).join(', ') + '. No duplicate write is sent.', 'availability'));
     return card;
   }
+  function qaCard(prefix) {
+    const qa = state.qa, showcase = qa.showcase, card = el('section', undefined, 'setup-preview'), title = prefix + '-qa-title';
+    card.setAttribute('aria-labelledby', title); const heading = el('h3', 'PM Testing · current candidate'); heading.id = title;
+    card.append(heading, el('p', showcase.summary), el('p', showcase.target, 'protected-state'));
+    for (const [label, values] of [['Agent findings', showcase.findings.length ? showcase.findings.map(finding => finding.problem + ' ' + finding.remediation + ' Evidence: ' + finding.evidence) : ['None reported.']],
+      ['Test results', showcase.testResults], ['Prerequisites', showcase.prerequisites], ['Regression checks', showcase.regressions], ['Limitations', showcase.limitations]]) {
+      const list = el('ul'); for (const value of values) list.append(el('li', value)); card.append(el('h4', label), list);
+    }
+    const steps = el('ol'); for (const step of showcase.steps) { const item = el('li'); item.append(el('p', step.action), el('p', 'Expected: ' + step.expected, 'small')); steps.append(item); }
+    card.append(el('h4', 'Test steps'), steps, el('p', 'Candidate: ' + showcase.candidate.sourceCommit + ' · Tree: ' + showcase.candidate.gitTree, 'small'), el('p', showcase.nextOutcome));
+    if (qa.decision === 'approve') { card.append(el('p', 'Tested version approved. Resume verifies any interrupted integration and closeout; it does not send a duplicate merge.', 'protected-state')); return card; }
+    const approve = button('Approve tested version', 'qa-approve', { hash: qa.hash }, prefix + '-qa-approve'); approve.disabled ||= state.busy;
+    const key = state.workspaceId + ':' + qa.hash, feedback = el('textarea'), label = el('label', 'Corrections for this candidate');
+    feedback.id = prefix + '-qa-feedback'; label.htmlFor = feedback.id; feedback.maxLength = 2000; feedback.rows = 3; feedback.value = feedbackDrafts.get(key) ?? '';
+    feedback.disabled = pending || state.busy; feedback.addEventListener('input', () => feedbackDrafts.set(key, feedback.value));
+    const submit = el('button', 'Send feedback', 'secondary'); submit.id = prefix + '-qa-send'; submit.disabled = pending || state.busy;
+    submit.addEventListener('click', () => { const text = feedback.value.trim(); if (!text) { feedback.focus(); return; }
+      if (containsSecret(text)) { feedback.value = ''; feedbackDrafts.delete(key); message('Use the protected connection surface for keys. Nothing was saved or sent.', false, state.workspaceId); feedback.focus(); return; }
+      request({ operation: 'qa-feedback', hash: qa.hash, text });
+    });
+    const field = el('div', undefined, 'setup-field'); field.append(label, feedback);
+    const actions = el('div', undefined, 'connection-actions'); actions.append(approve, submit);
+    card.append(field, actions, el('p', 'You can also say “I approve this tested version” or “Please fix …” in chat.', 'small')); return card;
+  }
   function render(snapshot) {
     if (state && snapshot.revision < state.revision) return;
     const focus = document.activeElement?.id, opened = new Set([...$('agent-settings').querySelectorAll('details[open]')].map(node => node.id));
-    if (state?.workspaceId !== snapshot.workspaceId) lastMessage = null; state = snapshot;
+    if (state?.workspaceId !== snapshot.workspaceId) lastMessage = null;
+    if (state?.qa?.hash !== snapshot.qa?.hash) feedbackDrafts.clear(); state = snapshot;
     $('development-status').replaceChildren(...(state.workspaceId ? [runCard('chat-development')] : []));
     const nodes = [el('h2', 'Agents and Models'), el('p', state.repositoryLabel ?? 'Select a repository to configure its Dev.', 'protected-state'),
       el('p', 'Choose one qualified provider and model. New runs pin that choice. Automatic takeover and fallback remain off.', 'small')];

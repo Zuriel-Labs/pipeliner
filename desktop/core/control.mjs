@@ -1,4 +1,5 @@
 import { canonicalJSON, record } from './settings.mjs';
+import { connectionCommand } from '../connections/commands.mjs';
 
 function trustedContext(event, { contents, url, context }) {
   if (contents.isDestroyed() || event?.sender !== contents || !event.senderFrame || event.senderFrame !== contents.mainFrame
@@ -62,4 +63,29 @@ export function guardForegroundClose(window, { supervisor, isLastWindow, backgro
     catch { if (!window.isDestroyed()) window.webContents.send('execution:blocked', 'Window kept open: worker termination or effect recovery could not be verified.'); }
     finally { pending = false; }
   });
+}
+
+export function createConnectionControlChannel(manager, binding) {
+  return Object.freeze({ dispatch(event, payload) {
+    const current = trustedContext(event, binding); canonicalJSON(payload);
+    if (payload?.operation === 'status') { record(payload, ['operation']); return manager.status(); }
+    const chat = payload?.operation === 'chat';
+    record(payload, chat ? ['operation', 'contextRevision', 'text'] : ['operation', 'contextRevision', 'connection'], !chat && payload.operation === 'test' ? ['model'] : []);
+    if (payload.contextRevision !== current.revision) throw new Error('Control context changed');
+    let action = payload;
+    if (chat) {
+      action = connectionCommand(payload.text);
+      if (!action.connection) return action;
+      if (action.operation === 'test') {
+        const connection = manager.status().connections.find(item => item.id === action.connection);
+        if (connection?.id.startsWith('github')) return manager.start(action.connection, 'refresh');
+        if (!action.model) return { message: 'Choose a model to test. This sends a short synthetic prompt and tool result to that provider and may consume usage. No repository content is sent.',
+          choices: (connection?.models ?? []).map(model => ({ connection: action.connection, model: model.id, name: model.name })) };
+      }
+    }
+    if (action.operation === 'cancel') return manager.cancel(action.connection);
+    if (action.operation === 'disconnect') return manager.disconnect(action.connection);
+    if (!['connect', 'refresh', 'test'].includes(action.operation)) throw new Error('Unknown connection operation');
+    return manager.start(action.connection, action.operation, action.model);
+  } });
 }

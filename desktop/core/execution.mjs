@@ -7,6 +7,7 @@ import { canonicalJSON, immutable, record } from './settings.mjs';
 import { workspaceData, workspaceCandidate } from './identity.mjs';
 import { transact } from './runtime.mjs';
 import { openWorkerEnvironment, restrictedWorkerArgs } from './worker.mjs';
+import { developmentWorkerProgram } from '../development/worker-tools.mjs';
 
 const digest = value => createHash('sha256').update(canonicalJSON(value)).digest('hex');
 const bytesHash = value => createHash('sha256').update(value).digest('hex');
@@ -45,7 +46,7 @@ export function openExecutionSupervisor(directory, { store }) {
     if (db.prepare('PRAGMA quick_check').get().quick_check !== 'ok') throw new Error('Execution inventory integrity failed');
     environment = openWorkerEnvironment(directory);
   } catch (error) { db?.close(); owner.close(); throw error; }
-  const identities = new Map(), inFlight = new Map(), pendingControls = new Map();
+  const identities = new Map(), inFlight = new Map(), inspections = new Map(), pendingControls = new Map();
   let monitorWork = null;
   const requireOpen = () => { if (closed) throw new Error('Execution supervisor closed'); };
   function rowFor(binding) {
@@ -136,8 +137,8 @@ export function openExecutionSupervisor(directory, { store }) {
           const observation = await environment.inspect(row.data.manifest, row.state === 'stopped' ? null : row.cid);
           if (['running', 'created', 'exited'].includes(observation.state) && row.state !== 'blocked') update(binding, observation.state, observation.id);
         })();
-        inFlight.set(run.id, work);
-        try { await work; } finally { if (inFlight.get(run.id) === work) inFlight.delete(run.id); }
+        inFlight.set(run.id, work); inspections.set(run.id, work);
+        try { await work; } finally { inspections.delete(run.id); if (inFlight.get(run.id) === work) inFlight.delete(run.id); }
       }
       return this.status(repository);
     },
@@ -149,6 +150,32 @@ export function openExecutionSupervisor(directory, { store }) {
         if (!['exited', 'absent', 'vm-stopped'].includes(observed.state)) throw new Error('Owned worker still running');
       }
       return { runId: binding.runId, epoch: binding.epoch, state: 'stopped', observedAt: Date.now() };
+    },
+    async tool(binding, request, options = {}) {
+      // A local monitor read can occupy the slot while the provider is thinking.
+      // Wait for that read only; another tool or control remains a conflict.
+      while (inspections.has(binding.runId)) { options.signal?.throwIfAborted(); await inspections.get(binding.runId); }
+      options.signal?.throwIfAborted();
+      const run = current(binding, true), row = rowFor(binding), identity = identities.get(run.repository);
+      if (!row || !identity || row.data.program !== developmentWorkerProgram || row.data.deadline <= Date.now()) throw new Error('Development worker tool unavailable');
+      const deadlineSignal = AbortSignal.timeout(row.data.deadline - Date.now()), signal = options.signal ? AbortSignal.any([options.signal, deadlineSignal]) : deadlineSignal;
+      if (inFlight.has(run.id)) throw new Error('Execution operation already pending');
+      const required = { seed: ['workspace.read', 'workspace.write'], list: ['workspace.read'], read: ['workspace.read'], write: ['workspace.write'],
+        run: ['worker.exec', 'workspace.write'], export: ['workspace.read'] }[request.operation];
+      const grant = store.worker.authority(run.repository, run.policyRevision);
+      if (!required || required.some(capability => !grant.capabilities.includes(capability))) throw new Error('Development tool authority unavailable or revoked');
+      candidateCheck(identity, row.data.candidate);
+      const work = environment.tool(row.data.manifest, row.cid, request, { signal, mayRestart: () => {
+        try { current(binding, true); return row.data.deadline > Date.now(); } catch { return false; }
+      } });
+      inFlight.set(run.id, work);
+      try {
+        const result = await work; signal.throwIfAborted(); current(binding, true); candidateCheck(identity, row.data.candidate);
+        const active = store.worker.authority(run.repository, run.policyRevision);
+        if (required.some(capability => !active.capabilities.includes(capability))) throw new Error('Development tool authority revoked during execution');
+        const observation = await environment.inspect(row.data.manifest, row.cid); update(binding, observation.state, row.cid);
+        return result;
+      } finally { if (inFlight.get(run.id) === work) inFlight.delete(run.id); }
     },
     async applyResult(binding) {
       const run = current(binding, true), row = rowFor(binding), identity = identities.get(run.repository);

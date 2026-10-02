@@ -67,6 +67,13 @@ test('three active statuses preserve ownership; inaccessible or conflicting read
   assert.equal(f.store.runtime.status(repository).epoch, first.run.epoch);
 });
 
+test('a policy change during reservation readback cannot create an unreviewed claim', async t => {
+  const f = fixture(t), expected = f.store.worker.read(repository).hash, observe = f.inspectors.repository;
+  f.inspectors.repository = async request => { f.configure({ 'limits.stepTurns': 21 }); return observe(request); };
+  await assert.rejects(f.store.runtime.reserve(f.identity, { commandId: 'reviewed-claim', issue: 1, pipeline: 'development', policyHash: expected }), /configuration changed/);
+  assert.equal(f.store.runtime.status(repository), null);
+});
+
 test('intent precedes dispatch; lost responses block replay and require exact readback', async t => {
   const f = fixture(t), run = (await f.reserve()).run, b = binding(run), action = f.intent(b);
   assert.equal(action.state, 'prepared'); assert.equal(f.store.runtime.dispatch(b, action.id).dispatched, true);

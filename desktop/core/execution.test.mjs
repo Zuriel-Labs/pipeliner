@@ -14,7 +14,8 @@ test('exclusive execution owner survives contention and releases after a real pr
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-execution-test-')));
   let child;
   try {
-    const source = `import {acquireExecutionOwner} from ${JSON.stringify(new URL('./execution.mjs', import.meta.url).href)};acquireExecutionOwner(process.argv[1]);process.stdout.write('owned\\n');setInterval(()=>{},1000);`;
+    // Keep the owner handle alive as the app does; GC must not release a discarded test handle.
+    const source = `import {acquireExecutionOwner} from ${JSON.stringify(new URL('./execution.mjs', import.meta.url).href)};const owner=acquireExecutionOwner(process.argv[1]);process.stdout.write('owned\\n');setInterval(()=>owner,1000);`;
     child = spawn(process.execPath, ['--input-type=module', '-e', source, directory], { stdio: ['ignore', 'pipe', 'pipe'] });
     child.stderr.resume();
     await new Promise((resolve, reject) => { child.stdout.once('data', resolve); child.once('error', reject); child.once('exit', () => reject(new Error('Owner exited before acquisition'))); });

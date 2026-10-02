@@ -122,6 +122,10 @@ export function codexAdapter({ directory, openBrowser }) {
 }
 
 export function ollamaAdapter({ entry, send = fetch }) {
+  const qualified = (value, model) => value?.view?.health === 'connected' && value.view.selectedModel === model
+    && value.view.models?.some(item => item.id === model) && value.view.capability?.model === model
+    && Number.isSafeInteger(value.view.capability.testedAt) && value.view.capability.testedAt > 0
+    && ['stream', 'toolLoop', 'resumed'].every(key => value.view.capability[key] === true);
   async function refresh({ value, signal }) {
     const entries = await catalog(value.credential, 'cloud', { signal, send }); const ids = new Set();
     const models = entries.map(item => {
@@ -129,7 +133,11 @@ export function ollamaAdapter({ entry, send = fetch }) {
       return { id: item.name, name: item.name, recommended: item.name === 'deepseek-v4.1-flash' };
     });
     if (models.length > 10000) throw new Error('catalog-invalid');
-    return { credential: value.credential, view: { account: null, health: 'limited', credentialStatus: 'Key stored; inference not verified', lastVerified: Date.now(), models, capability: null } };
+    // Discovery retains earlier inference evidence only for the same still-listed model.
+    const retained = qualified(value, value.view?.selectedModel) && models.some(item => item.id === value.view.selectedModel);
+    return { credential: value.credential, view: { account: null, health: retained ? 'connected' : 'limited',
+      credentialStatus: retained ? 'Key verified by prior inference; catalog refreshed' : 'Key stored; inference not verified', lastVerified: Date.now(), models,
+      selectedModel: retained ? value.view.selectedModel : null, capability: retained ? value.view.capability : null } };
   }
   return {
     async connect({ signal }) {
@@ -152,6 +160,10 @@ export function ollamaAdapter({ entry, send = fetch }) {
       if (!next.content.includes(result.result) || next.tool_calls.length) throw new Error('capability-unverified');
       return { ...verified, view: { ...verified.view, health: 'connected', credentialStatus: 'Key verified by inference', selectedModel: model,
         capability: { model, testedAt: Date.now(), stream: true, toolLoop: true, resumed: true, usage: { first: first.usage, resumed: next.usage }, scope: 'Synthetic provider path only; each execution step still needs preflight.' } } };
+    },
+    async turn({ value, model, messages, tools, maxOutput, signal }) {
+      if (!qualified(value, model)) throw new Error('capability-unverified');
+      return chat(value.credential, model, messages, tools, 'cloud', { signal, send, numPredict: maxOutput, timeoutMs: 120000 });
     },
     async disconnect() {},
   };

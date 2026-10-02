@@ -4,6 +4,8 @@ import { join, dirname } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { canonicalJSON, record } from './settings.mjs';
+import { workerToolProgram } from '../development/worker-tools.mjs';
+import { checkedFiles } from '../development/source.mjs';
 
 export const workerDisk = { url: 'https://cloud-images.ubuntu.com/releases/resolute/release-20260720/ubuntu-26.04-server-cloudimg-arm64.img', digest: 'sha256:7bcf159e29ad0000bfed9c57875908c39268f5ed1257f4958fa6a9f5f60edd54' };
 export const workerVMConfiguration = `vmType: vz
@@ -89,7 +91,8 @@ export function openWorkerEnvironment(directory) {
     || readFileSync(config, 'utf8') !== workerVMConfiguration) throw new Error('Execution VM configuration changed');
   const env = { PATH: '/opt/homebrew/bin:/usr/bin:/bin', HOME: home, LIMA_HOME: lima, LC_ALL: 'C', LIMA_INSTANCE: 'engine' };
   const children = new Set();
-  async function command(args, { input, timeout = 30000, maximum = 65536 } = {}) {
+  async function command(args, { input, timeout = 30000, maximum = 65536, signal } = {}) {
+    signal?.throwIfAborted();
     return new Promise((resolve, reject) => {
       const child = spawn('/opt/homebrew/bin/limactl', args, { env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] }); children.add(child);
       let output = '', diagnostic = '', bytes = 0, failure = null, cancellationError = null, force;
@@ -101,12 +104,14 @@ export function openWorkerEnvironment(directory) {
         }
       };
       const timer = setTimeout(() => terminate('Local execution command timed out'), timeout);
+      const abort = () => terminate('Local execution command interrupted');
+      signal?.addEventListener('abort', abort, { once: true }); if (signal?.aborted) abort();
       child.stdout.setEncoding('utf8');
       child.stdout.on('data', data => { bytes += Buffer.byteLength(data); if (bytes > maximum) terminate('Local execution output limit exceeded'); else output += data; });
       child.stderr.on('data', data => { diagnostic = `${diagnostic}${data}`.slice(-4096); });
-      child.once('error', () => { clearTimeout(timer); clearTimeout(force); children.delete(child); reject(new Error('Local execution command unavailable')); });
+      child.once('error', () => { signal?.removeEventListener('abort', abort); clearTimeout(timer); clearTimeout(force); children.delete(child); reject(new Error('Local execution command unavailable')); });
       // Reject only after actual command closure; a cancellation request is never termination evidence.
-      child.once('close', (code, signal) => { clearTimeout(timer); clearTimeout(force); children.delete(child); if (failure || signal) reject(new Error(failure ?? 'Local execution command interrupted', { cause: cancellationError ? { cancellation: cancellationError } : undefined })); else resolve({ code, output, diagnostic }); });
+      child.once('close', (code, exitSignal) => { signal?.removeEventListener('abort', abort); clearTimeout(timer); clearTimeout(force); children.delete(child); if (failure || exitSignal) reject(new Error(failure ?? 'Local execution command interrupted', { cause: cancellationError ? { cancellation: cancellationError } : undefined })); else resolve({ code, output, diagnostic }); });
       child.stdin.on('error', () => {}); child.stdin.end(input);
     });
   }
@@ -188,7 +193,35 @@ export function openWorkerEnvironment(directory) {
       if (!cid(id)) throw new Error('Worker creation identity unavailable');
       await inspect(manifest, id); return id;
     },
-    async start(manifest, id) { const before = await inspect(manifest, id); if (before.state !== 'created') throw new Error('Worker cannot start from this state'); await checked(['nerdctl', 'start', id]); return inspect(manifest, id); },
+    async start(manifest, id) { const before = await inspect(manifest, id); if (!['created', 'exited'].includes(before.state)) throw new Error('Worker cannot start from this state'); await checked(['nerdctl', 'start', id]); return inspect(manifest, id); },
+    async tool(manifest, id, request, { signal, mayRestart = () => true } = {}) {
+      const shapes = { seed: ['files'], list: [], read: ['path'], write: ['path', 'content', 'mode', 'beforeHash'], run: ['command', 'timeoutMs'], export: [] };
+      if (!Object.hasOwn(shapes, request.operation)) throw new Error('Worker tool unavailable');
+      record(request, ['operation', ...shapes[request.operation]]);
+      if (request.operation === 'seed') checkedFiles(request.files);
+      else canonicalJSON(request);
+      if (request.operation === 'run' && (!Number.isSafeInteger(request.timeoutMs) || request.timeoutMs < 100 || request.timeoutMs > 300000)) throw new Error('Worker command deadline invalid');
+      const input = JSON.stringify({ ...request, runId: manifest.runId, epoch: manifest.epoch });
+      if (Buffer.byteLength(input) > 24 * 1024 * 1024) throw new Error('Worker tool input limit exceeded');
+      if ((await inspect(manifest, id)).state !== 'running') throw new Error('Worker tool requires running owned container');
+      let result;
+      try {
+        const raw = await checked(['nerdctl', 'exec', '--workdir', '/workspace', '-i', id, 'node', '-e', workerToolProgram], {
+          input, signal, timeout: request.operation === 'run' ? request.timeoutMs + 3500 : 30000,
+          maximum: request.operation === 'export' ? 24 * 1024 * 1024 : 1048576,
+        });
+        result = JSON.parse(raw); record(result, ['ok'], result.ok === true ? ['result'] : ['error']);
+        if (typeof result.ok !== 'boolean' || result.ok === true && !Object.hasOwn(result, 'result')) throw new Error('Worker tool result invalid');
+      } finally {
+        // A command can spawn detached descendants. Stop the entire owned container before another tool observes source.
+        if (request.operation === 'run') {
+          await this.terminate(manifest, id);
+          if (!signal?.aborted && mayRestart()) await this.start(manifest, id);
+        }
+      }
+      signal?.throwIfAborted(); await inspect(manifest, id);
+      return result;
+    },
     async terminate(manifest, id) {
       let before = await inspect(manifest, id);
       if (before.state === 'created') { await checked(['nerdctl', 'rm', before.id]); before = await inspect(manifest); }

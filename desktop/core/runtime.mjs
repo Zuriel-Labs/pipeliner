@@ -1,7 +1,5 @@
 import { randomUUID, createHash } from 'node:crypto';
-import { DatabaseSync } from 'node:sqlite';
-import { constants, openSync, closeSync, unlinkSync, lstatSync } from 'node:fs';
-import { join } from 'node:path';
+import { backupDatabase } from './storage.mjs';
 import { canonicalJSON, immutable, record } from './settings.mjs';
 import { workspaceData } from './identity.mjs';
 
@@ -34,17 +32,7 @@ const schema = `CREATE TABLE runtime_repositories (id TEXT PRIMARY KEY, host TEX
 
 export function migrateRuntime(db, directory, transaction, fresh) {
   if (db.prepare('PRAGMA user_version').get().user_version === 2) return;
-  if (!fresh) {
-    const path = join(directory, `policy-v1-${randomUUID()}.sqlite`);
-    closeSync(openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600));
-    try { db.prepare('VACUUM INTO ?').run(path); } catch (error) { unlinkSync(path); throw error; }
-    const backup = new DatabaseSync(path, { readOnly: true, allowExtension: false });
-    try {
-      if (backup.prepare('PRAGMA user_version').get().user_version !== 1 || backup.prepare('PRAGMA quick_check').get().quick_check !== 'ok'
-        || !backup.prepare('SELECT COUNT(*) AS count FROM policy_versions').get().count || (lstatSync(path).mode & 0o777) !== 0o600
-        || lstatSync(path).nlink !== 1 || lstatSync(path).uid !== process.getuid()) throw new Error('Compatible policy backup verification failed');
-    } finally { backup.close(); }
-  }
+  if (!fresh) backupDatabase(db, directory, 'policy', 1, backup => backup.prepare('SELECT COUNT(*) AS count FROM policy_versions').get().count > 0);
   transaction(() => { if (db.prepare('PRAGMA user_version').get().user_version === 1) db.exec(schema); });
 }
 

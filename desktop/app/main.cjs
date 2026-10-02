@@ -12,11 +12,12 @@ const helper = argument('--key-helper');
 app.setName('Pipeliner'); app.setPath('userData', dataDirectory); app.setPath('crashDumps', path.join(dataDirectory, 'crashes'));
 protocol.registerSchemesAsPrivileged([{ scheme: 'pipeliner', privileges: { standard: true, secure: true } }]);
 if (!app.requestSingleInstanceLock()) app.exit(0);
-let window, manager, vault, workspaces, workspaceStore, issues, policy, closing = false, verifiedClose = false;
+let window, manager, vault, workspaces, workspaceStore, issues, pipelines, policy, closing = false, verifiedClose = false;
 const moduleAt = file => import(pathToFileURL(path.join(__dirname, file)).href);
-const assets = new Map(['index.html', 'app.css', 'app.mjs', 'workspaces.mjs', 'issues.mjs'].map(file => [file, path.join(__dirname, file)]));
+const assets = new Map(['index.html', 'app.css', 'app.mjs', 'workspaces.mjs', 'issues.mjs', 'pipelines.mjs'].map(file => [file, path.join(__dirname, file)]));
 assets.set('commands.mjs', path.join(__dirname, '../connections/commands.mjs')); assets.set('tokens.css', path.join(__dirname, '../prototype/style.css'));
 assets.set('issue-commands.mjs', path.join(__dirname, '../issues/commands.mjs')); assets.set('connections/commands.mjs', path.join(__dirname, '../connections/commands.mjs'));
+assets.set('pipeline-commands.mjs', path.join(__dirname, '../pipelines/commands.mjs'));
 function asset(value) {
   try { const parsed = new URL(value); return parsed.protocol === 'pipeliner:' && parsed.host === 'app' && !parsed.username && !parsed.password && !parsed.port && !parsed.search && !parsed.hash && assets.has(parsed.pathname.slice(1)) ? parsed.pathname.slice(1) : null; }
   catch { return null; }
@@ -31,6 +32,8 @@ app.whenReady().then(async () => {
   const { createConnectionControlChannel } = await moduleAt('../core/control.mjs');
   const { createWorkspaceControlChannel } = await moduleAt('../core/control.mjs');
   const { createIssueControlChannel } = await moduleAt('../core/control.mjs');
+  const { createPipelineControlChannel } = await moduleAt('../core/control.mjs');
+  const { createPipelineManager } = await moduleAt('../pipelines/manager.mjs');
   const { createIssueManager } = await moduleAt('../issues/manager.mjs');
   const { openPolicyStore } = await moduleAt('../core/policy.mjs');
   const { createWorkspaceManager } = await moduleAt('../repositories/manager.mjs');
@@ -52,18 +55,21 @@ app.whenReady().then(async () => {
   manager = createConnectionManager({ vault: null, adapters, onChange: publish });
   const workspaceOptions = qualifying ? await require('./qualify.cjs').workspaceOptions({ directory, helper, nativeFolderEntry }) : {};
   let workspaceBusy = false;
-  const publishWorkspaces = snapshot => { issues?.sync(); if (window && !window.isDestroyed()) { window.webContents.send('workspaces:status', snapshot); if (workspaceBusy && !snapshot.busy && !closing) { window.show(); window.focus(); window.webContents.focus(); } } workspaceBusy = snapshot.busy; };
+  const publishWorkspaces = snapshot => { issues?.sync(); pipelines?.sync(); if (window && !window.isDestroyed()) { window.webContents.send('workspaces:status', snapshot); if (workspaceBusy && !snapshot.busy && !closing) { window.show(); window.focus(); window.webContents.focus(); } } workspaceBusy = snapshot.busy; };
   const makeWorkspaces = initialRevision => createWorkspaceManager({ store: workspaceStore, initialRevision, onChange: publishWorkspaces,
     connections: { status: () => manager.status(), acquire: (...args) => manager.acquire(...args), epoch: id => manager.epoch(id) },
     folder: (signal, existing) => nativeFolderEntry(helper, directory, signal, existing),
     protectedPaths: [directory, __dirname, path.join(app.getPath('home'), '.codex'), path.join(app.getPath('home'), '.agents')],
     openInstallation: () => shell.openExternal('https://github.com/apps/pipeliner-desktop/installations/new'), ...workspaceOptions });
   workspaces = makeWorkspaces(1);
-  const publishIssues = snapshot => { if (window && !window.isDestroyed()) window.webContents.send('issues:status', snapshot); };
+  const publishIssues = snapshot => { pipelines?.sync(); if (window && !window.isDestroyed()) window.webContents.send('issues:status', snapshot); };
   const makeIssues = initialRevision => createIssueManager({ store: workspaceStore, policy, initialRevision, onChange: publishIssues,
     connections: { acquire: (...args) => manager.acquire(...args), epoch: id => manager.epoch(id) },
     ...(qualifying ? { api: require('./qualify.cjs').issueApi } : {}) });
   issues = makeIssues(1);
+  const publishPipelines = snapshot => { if (window && !window.isDestroyed()) window.webContents.send('pipelines:status', snapshot); };
+  const makePipelines = initialRevision => createPipelineManager({ store: workspaceStore, policy, initialRevision, onChange: publishPipelines, onApplied: () => issues.sync() });
+  pipelines = makePipelines(1);
   protocol.handle('pipeliner', request => {
     const name = request.method === 'GET' ? asset(request.url) : null;
     if (!name) return new Response('Unavailable', { status: 404 });
@@ -82,9 +88,11 @@ app.whenReady().then(async () => {
   ipcMain.handle('workspaces:control', (event, payload) => { if (closing) throw new Error('App closing'); return workspaceChannel().dispatch(event, payload); });
   const issueChannel = () => createIssueControlChannel(issues, { contents: window.webContents, url, context: () => ({ revision: issues.status().revision }) });
   ipcMain.handle('issues:control', (event, payload) => { if (closing) throw new Error('App closing'); return issueChannel().dispatch(event, payload); });
+  const pipelineChannel = () => createPipelineControlChannel(pipelines, { contents: window.webContents, url, context: () => ({ revision: pipelines.status().revision }) });
+  ipcMain.handle('pipelines:control', (event, payload) => { if (closing) throw new Error('App closing'); return pipelineChannel().dispatch(event, payload); });
   window.on('close', async event => {
     if (verifiedClose) return; event.preventDefault(); if (closing) return; closing = true;
-    try { await issues.close(); await workspaces.close(); await manager.close(); policy?.close(); workspaceStore?.close(); vault?.close(); verifiedClose = true; window.close(); }
+    try { pipelines.close(); await issues.close(); await workspaces.close(); await manager.close(); policy?.close(); workspaceStore?.close(); vault?.close(); verifiedClose = true; window.close(); }
     catch { closing = false; publish(manager.status()); }
   });
   Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Pipeliner', submenu: [{ role: 'about' }, { type: 'separator' }, { role: 'quit' }] }, { role: 'editMenu' },
@@ -102,10 +110,11 @@ app.whenReady().then(async () => {
       maxConcurrency: 1, background: false, connections: manager.status().connections.map(connection => ({ id: connection.id, provider: connection.id.startsWith('github') ? 'github' : connection.id,
         repositories: workspaceStore.workspaces().filter(workspace => !connection.id.startsWith('github') || connection.repositories.some(repo => repo.id === workspace.repositoryId)).map(workspace => workspace.id),
         healthy: ['connected', 'limited'].includes(connection.health) })), developers: [], extensions: [] }) });
+    const pipelineRevision = pipelines.status().revision + 1; pipelines.close(); pipelines = makePipelines(pipelineRevision); publishPipelines(pipelines.status());
     issues = makeIssues(issues.status().revision + 1); publishIssues(issues.status());
     workspaces = makeWorkspaces(workspaces.status().revision + 1); publishWorkspaces(workspaces.status());
   } catch { publish(manager.status()); }
-  if (qualifying) await require('./qualify.cjs').run({ window, directory, helper, vault, manager, workspaces, issues, workspaceChannel: workspaceChannel(), issueChannel: issueChannel(), channel: channel(), windowReadyMs });
+  if (qualifying) await require('./qualify.cjs').run({ window, directory, helper, vault, manager, workspaces, issues, pipelines, policy, workspaceChannel: workspaceChannel(), issueChannel: issueChannel(), pipelineChannel: pipelineChannel(), channel: channel(), windowReadyMs });
 }).catch(() => { console.error('Pipeliner could not start safely.'); app.exit(1); });
 
 async function githubPrompt({ connection, verificationUri, userCode, signal, cancel }) {

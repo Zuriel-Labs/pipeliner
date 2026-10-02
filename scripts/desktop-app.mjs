@@ -6,15 +6,15 @@ import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const exec = promisify(execFile), root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const qualifying = process.argv.includes('--qualify') || process.argv.includes('--qualify-issues');
-if (process.argv.slice(2).some(arg => !['--qualify', '--qualify-issues', '--retain-owned-capture'].includes(arg))) throw new Error('argument-denied');
+const qualifying = process.argv.includes('--qualify') || process.argv.includes('--qualify-issues') || process.argv.includes('--qualify-pipelines');
+if (process.argv.slice(2).some(arg => !['--qualify', '--qualify-issues', '--qualify-pipelines', '--retain-owned-capture'].includes(arg))) throw new Error('argument-denied');
 if (process.platform !== 'darwin' || process.arch !== 'arm64') throw new Error('host-unqualified');
 const temporary = await realpath(await mkdtemp(join(tmpdir(), 'pipeliner-app-'))), helper = join(temporary, 'secure-entry');
 let child, timer, code = 1, report = '', errors = 0;
 try {
   await exec('/usr/bin/clang', ['-fobjc-arc', '-framework', 'AppKit', '-mmacosx-version-min=13.0', ...(qualifying ? ['-DPIPELINER_QUALIFY'] : []), join(root, 'desktop/connections/secure-entry.m'), '-o', helper], { timeout: 30000 });
   const electron = join(root, 'desktop/prototype/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron'); await access(electron);
-  child = spawn(electron, [join(root, 'desktop/app/main.cjs'), `--key-helper=${helper}`, ...(qualifying ? ['--qualify', ...(process.argv.includes('--qualify-issues') ? ['--qualify-issues'] : []), `--data-directory=${temporary}`] : [])], {
+  child = spawn(electron, [join(root, 'desktop/app/main.cjs'), `--key-helper=${helper}`, ...(qualifying ? ['--qualify', ...process.argv.filter(arg => ['--qualify-issues', '--qualify-pipelines'].includes(arg)), `--data-directory=${temporary}`] : [])], {
     env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: homedir(), TMPDIR: temporary, LANG: 'en_US.UTF-8' }, stdio: ['ignore', 'pipe', 'pipe'],
   });
   if (qualifying) timer = setTimeout(() => child.kill('SIGTERM'), 180000);
@@ -25,13 +25,14 @@ try {
     const line = report.split('\n').find(value => value.startsWith('{"desktopQualification"'));
     if (!line) throw new Error('native-report-missing');
     const result = JSON.parse(line); result.launcher = { pid: child.pid, exitCode: code, helperCompiledLocally: true, rawLogsSuppressed: true };
-    if (process.argv.includes('--retain-owned-capture') && result.capture) {
-      const capture = join('/tmp', `pipeliner-36-${child.pid}.png`); await writeFile(capture, Buffer.from(result.capture, 'base64'), { flag: 'wx', mode: 0o600 }); result.capturePath = capture;
+    for (const [available, file, suffix, key] of [['captureAvailable', 'window-capture.png', '', 'capturePath'], ['nativeCaptureAvailable', 'secure-field.png', '-native', 'nativeCapturePath']]) {
+      if (!process.argv.includes('--retain-owned-capture') || !result[available]) continue;
+      const source = join(temporary, file), info = await lstat(source);
+      if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.uid !== process.getuid() || info.size > 10 * 1024 * 1024) throw new Error('capture-ownership-invalid');
+      const capture = join('/tmp', `pipeliner-${process.argv.includes('--qualify-pipelines') ? 40 : 36}-${child.pid}${suffix}.png`);
+      await writeFile(capture, await readFile(source), { flag: 'wx', mode: 0o600 }); result[key] = capture;
     }
-    if (process.argv.includes('--retain-owned-capture') && result.nativeCapture) {
-      const capture = join('/tmp', `pipeliner-36-${child.pid}-native.png`); await writeFile(capture, Buffer.from(result.nativeCapture, 'base64'), { flag: 'wx', mode: 0o600 }); result.nativeCapturePath = capture;
-    }
-    delete result.capture; delete result.nativeCapture; console.log(JSON.stringify(result));
+    console.log(JSON.stringify(result));
   }
 } finally {
   clearTimeout(timer); if (child && child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await new Promise(resolveClose => child.once('close', resolveClose)); }

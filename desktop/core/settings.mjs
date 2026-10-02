@@ -49,11 +49,11 @@ export const releaseTemplate = immutable({ entry: 'build', steps: [
   step('verify', 'Verify the exact artifact', 'artifact-verify', 'retain'),
   step('retain', 'Retain the verified local artifact', 'retain', 'complete'),
 ] });
-export function validatePipeline(value, development = false) {
+export function validatePipeline(value, development = false, requireQa = false) {
   try {
     record(value, ['entry', 'steps']);
     if (!identifier(value.entry) || !Array.isArray(value.steps) || !value.steps.length || value.steps.length > 64) throw new Error();
-    const steps = new Map();
+    const steps = new Map(), labels = new Set();
     for (const s of value.steps) {
       record(s, ['id', 'label', 'kind', 'permissions', 'inputs', 'expectedResult', 'evidence', 'routes', 'retryLimit', 'visitLimit']);
       record(s.routes, ['success', 'failure', 'feedback']);
@@ -61,21 +61,25 @@ export function validatePipeline(value, development = false) {
         || !['agent', 'check', 'pm-qa', 'pr-integration', 'build', 'artifact-verify', 'retain', 'publish', 'extension'].includes(s.kind)
         || !capabilities(s.permissions) || !list(s.inputs) || !list(s.evidence) || !s.evidence.length
         || !number(0, 10)(s.retryLimit) || !number(1, 100)(s.visitLimit) || !Object.values(s.routes).every(identifier)) throw new Error();
-      steps.set(s.id, s);
+      const label = s.label.normalize('NFKC').trim().toLowerCase();
+      if (!label || labels.has(label)) throw new Error('Pipeline step names must be nonempty and unique');
+      labels.add(label); steps.set(s.id, s);
     }
     if (!steps.has(value.entry) || [...steps.values()].some(s => Object.values(s.routes).some(r => !steps.has(r) && !['complete', 'blocked'].includes(r)))) throw new Error();
     const reached = new Set(), visited = new Set(); let completion = false;
-    function walk(id, integrated) {
+    function walk(id, integrated, qaPassed) {
       if (id === 'blocked') return;
       if (id === 'complete') {
         if (development && !integrated) throw new Error('Development completion requires PR integration');
         completion = true; return;
       }
-      const key = `${id}:${integrated}`; if (visited.has(key)) return;
+      const key = `${id}:${integrated}:${qaPassed}`; if (visited.has(key)) return;
       visited.add(key); reached.add(id); const s = steps.get(id);
-      for (const route of Object.values(s.routes)) walk(route, integrated || s.kind === 'pr-integration');
+      if (requireQa && s.kind === 'pr-integration' && !qaPassed) throw new Error('Supervised PM QA must pass before PR integration');
+      for (const [outcome, route] of Object.entries(s.routes)) walk(route, s.kind === 'pr-integration' ? outcome === 'success' : integrated,
+        s.kind === 'pm-qa' ? outcome === 'success' : qaPassed);
     }
-    walk(value.entry, false);
+    walk(value.entry, false, false);
     if (reached.size !== steps.size) throw new Error('Pipeline contains an unreachable step');
     if (!completion) throw new Error('Pipeline has no completion route');
     return true;
@@ -174,6 +178,7 @@ export function validateState(state) {
       || v['autonomy.scenario'] === 'scheduled-autonomous' && v['intake.trigger'] !== 'schedule') throw new Error('Scenario and start trigger conflict');
     if (v['autonomy.scenario'] === 'supervised' && (v['pipelines.development'].steps.filter(s => s.kind === 'pm-qa').length !== 1
       || v['pipelines.release'].steps.some(s => s.kind === 'pm-qa'))) throw new Error('Modified preset must be identified as custom');
+    if (v['autonomy.scenario'] === 'supervised') validatePipeline(v['pipelines.development'], true, true);
     if (['pm-autonomous', 'scheduled-autonomous'].includes(v['autonomy.scenario']) && [v['pipelines.development'], v['pipelines.release']].some(p => p.steps.some(s => s.kind === 'pm-qa'))) throw new Error('Fully Autonomous cannot contain an application gate');
     if (v['background.startAtLogin'] && !v['background.enabled']) throw new Error('Start at login requires background operation');
     if (v['limits.allocation'] > v['limits.concurrency']) throw new Error('Repository allocation exceeds host ceiling');

@@ -2,6 +2,7 @@ import { canonicalJSON, record } from './settings.mjs';
 import { connectionCommand } from '../connections/commands.mjs';
 import { setupCommand } from '../repositories/commands.mjs';
 import { issueCommand } from '../issues/commands.mjs';
+import { pipelineShapes } from '../pipelines/commands.mjs';
 
 function trustedContext(event, { contents, url, context }) {
   if (contents.isDestroyed() || event?.sender !== contents || !event.senderFrame || event.senderFrame !== contents.mainFrame
@@ -125,5 +126,16 @@ export function createIssueControlChannel(manager, binding) {
       if (action.operation === 'policy-apply') action = { ...action, hash: manager.status().policyPreview?.hash };
     }
     return manager.dispatch(action);
+  } });
+}
+
+export function createPipelineControlChannel(manager, binding) {
+  return Object.freeze({ dispatch(event, payload) {
+    const current = trustedContext(event, binding); canonicalJSON(payload);
+    if (payload?.operation === 'status') { record(payload, ['operation']); return manager.status(); }
+    const shape = pipelineShapes[payload?.operation]; if (!shape) throw new Error('Unknown pipeline operation');
+    record(payload, ['operation', 'contextRevision', ...shape[0]], shape[1]);
+    if (payload.contextRevision !== current.revision) throw new Error('Control context changed');
+    const { contextRevision: _revision, ...action } = payload; return manager.dispatch(action);
   } });
 }

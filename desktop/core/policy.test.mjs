@@ -133,7 +133,7 @@ test('pipeline validation rejects missing integration, unreachable steps and aut
   const f = fixture(t); const missing = structuredClone(developmentTemplate);
   missing.steps.find(s => s.kind === 'pr-integration').kind = 'check';
   assert.throws(() => f.proposal({ 'pipelines.development': missing }), /integration/i);
-  const unreachable = structuredClone(developmentTemplate); unreachable.steps.push({ ...unreachable.steps[0], id: 'unreachable' });
+  const unreachable = structuredClone(developmentTemplate); unreachable.steps.push({ ...unreachable.steps[0], id: 'unreachable', label: 'Unreachable step' });
   assert.throws(() => f.proposal({ 'pipelines.development': unreachable }), /reachable/i);
   const unbounded = structuredClone(developmentTemplate); unbounded.steps[0].visitLimit = 0;
   assert.throws(() => f.proposal({ 'pipelines.development': unbounded }), /pipeline/i);
@@ -156,6 +156,25 @@ test('restore requires fresh PM input and publishes a new revision', t => {
   assert.equal(f.apply(p).revision, 2);
   assert.equal(f.store.worker.read(repository).values['scheduling.intervalMinutes'].value, 30);
   assert.equal(f.store.worker.read(repository, 1).values['scheduling.intervalMinutes'].value, 45);
+});
+
+test('Development completion requires successful integration and supervised QA before merge', t => {
+  const blank = structuredClone(developmentTemplate); blank.steps[0].label = '   ';
+  assert.throws(() => fixture(t).proposal({ 'pipelines.development': blank }), /name/i);
+  const duplicate = structuredClone(developmentTemplate); duplicate.steps[1].label = '  RESEARCH AND SPECIFY THE ISSUE  ';
+  assert.throws(() => fixture(t).proposal({ 'pipelines.development': duplicate }), /unique/i);
+  const f = fixture(t), failed = structuredClone(developmentTemplate);
+  failed.steps.find(step => step.kind === 'pr-integration').routes.failure = 'complete';
+  assert.throws(() => f.proposal({ 'pipelines.development': failed }), /integration/i);
+  const bypass = structuredClone(developmentTemplate);
+  bypass.steps.find(step => step.id === 'review').routes.success = 'integrate';
+  bypass.steps.find(step => step.id === 'review').routes.feedback = 'pm-testing';
+  assert.throws(() => f.proposal({ 'autonomy.scenario': 'supervised', 'pipelines.development': bypass }), /QA.*before|pre-merge/i);
+  const late = structuredClone(developmentTemplate);
+  late.steps.find(step => step.id === 'review').routes.success = 'integrate';
+  late.steps.find(step => step.id === 'integrate').routes.success = 'pm-testing';
+  late.steps.find(step => step.id === 'pm-testing').routes.success = 'complete';
+  assert.throws(() => f.proposal({ 'autonomy.scenario': 'supervised', 'pipelines.development': late }), /QA.*before|pre-merge/i);
 });
 
 test('canonical Settings exposes all categories and accepted safe defaults', t => {

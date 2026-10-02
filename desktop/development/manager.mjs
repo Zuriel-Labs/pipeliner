@@ -9,7 +9,7 @@ import { developmentWorkerProgram } from './worker-tools.mjs';
 import { starterSkills, starterHash } from './starter.mjs';
 import { createDevelopmentEngine } from './engine.mjs';
 import { publishDevelopmentCandidate, developmentPublication, candidateJob } from './github.mjs';
-import { buildDevelopmentShowcase, readAutonomousBranch, readDevelopmentCandidate, readIntegrationCandidate, readRequiredChecks, verifyMergedCandidate, mergeDevelopmentCandidate, integrationOutcome, integrationObservation } from './integration.mjs';
+import { buildDevelopmentShowcase, readAutonomousBranch, readIntegrationMethod, readDevelopmentCandidate, readIntegrationCandidate, readRequiredChecks, verifyMergedCandidate, mergeDevelopmentCandidate, integrationOutcome, integrationObservation } from './integration.mjs';
 import { containsSecret } from '../connections/commands.mjs';
 import { developmentShapes, developmentCommand } from './commands.mjs';
 import { developmentIssueHash } from './state.mjs';
@@ -170,7 +170,7 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     if (!dev || developmentPermissions.some(permission => !grant.capabilities.includes(permission)) || !grant.connections.includes('github') || !grant.connections.includes(dev.connection) || !grant.bundledSkills) throw new Error('Development needs a qualified assigned Dev and both host and repository permissions.');
     const identity = inspectWorkspace(target.path, { repository: target.id, owner: target.slug.split('/')[0], name: target.slug.split('/')[1] });
     if (workspaceData(identity).localKey !== target.localKey) throw new Error('Development local workspace changed.');
-    const snapshot = snapshotWorkspace(identity), profile = executionProfile(snapshot.files, target), held = await acquire(target, signal); let issue;
+    const snapshot = snapshotWorkspace(identity), profile = executionProfile(snapshot.files, target), held = await acquire(target, signal); let issue, integrationMethod;
     const unchangedPolicy = () => { signal.throwIfAborted(); if (policy.worker.read(target.id).hash !== view.hash) throw new Error('Development configuration changed during preflight.'); };
     try {
       const pipeline = view.values['pipelines.development'].value, ungated = !pipeline.steps.some(step => step.kind === 'pm-qa');
@@ -182,6 +182,7 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
       if (ungated && !dev.noPrompts) throw new Error('Development provider prompt-free execution is unqualified.');
       const provider = await connections.acquireProvider(dev.connection, dev.model, signal);
       try { provider.check(); unchangedPolicy(); } finally { provider.close(); }
+      integrationMethod = await readIntegrationMethod(held.app, target); unchangedPolicy();
       if (ungated) await readAutonomousBranch(held.app, target, profile, snapshot.candidate.sourceCommit);
       const catalog = await api.readCatalog(held.app, held.project, target); issue = catalog.issues.find(value => value.number === number);
       if (!issue || issue.state !== 'OPEN' || !issue.ready || !issue.itemId || ['Priority', 'Impact', 'Effort'].some(role => !issue.metadata[role])
@@ -211,7 +212,7 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     unchangedPolicy();
     const reservation = await policy.runtime.reserve(identity, { commandId: randomUUID(), issue: number, pipeline: 'development', policyHash: view.hash }), run = reservation.run;
     ledger.create(run, { pipeline: view.values['pipelines.development'].value, source: snapshot.candidate, developer: { id: dev.id, connection: dev.connection, model: dev.model }, skillsHash: starterHash, issueHash: developmentIssueHash({ number: issue.number, title: issue.title, body: issue.body }),
-      executionProfile: { kind: 'pipeliner-desktop', version: 1 },
+      executionProfile: { kind: 'pipeliner-desktop', version: 1 }, integrationMethod,
       checks: profile.quality.commands.map((command, index) => ({ name: 'Repository check ' + (index + 1), command })), logBytes: Math.min(50, view.values['privacy.runLogMiB'].value) * 1024 * 1024 });
     await execute(target, run, snapshot, profile, issue, signal);
   }

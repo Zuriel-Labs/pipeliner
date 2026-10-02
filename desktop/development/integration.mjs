@@ -11,6 +11,17 @@ const currentTree = (row, candidate) => canonicalJSON(row.candidate) === canonic
 const prefix = workspace => '/repos/' + workspace.slug;
 function pending(name) { const error = new Error('Development integration evidence is pending: ' + name); error.code = 'integration-pending'; return error; }
 
+export async function readIntegrationMethod(lease, workspace, expected) {
+  const repository = await githubRequest(lease, 'GET', prefix(workspace));
+  if (repository.id !== workspace.numericId || repository.node_id !== workspace.repositoryId
+    || typeof repository.allow_merge_commit !== 'boolean' || typeof repository.allow_squash_merge !== 'boolean') throw new Error('Development repository merge-method capability is unavailable.');
+  const allowed = { merge: repository.allow_merge_commit, squash: repository.allow_squash_merge };
+  if (expected !== undefined) { if (!Object.hasOwn(allowed, expected) || !allowed[expected]) throw new Error('Development captured merge method or repository control changed.'); return expected; }
+  const method = ['merge', 'squash'].find(method => allowed[method]);
+  if (!method) throw new Error('Development repository has no qualified integration method before execution.');
+  return method;
+}
+
 export async function readAutonomousBranch(lease, workspace, profile, sourceCommit) {
   const name = profile.repository.defaultBranch, branch = await githubRequest(lease, 'GET', prefix(workspace) + '/branches/' + encodeURIComponent(name));
   if (branch.name !== name || branch.commit?.sha !== sourceCommit || branch.protected !== false) throw new Error('Development protected or changed integration branch needs a qualified autonomous path before execution.');
@@ -154,8 +165,10 @@ export async function mergeDevelopmentCandidate({ store, runtime, ledger, lease,
     }
   }
   current();
+  const method = captured.integrationMethod ?? 'merge';
+  if (!inspected.merged) { await readIntegrationMethod(lease, workspace, method); current(); }
   if (approval.kind === 'standing-policy' && !inspected.merged) { await readAutonomousBranch(lease, workspace, profile, publication.base); current(); }
-  const request = { sha: publication.head, merge_method: 'merge' }, expectedHash = integrationOutcome(publication);
+  const request = { sha: publication.head, merge_method: method }, expectedHash = integrationOutcome(publication);
   const action = runtime.intent(binding, { commandId: 'integrate-' + publication.head, step: state.step, operation: 'github.pr.merge', candidate: publication.candidate,
     requestHash: integrationHash(request), preconditionsHash: integrationHash({ base: publication.base, checks: inspected.checks, authority: approval }), expectedHash });
   const intent = store.prepare(run.id + '-integration', 'merge-' + publication.head, { kind: 'development', runId: run.id, repository: run.repository,

@@ -105,7 +105,8 @@ export function openDevelopmentStore(directory) {
   }
   return Object.freeze({
     create(run, settings) {
-      canonicalJSON(run); canonicalJSON(settings); record(settings, ['pipeline', 'source', 'developer', 'skillsHash', 'issueHash', 'checks', 'logBytes'], ['executionProfile']);
+      canonicalJSON(run); canonicalJSON(settings); record(settings, ['pipeline', 'source', 'developer', 'skillsHash', 'issueHash', 'checks', 'logBytes'], ['executionProfile', 'integrationMethod']);
+      if (settings.integrationMethod !== undefined && !['merge', 'squash'].includes(settings.integrationMethod)) throw new Error('Invalid captured integration method');
       if (settings.executionProfile) { record(settings.executionProfile, ['kind', 'version']);
         if (settings.executionProfile.kind !== 'pipeliner-desktop' || settings.executionProfile.version !== 1) throw new Error('Invalid Desktop execution profile'); }
       if (!settings.pipeline.steps.some(step => step.kind === 'pm-qa') && !settings.executionProfile) throw new Error('Ungated Development needs explicit Desktop profile migration');

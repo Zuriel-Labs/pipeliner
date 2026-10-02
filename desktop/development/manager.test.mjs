@@ -25,7 +25,7 @@ test('ordinary direct QA decisions never infer approval from praise, quotes, sec
 });
 
 test('known incompatible autonomous paths block before activation, reservation, worker or model requests', async () => {
-  for (const failure of ['migration', 'prompt', 'provider', 'protected', 'base', 'delivery', 'permission']) {
+  for (const failure of ['migration', 'prompt', 'provider', 'method', 'protected', 'base', 'delivery', 'permission']) {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-preflight-'))), checkout = join(root, 'repository'); mkdirSync(checkout);
     const profile = JSON.parse(readFileSync(new URL('../../pipeliner.config.json', import.meta.url), 'utf8'));
     profile.repository.owner = 'fixture'; profile.repository.name = 'repo'; profile.project.owner = 'fixture'; profile.project.number = 1;
@@ -40,7 +40,9 @@ test('known incompatible autonomous paths block before activation, reservation, 
     const dev = { id: 'dev-one', connection: 'ollama', model: 'test-model', metrics: [], noPrompts: failure !== 'prompt' };
     let prepares = 0, providerCalls = 0, providerClosed = 0;
     const lease = { check() {}, close() {}, signal: new AbortController().signal, value: { credential: { accessToken: 'synthetic-app' } },
-      send: async (url, request) => { assert.equal(request.method, 'GET'); assert.match(new URL(url).pathname, /\/branches\/main$/);
+      send: async (url, request) => { assert.equal(request.method, 'GET');
+        if (new URL(url).pathname === '/repos/fixture/repo') return Response.json({ id: 1, node_id: 'R1', allow_merge_commit: failure !== 'method', allow_squash_merge: false });
+        assert.match(new URL(url).pathname, /\/branches\/main$/);
         return Response.json({ name: 'main', commit: { sha: failure === 'base' ? 'f'.repeat(40) : snapshot.candidate.sourceCommit }, protected: failure === 'protected' }); } };
     const connections = { developers: () => [dev], acquire: async () => lease, async acquireProvider() {
       providerCalls++; if (failure === 'provider') throw Error('capability-unverified'); return { check() {}, close() { providerClosed++; }, turn() { assert.fail('No model requests before qualification.'); } }; } };
@@ -58,7 +60,7 @@ test('known incompatible autonomous paths block before activation, reservation, 
       }
       manager.dispatch({ operation: 'start', number: 7 }); await manager.idle();
       assert.ok(manager.status().error, failure); assert.equal(policy.runtime.status(workspace.id), null); assert.equal(prepares, 0); assert.deepEqual(fixture.writes, []);
-      assert.equal(providerCalls, ['provider', 'protected', 'base'].includes(failure) ? 1 : 0); assert.equal(providerClosed, ['protected', 'base'].includes(failure) ? 1 : 0);
+      assert.equal(providerCalls, ['provider', 'method', 'protected', 'base'].includes(failure) ? 1 : 0); assert.equal(providerClosed, ['method', 'protected', 'base'].includes(failure) ? 1 : 0);
       assert.equal(readFileSync(join(checkout, 'pipeliner.config.json'), 'utf8'), JSON.stringify(profile));
     } finally { await manager.close(); ledger.close(); policy.close(); store.close(); rmSync(root, { recursive: true }); }
   }
@@ -80,6 +82,7 @@ for (const ungated of [false, true]) test((ungated ? 'captured zero-gate policy'
   let manager, mergedRemote = false, branch = true, cleanupFails = true, mergeWrites = 0, closeWrites = 0, branchWrites = 0;
   const lease = { check() {}, close() {}, signal: new AbortController().signal, value: { credential: { accessToken: 'synthetic-app' } }, send: async (url, request) => {
     const path = new URL(url).pathname;
+    if (path === '/repos/fixture/repo') return Response.json({ id: 1, node_id: 'R1', allow_merge_commit: true, allow_squash_merge: true });
     if (path.endsWith('/pulls/3/merge')) { mergeWrites++; mergedRemote = true; throw Error('lost synthetic merge reply'); }
     if (path.endsWith('/pulls/3')) return Response.json({ number: 3, state: mergedRemote ? 'closed' : 'open', merged: mergedRemote, merge_commit_sha: mergedRemote ? merged : null, draft: false, mergeable: true,
       head: { ref: 'issue/7-fixture', sha: head, repo: { id: 1, node_id: 'R1' } }, base: { ref: 'main', sha: snapshot.candidate.sourceCommit, repo: { id: 1, node_id: 'R1' } } });

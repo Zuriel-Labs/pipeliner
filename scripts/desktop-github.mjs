@@ -6,7 +6,8 @@ import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const modes = { check: '--native-check', failure: '--native-failure-check', connect: null,
-  'connect-org': '--organization-fixture', 'connect-setup': '--setup-fixtures' };
+  'connect-org': '--organization-fixture', 'connect-setup': '--setup-fixtures',
+  'connect-remaining': '--remaining-fixtures', 'revoke-setup': '--revoke-setup', 'revoke-app': '--revoke-app' };
 const mode = process.argv[2];
 if (!Object.hasOwn(modes, mode) || process.platform !== 'darwin' || process.arch !== 'arm64') throw new Error('Requires check, failure or connect on an arm64 Mac');
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -71,6 +72,8 @@ try {
   process.removeListener('SIGINT', stop);
   if (interrupted || bytes > 65536 || code !== 0 || records.some(record => record.failed) ||
     (mode === 'check' && !records.some(record => record.nativeDialog === 'opened-and-cancelled')) ||
+    (['connect-remaining', 'revoke-setup', 'revoke-app'].includes(mode) && !records.some(record => record.receipt?.operation === 'connection-revocation' &&
+      record.receipt.status === 'passed' && record.receipt.detail.accessDenied === true && record.receipt.detail.refreshDenied === true)) ||
     (mode.startsWith('connect') && (!records.some(record => mode === 'connect-setup' ? record.setup === 'passed' : record.installations === 'passed') ||
       records.some(record => record.rows?.some(row => row.status !== 'passed') ||
         ['failed', 'blocked'].includes(record.receipt?.status))))) process.exitCode = 1;

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createHash } from 'node:crypto';
-import { qualifyAccess, qualifySetup, fixtures } from './access.mjs';
+import { qualifyAccess, qualifySetup, qualifyRemaining, qualifyKnownProject, readSetupResources, awaitRevocation, continuations, fixtures } from './access.mjs';
 
 const permissions = { actions: 'read', checks: 'read', contents: 'write', issues: 'write', metadata: 'read',
   organization_projects: 'write', pull_requests: 'write', statuses: 'read' };
@@ -41,8 +41,16 @@ function transport(change = {}, calls = []) {
       return reply({ total_count: repositories.length, repositories });
     }
     if (path === '/graphql') {
-      if (!change.projects) return reply({ errors: [{ type: 'FORBIDDEN', message: 'ghu_DO_NOT_ECHO' }] });
       const { query, variables } = JSON.parse(options.body);
+      if (query.includes('... on PullRequest')) {
+        const f = targets.find(f => variables.id === `PR_${f.id}`);
+        if (!f) throw new Error('Unexpected PR target');
+        const merged = states.get(f.id).merged;
+        return reply({ data: { node: { id: variables.id, number: 2, state: merged ? 'MERGED' : 'OPEN', merged,
+          headRefOid: 'b'.repeat(40), repository: { id: f.node },
+          mergeCommit: merged ? { oid: 'd'.repeat(40), repository: { id: f.node } } : null } } });
+      }
+      if (!change.projects) return reply({ errors: [{ type: 'FORBIDDEN', message: 'ghu_DO_NOT_ECHO' }] });
       const f = targets.find(f => variables.login === f.owner || variables.owner === f.ownerNode ||
         [variables.project, variables.id].includes(`PVT_${f.id}`) || variables.field === `status-${f.id}`);
       if (!f) throw new Error('Unexpected Project target');
@@ -93,7 +101,7 @@ function transport(change = {}, calls = []) {
     if (!f) throw new Error('Unexpected route or ghp_SECRET');
     const state = states.get(f.id), prefix = `/repos/${f.owner}/${f.name}`;
     const pull = () => ({ id: f.id + 2, node_id: `PR_${f.id}`, number: 2, state: state.merged ? 'closed' : 'open',
-      merged: state.merged, merge_commit_sha: state.merged ? 'd'.repeat(40) : null,
+      merged: state.merged,
       head: { sha: change.stalePR ? 'e'.repeat(40) : 'b'.repeat(40), ref: 'd05-26-qualification', repo: { id: f.id, node_id: f.node } },
       base: { ref: 'main', repo: { id: f.id, node_id: f.node } } });
     if (path === `${prefix}/labels`) {
@@ -307,7 +315,7 @@ test('post-write read lag is bounded to reads and never repeats a fixture mutati
     if (options.method === 'GET' && path.endsWith('/pulls/2') && merged && staleMerge) {
       staleMerge = false;
       const data = await response.json();
-      return reply({ ...data, state: 'open', merged: false, merge_commit_sha: null });
+      return reply({ ...data, state: 'open', merged: false });
     }
     if (path === '/graphql' && JSON.parse(options.body).query.includes('items(first:100') && staleStatus) {
       staleStatus = false;
@@ -393,5 +401,254 @@ test('an uncertain write is never retried or echoed', async () => {
     assert.equal(result.rows.filter(r => r.detail === 'write-result-uncertain').length, 1);
     assert.equal(receipts.length, result.rows.length);
     assert.equal(JSON.stringify(result).includes('DO_NOT_ECHO'), false);
+  }
+});
+
+function remainingTransport(change = {}, calls = []) {
+  const base = transport({}, calls), states = new Map(continuations.map(f => [f.id, { success: false, merged: false,
+    label: !!f.control, body: f.control ? 'D-05 synthetic lost-acknowledgement test. No private data.' : '', asset: null }]));
+  const bytes = Buffer.from('Pipeliner D-05 synthetic asset\n'), digest = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+  const send = async (url, options) => {
+    if (new URL(url).pathname === '/graphql' && JSON.parse(options.body).query.includes('... on PullRequest')) {
+      const { variables } = JSON.parse(options.body);
+      const f = continuations.find(f => [f.pull.node, f.control?.node ?? `PR_${f.id}_new`].includes(variables.id));
+      if (!f) throw new Error('Unexpected remaining PR target');
+      calls.push({ url, method: options.method, body: JSON.parse(options.body) });
+      const old = variables.id === f.pull.node, merged = old || states.get(f.id).merged;
+      return reply({ data: { node: { id: variables.id, number: old ? 2 : 3, state: merged ? 'MERGED' : 'OPEN', merged,
+        headRefOid: old ? f.pull.head : f.head, repository: { id: f.node },
+        mergeCommit: merged ? { oid: old ? f.main : 'f'.repeat(40), repository: { id: f.node } } : null } } });
+    }
+    const path = new URL(url).pathname, f = continuations.find(f => path.startsWith(`/repos/${f.owner}/${f.name}`));
+    if (!f) return base(url, options);
+    calls.push({ url, method: options.method, body: options.body && !Buffer.isBuffer(options.body) ? JSON.parse(options.body) : null,
+      authorization: options.headers.Authorization });
+    const state = states.get(f.id), prefix = `/repos/${f.owner}/${f.name}`;
+    const pull = () => ({ id: f.control?.id ?? f.id + 9, node_id: f.control?.node ?? `PR_${f.id}_new`, number: 3, state: state.merged ? 'closed' : 'open',
+      merged: state.merged,
+      body: 'D-05 synthetic PR — updated', head: { sha: change.head ?? f.head, ref: 'd05-26-controls', repo: { id: f.id, node_id: f.node } },
+      base: { ref: 'main', repo: { id: f.id, node_id: f.node } } });
+    if (path === `${prefix}/branches/main`) return reply({ name: 'main', protected: f.protected, commit: { sha: state.merged ? 'f'.repeat(40) : f.main } });
+    if (path === `${prefix}/git/ref/heads/d05-26-controls`) return reply({ ref: 'refs/heads/d05-26-controls', object: { type: 'commit', sha: change.head ?? f.head } });
+    if (path.includes('/compare/')) return reply({ status: 'ahead', ahead_by: 2, total_commits: 2,
+      commits: [{ sha: f.oldHead }, { sha: f.head }], files: [{ filename: '.github/workflows/d05-controls.yml', status: 'added', sha: f.workflowBlob },
+        { filename: 'd05-controls.txt', status: 'added', sha: f.controlBlob }] });
+    if (path === `${prefix}/issues/1`) {
+      if (options.method === 'PATCH') state.body = JSON.parse(options.body).body;
+      return reply({ id: f.issue.id, node_id: f.issue.node, number: 1, state: 'open', title: 'D-05 synthetic Issue — updated', body: state.body,
+        assignees: [{ login: 'brimdor' }], labels: [{ id: f.ready, name: 'Ready for Development' }, ...(state.label ? [{ id: f.control?.label ?? f.id + 10, name: 'd05-remaining' }] : [])] });
+    }
+    if (path === `${prefix}/issues/1/labels`) { state.label = true; return reply([]); }
+    if (path === `${prefix}/labels/d05-remaining`) return reply({ id: change.labelId ?? f.control?.label, name: 'd05-remaining' });
+    if (path === `${prefix}/labels` && options.method === 'GET') return reply([{ id: f.ready, name: 'Ready for Development' },
+      ...(f.control ? [{ id: f.control.label, name: 'd05-remaining' }] : [])]);
+    if (path === `${prefix}/labels`) return reply({ id: f.id + 10, name: 'd05-remaining' }, 201);
+    if (path === `${prefix}/pulls/2`) return reply({ id: change.oldPullId ?? f.pull.id, node_id: f.pull.node, number: 2,
+      state: 'closed', merged: true, head: { sha: f.pull.head, ref: 'd05-26-qualification', repo: { id: f.id, node_id: f.node } },
+      base: { ref: 'main', repo: { id: f.id, node_id: f.node } } });
+    if (path === `${prefix}/pulls` && options.method === 'GET') return reply(f.control ? [{ ...pull(), merged: undefined }] : []);
+    if (path === `${prefix}/pulls`) return reply(pull(), 201);
+    if (path === `${prefix}/pulls/3`) return reply(pull());
+    if (path === `${prefix}/pulls/3/merge`) {
+      if (!state.success) { assert.equal(f.protected, true); return reply({}, 405); }
+      state.merged = true; return reply({ merged: true, sha: 'f'.repeat(40) });
+    }
+    if (path.endsWith('/status')) {
+      const old = path.includes(f.oldHead), status = old ? 'failure' : state.success ? 'success' : 'pending';
+      return reply({ sha: old ? f.oldHead : f.head, state: status, total_count: 1,
+        statuses: [{ id: f.id + 11, context: 'pipeliner-d05/qualification', state: status }] });
+    }
+    if (path.endsWith('/check-runs')) return reply({ total_count: change.checkCount ?? 2, check_runs: [{ id: f.check, name: 'd05-smoke',
+      head_sha: change.checkHead ?? f.head, status: 'completed', conclusion: 'success', app: { slug: 'github-actions' } },
+    { id: change.extraId ?? f.id + 20, name: 'Existing security check', head_sha: change.extraHead ?? f.head,
+      status: change.extraStatus ?? 'completed', conclusion: change.extraConclusion ?? 'success', app: { slug: 'gitguardian' } }] });
+    if (path.endsWith('/actions/runs')) return reply({ total_count: 1, workflow_runs: [{ id: f.run, name: 'Pipeliner D-05 check fixture',
+      head_sha: f.head, head_branch: 'd05-26-controls', event: 'push', status: 'completed', conclusion: 'success' }] });
+    if (path === `${prefix}/releases` && options.method === 'GET') return reply([]);
+    const release = () => ({ id: f.id + 12, node_id: `RE_${f.id}`, tag_name: 'd05-26-qualification', target_commitish: 'f'.repeat(40),
+      draft: true, prerelease: true, assets: state.asset ? [state.asset] : [] });
+    if (path === `${prefix}/releases`) return reply(release(), 201);
+    if (path === `${prefix}/releases/${f.id + 12}/assets`) {
+      if (state.asset) return reply({}, 422);
+      state.asset = { id: f.id + 13, name: 'd05-qualification.txt', state: 'uploaded', size: bytes.length, digest };
+      return reply(state.asset, 201);
+    }
+    if (path === `${prefix}/releases/${f.id + 12}`) return reply(release());
+    if (path === `${prefix}/releases/assets/${f.id + 13}`) {
+      if (change.redirect) return new Response(null, { status: 302, headers: { Location: change.redirect(f) } });
+      return new Response(change.badDigest ? 'wrong bytes' : bytes);
+    }
+    if (path === prefix) return reply({ id: f.id, node_id: f.node, full_name: `${f.owner}/${f.name}`, private: true });
+    throw new Error('Unexpected remaining route');
+  };
+  return { send, onResult(row) { if (row.operation === 'fixture-status-success-required') states.get(continuations.find(f => row.fixture === `${f.owner}/${f.name}`).id).success = true; } };
+}
+
+test('remaining App qualification reads exact completed effects, verifies Ready/checks and never replays writes', async () => {
+  const calls = [], model = remainingTransport({}, calls);
+  const result = await qualifyRemaining('ghu_synthetic_fixture', model);
+  assert.equal(result.installations, 'passed');
+  assert.equal(result.rows.filter(row => row.status === 'not-run').length, 1);
+  for (const f of continuations) {
+    const prefix = `/repos/${f.owner}/${f.name}`;
+    assert.equal(calls.filter(call => new URL(call.url).pathname === `${prefix}/pulls/3/merge`).length, f.protected ? 2 : 1);
+    assert.equal(calls.filter(call => new URL(call.url).pathname === `${prefix}/issues/1` && call.method === 'PATCH').length, f.control ? 0 : 1);
+    assert.equal(calls.filter(call => new URL(call.url).pathname === `${prefix}/pulls` && call.method === 'POST').length, f.control ? 0 : 1);
+    assert.equal(calls.filter(call => new URL(call.url).pathname === `${prefix}/pulls/2` && call.method !== 'GET').length, 0);
+  }
+  assert.equal(result.rows.filter(row => row.operation === 'lost-acknowledgement-reconciliation').every(row => row.detail.reconciled === true), true);
+  assert.equal(result.rows.filter(row => row.operation === 'draft-asset-download').every(row => row.detail.downloadedDigest === row.detail.digest), true);
+  assert.equal(result.rows.filter(row => row.operation === 'candidate-check-merge-readback').every(row => row.detail.readOnly === undefined), true);
+});
+
+test('remaining identity/check failure stops before unrelated writes and OAuth never enters App work', async () => {
+  for (const change of [{ oldPullId: 7 }, { head: 'a'.repeat(40) }, { checkHead: 'a'.repeat(40) }]) {
+    const calls = [], model = remainingTransport(change, calls);
+    await assert.rejects(qualifyRemaining('ghu_synthetic_fixture', model), /readback-mismatch/);
+    assert.equal(calls.some(call => call.method !== 'GET' && !call.body?.query?.startsWith('query(')), false);
+  }
+  await assert.rejects(qualifyRemaining('gho_synthetic_setup'), /app-token-required/);
+});
+
+test('REST 2026 merge verification binds the same GraphQL PR and rejects changed immutable receipts before writes', async () => {
+  for (const changed of [
+    node => { node.id = 'PR_other'; }, node => { node.number = 7; },
+    node => { node.headRefOid = 'a'.repeat(40); }, node => { node.repository.id = 'R_other'; },
+    node => { node.mergeCommit.oid = 'a'.repeat(40); }, node => { node.mergeCommit.repository.id = 'R_other'; },
+    node => { delete node.mergeCommit; },
+  ]) {
+    const calls = [], model = remainingTransport({}, calls);
+    let mergeReads = 0;
+    await assert.rejects(qualifyRemaining('ghu_synthetic_fixture', { ...model, send: async (url, options) => {
+      assert.equal(options.headers['X-GitHub-Api-Version'], '2026-03-10');
+      const response = await model.send(url, options);
+      if (new URL(url).pathname !== '/graphql') return response;
+      mergeReads++;
+      const data = await response.json(); changed(data.data.node); return reply(data);
+    } }), /readback-mismatch/);
+    assert.equal(mergeReads, 1);
+    assert.equal(calls.some(call => call.method !== 'GET' && !call.body?.query?.startsWith('query(')), false);
+  }
+});
+
+test('complete check lists preserve existing integrations and deny pending, failed, foreign, duplicate or partial evidence', async () => {
+  for (const change of [{ extraStatus: 'in_progress', extraConclusion: null }, { extraConclusion: 'failure' },
+    { extraHead: 'a'.repeat(40) }, { extraId: continuations[0].check }, { checkCount: 3 }]) {
+    const calls = [], model = remainingTransport(change, calls);
+    await assert.rejects(qualifyRemaining('ghu_synthetic_fixture', model), /readback-mismatch/);
+    assert.equal(calls.some(call => call.method !== 'GET' && !call.body?.query?.startsWith('query(')), false);
+  }
+});
+
+test('a null GraphQL merge receipt retries reads only, and remains bounded when unavailable', async () => {
+  for (const unavailable of [false, true]) {
+    const calls = [], model = remainingTransport({}, calls);
+    let reads = 0;
+    const run = qualifyRemaining('ghu_synthetic_fixture', { ...model, send: async (url, options) => {
+      const response = await model.send(url, options);
+      if (new URL(url).pathname !== '/graphql' || JSON.parse(options.body).variables.id !== continuations[0].pull.node) return response;
+      const data = await response.json(); reads++;
+      if (unavailable || reads === 1) data.data.node.mergeCommit = null;
+      return reply(data);
+    } });
+    if (unavailable) {
+      await assert.rejects(run, /readback-mismatch/);
+      assert.equal(reads, 5);
+      assert.equal(calls.some(call => call.method !== 'GET' && !call.body?.query?.startsWith('query(')), false);
+    } else { await run; assert.equal(reads, 2); }
+  }
+});
+
+test('download follows only one exact GitHub asset redirect without forwarding credentials', async () => {
+  const calls = [], model = remainingTransport({ redirect: f => `https://release-assets.githubusercontent.com/github-production-release-asset/${f.id}/synthetic?signed=DO_NOT_LOG` }, calls);
+  const send = async (url, options) => {
+    if (new URL(url).hostname === 'release-assets.githubusercontent.com') {
+      assert.equal(options.headers.Authorization, undefined); assert.equal(options.redirect, 'error');
+      return new Response('Pipeliner D-05 synthetic asset\n');
+    }
+    return model.send(url, options);
+  };
+  const result = await qualifyRemaining('ghu_synthetic_fixture', { ...model, send });
+  assert.equal(result.rows.filter(row => row.operation === 'draft-asset-download').every(row => row.detail.redirected), true);
+  assert.equal(JSON.stringify(result).includes('DO_NOT_LOG'), false);
+  for (const change of [{ redirect: () => 'https://example.com/DO_NOT_LOG' }, { badDigest: true }]) {
+    await assert.rejects(qualifyRemaining('ghu_synthetic_fixture', remainingTransport(change)), /asset-download-invalid/);
+  }
+});
+
+test('revocation observes only authenticated access denial, never an arbitrary permission failure', async () => {
+  let count = 0;
+  const result = await awaitRevocation('ghu_synthetic_fixture', { wait: async () => {}, send: async (url, options) => {
+    assert.equal(url, 'https://api.github.com/user'); assert.equal(options.method, 'GET');
+    return count++ ? reply({}, 401) : reply({ id: 1202831, login: 'brimdor', node_id: fixtures[0].ownerNode, type: 'User' });
+  } });
+  assert.equal(result.accessDenied, true); assert.equal(count, 2);
+  await assert.rejects(awaitRevocation('ghu_synthetic_fixture', { send: async () => reply({}, 403) }), /http-403/);
+  await assert.rejects(awaitRevocation('ghp_unqualified'), /connection-token-required/);
+});
+
+test('known Project continuation changes only its exact status and rejects changed owner/schema/item before writes', async () => {
+  const project = 'PVT_kwDOETTHSM4BlYox', item = 'PVTI_lADOETTHSM4BlYoxzg-AJuU', f = continuations[1];
+  for (const change of [{}, { owner: 'wrong' }, { wrongOptions: true }, { absent: true }, { wrongRepository: true }]) {
+    const calls = [], base = transport({}, calls);
+    const choices = { Status: ['Backlog', 'In Progress', 'In Review', 'Pending Review', 'Done'], Priority: ['P0', 'P1', 'P2', 'P3'],
+      Impact: ['High', 'Medium', 'Low'], Effort: ['XS', 'S', 'M', 'L', 'XL'] };
+    const fields = Object.entries(choices).map(([name, names]) => ({ id: `field-${name}`, name,
+      options: names.map(name => ({ id: `option-${name}`, name })) }));
+    const values = { Status: 'In Progress', Priority: 'P0', Impact: 'High', Effort: 'L' };
+    const connection = nodes => ({ nodes, totalCount: nodes.length, pageInfo: { hasNextPage: false, endCursor: null } });
+    const send = async (url, options) => {
+      if (url.endsWith(`/repos/${f.owner}/${f.name}/issues/1`)) return reply({ id: f.issue.id, node_id: f.issue.node, number: 1, state: 'open' });
+      if (!url.endsWith('/graphql')) return base(url, options);
+      const body = JSON.parse(options.body); calls.push({ method: options.method, body });
+      if (body.query.includes('owner{')) return reply({ data: { node: { id: project, number: 8,
+        title: 'Pipeliner D-05 #26 Organization Fixture', public: false, owner: { id: change.owner ?? f.ownerNode } } } });
+      if (body.query.includes('fields(first:100')) return reply({ data: { node: { id: project,
+        fields: connection(change.wrongOptions ? fields.map(field => ({ ...field, options: [] })) : fields) } } });
+      if (body.query.includes('items(first:100')) return reply({ data: { node: { id: project, items: connection(change.absent ? [] : [{ id: item,
+        content: { id: f.issue.node, number: 1, state: 'OPEN', repository: { id: change.wrongRepository ? 'wrong' : f.node } },
+        fieldValues: connection(fields.map(field => ({ name: values[field.name], field: { id: field.id, name: field.name } }))) }]) } } });
+      assert.equal(body.query.includes('updateProjectV2ItemFieldValue('), true);
+      assert.equal(body.variables.project, project); assert.equal(body.variables.item, item); assert.equal(body.variables.field, 'field-Status');
+      values.Status = body.variables.option.slice('option-'.length);
+      return reply({ data: { updateProjectV2ItemFieldValue: { projectV2Item: { id: item } } } });
+    };
+    if (Object.keys(change).length) {
+      await assert.rejects(qualifyKnownProject('ghu_synthetic_fixture', { send }));
+      assert.equal(calls.some(call => call.body?.query?.startsWith('mutation(')), false);
+    } else {
+      const result = await qualifyKnownProject('ghu_synthetic_fixture', { send });
+      assert.deepEqual(result.statuses, ['In Progress', 'In Review', 'Pending Review', 'In Progress']);
+      assert.equal(calls.filter(call => call.body?.query?.startsWith('mutation(')).length, 3);
+    }
+  }
+});
+
+test('setup revocation preflight reads only its exact created resources and rejects changed identity', async () => {
+  for (const changed of [false, true]) {
+    let writes = 0;
+    const send = async (url, options) => {
+      assert.equal(options.headers.Authorization, 'Bearer gho_synthetic_setup');
+      const path = new URL(url).pathname;
+      if (options.method !== 'GET') {
+        const body = JSON.parse(options.body); assert.equal(body.query.startsWith('query('), true);
+        if (!body.query.startsWith('query(')) writes++;
+        const personal = body.variables.owner === fixtures[0].ownerNode;
+        return reply({ data: { node: { id: body.variables.owner, projectsV2: { totalCount: 1,
+          nodes: [{ id: personal ? 'PVT_kwHOABJaj84BlZGv' : 'PVT_kwDOETTHSM4BlZGz', public: false,
+            title: `Pipeliner D-05 #26 OAuth ${personal ? 'Personal' : 'Organization'} Fixture` }],
+          pageInfo: { hasNextPage: false, endCursor: null } } } } });
+      }
+      if (path === '/user') return reply({ id: 1202831, login: 'brimdor', node_id: fixtures[0].ownerNode, type: 'User' });
+      if (path === '/orgs/Zuriel-Labs') return reply({ login: 'Zuriel-Labs', node_id: fixtures[1].ownerNode, type: 'Organization' });
+      const personal = path.includes('/brimdor/');
+      if (path.endsWith('/issues/1')) return reply({ id: personal ? 5670334810 : 5670566543,
+        node_id: personal ? 'I_kwDOU36G9M8AAAABUfpxWg' : 'I_kwDOU37Lsc8AAAABUf36jw', number: 1, state: 'open', title: 'D-05 synthetic setup Issue' });
+      return reply({ id: changed ? 7 : personal ? 1400801012 : 1400818609, node_id: personal ? 'R_kgDOU36G9A' : 'R_kgDOU37LsQ',
+        full_name: personal ? 'brimdor/pipeliner-d05-26-oauth-personal' : 'Zuriel-Labs/pipeliner-d05-26-oauth-org', private: true });
+    };
+    if (changed) await assert.rejects(readSetupResources('gho_synthetic_setup', { send }), /repository-mismatch/);
+    else assert.deepEqual(await readSetupResources('gho_synthetic_setup', { send }), { resources: 2, readOnly: true });
+    assert.equal(writes, 0);
   }
 });

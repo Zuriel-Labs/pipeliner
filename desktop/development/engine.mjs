@@ -20,6 +20,8 @@ const tool = { type: 'function', function: { name: 'pipeliner_tool', description
     },
   } } } };
 const shapes = { list: [], read: ['path'], write: ['path', 'content', 'mode', 'beforeHash'], run: ['command', 'timeoutMs'], finish: ['outcome', 'summary', 'evidence', 'documents', 'findings'] };
+const outputErrors = { 'Invalid Development output': 'invalid-development-output', 'Invalid Development document': 'invalid-development-document',
+  'Unknown Development document': 'unknown-development-document', 'Duplicate Development document': 'duplicate-development-document', 'Invalid Development finding': 'invalid-development-finding' };
 
 // Host orchestration only. Every executable source command stays in the existing worker.
 export function createDevelopmentEngine({ ledger, policy, supervisor, connections, onChange = () => {} }) {
@@ -55,7 +57,8 @@ export function createDevelopmentEngine({ ledger, policy, supervisor, connection
       async function workerResult(request) {
         const response = await supervisor.tool(binding, request, { signal });
         record(response, ['ok'], response.ok === true ? ['result'] : ['error']);
-        if (response.ok !== true || !response.result || typeof response.result !== 'object') throw new Error('Development tool denied or incomplete');
+        if (response.ok !== true) { const error = new Error('Development tool denied or incomplete'); error.code = 'development-tool-denied'; throw error; }
+        if (!response.result || typeof response.result !== 'object') throw new Error('Development tool result incomplete');
         return response.result;
       }
       async function request(kind, payload, effect, after = () => {}, outcome = 'verified') {
@@ -91,15 +94,17 @@ export function createDevelopmentEngine({ ledger, policy, supervisor, connection
         return result;
       }
       function parse(call) {
-        record(call, ['function'], ['id', 'type']); record(call.function, ['name', 'arguments'], ['index']);
+        try { record(call, ['function'], ['id', 'type']); record(call.function, ['name', 'arguments'], ['index']); }
+        catch { throw new Error('tool-function-shape-denied'); }
         if (call.function.name !== tool.function.name) throw new Error('Development tool unavailable');
         const args = typeof call.function.arguments === 'string' ? JSON.parse(call.function.arguments) : call.function.arguments;
-        canonicalJSON(args); record(args, ['runId', 'epoch', 'operation', 'payload']);
-        if (args.runId !== binding.runId || args.epoch !== binding.epoch || !Object.hasOwn(shapes, args.operation)) throw new Error('Development tool binding denied');
-        record(args.payload, shapes[args.operation]);
+        canonicalJSON(args);
+        try { record(args, ['runId', 'epoch', 'operation', 'payload']); } catch { throw new Error('tool-argument-shape-denied'); }
+        if (args.runId !== binding.runId || args.epoch !== binding.epoch || !Object.hasOwn(shapes, args.operation)) throw new Error('tool-run-or-epoch-denied');
+        try { record(args.payload, shapes[args.operation]); } catch { throw new Error('tool-payload-shape-denied'); }
         if (['write', 'run'].includes(args.operation) && !hasPlan()) throw new Error('plan-required-before-source-execution');
         if (args.operation === 'finish') {
-          validateDevelopmentOutput(args.payload);
+          try { validateDevelopmentOutput(args.payload); } catch (error) { throw new Error(outputErrors[error.message] ?? 'tool-output-shape-denied'); }
           if (!hasPlan() && args.payload.outcome === 'success' && !['research', 'specification', 'design'].every(kind => args.payload.documents.some(document => document.kind === kind))) throw new Error('plan-required-before-source-execution');
           const state = ledger.status(binding.runId), evidence = ledger.evidence(binding);
           if (args.payload.outcome === 'success' && !args.payload.evidence.length || args.payload.evidence.some(id => !evidence.some(row => row.id === id
@@ -108,7 +113,7 @@ export function createDevelopmentEngine({ ledger, policy, supervisor, connection
             && row.state === 'verified' && row.result.result.name === check.name && row.result.result.command === check.command && row.result.result.exitCode === 0
             && !row.result.result.truncated && !row.result.result.timedOut && canonicalJSON(row.result.candidate) === canonicalJSON(state.candidate)))) throw new Error('passing-current-checks-required');
         }
-        if (['read', 'write'].includes(args.operation) && !sourcePath(args.payload.path, args.operation === 'write')) throw new Error('Protected Development tool path');
+        if (['read', 'write'].includes(args.operation) && !sourcePath(args.payload.path, args.operation === 'write')) throw new Error('protected-tool-path');
         if (args.operation === 'write') {
           checkedFiles([{ path: args.payload.path, mode: args.payload.mode, content: args.payload.content }]);
           if (args.payload.beforeHash !== null && (typeof args.payload.beforeHash !== 'string' || !/^[a-f0-9]{64}$/.test(args.payload.beforeHash))) throw new Error('Development write precondition unavailable');
@@ -146,7 +151,7 @@ export function createDevelopmentEngine({ ledger, policy, supervisor, connection
             `Required checks: ${canonicalJSON(captured.checks)}\nPrior verified step outputs: ${canonicalJSON(ledger.outputs(binding.runId))}\nPM feedback for the same Issue: ${canonicalJSON(state.feedback ?? null)}\n` +
             `Call pipeliner_tool with the exact runId and epoch. Use list/read to inspect source. Writes require base64 content, mode 100644/100755 and exact SHA-256 beforeHash (null only for a new file). ` +
             `Commands run inside a no-network restricted worker; use timeoutMs 100..300000. Until research, specification and design documents have been recorded in a successful finish, only list, read and finish are permitted. Do not run tests or write code during research. ` +
-            `Finish with one typed output: outcome success/failure/feedback; summary; evidence IDs returned by verified tools; documents [{kind,title,paragraphs}]; findings [{severity,text}]. Success evidence must match the current candidate returned by tools. Do not include denied IDs, invented IDs or earlier-tree results in evidence; they remain audit history. After changing source, run all required checks and repair any failure before finishing success. Keep each document focused, with short paragraphs. Review must include a review document and actual findings. Never invent evidence, controls or approval. Finish must be its own tool call.`;
+            `Finish with one typed output: outcome success/failure/feedback; summary; evidence IDs returned by verified tools; documents [{kind,title,paragraphs}]; findings [{severity,text}]. At most one document per kind; combine sections in its paragraphs. Existing recorded research/specification/design need not be repeated during implementation. Success evidence must match the current candidate returned by tools. Do not include denied IDs, invented IDs or earlier-tree results in evidence; they remain audit history. After changing source, run all required checks and repair any failure before finishing success. Keep each document focused, with short paragraphs. Review must include a review document and actual findings. Never invent evidence, controls or approval. Finish must be its own tool call.`;
           const previous = ledger.evidence(binding).filter(value => value.visit === state.visit && value.kind === 'provider' && value.state === 'verified').at(-1);
           const messages = previous ? structuredClone(previous.payload.messages).concat([{ role: 'assistant', content: previous.result.result.content, thinking: previous.result.result.thinking, tool_calls: previous.result.result.tool_calls }]) : [{ role: 'system', content: prompt }, { role: 'user', content: 'Execute this step using the permitted tools. Start with source inspection.' }];
           if (previous) {
@@ -168,14 +173,19 @@ export function createDevelopmentEngine({ ledger, policy, supervisor, connection
             const value = response.result; messages.push({ role: 'assistant', content: value.content, thinking: value.thinking, tool_calls: value.tool_calls });
             if (!value.tool_calls.length) { messages.push({ role: 'user', content: 'Use the permitted tool. A narrative is not a verified step output.' }); continue; }
             let calls;
-            try { calls = value.tool_calls.map(parse); if (calls.some(call => call.operation === 'finish') && calls.length !== 1) throw new Error('Finish must be a separate tool call'); }
+            try { calls = value.tool_calls.map(parse); if (calls.some(call => call.operation === 'finish') && calls.length !== 1) throw new Error('finish-must-be-separate'); }
             catch (error) {
-              const reason = ['plan-required-before-source-execution', 'verified-current-evidence-required', 'passing-current-checks-required'].includes(error.message) ? error.message : 'tool-binding-or-shape-denied';
+              const reason = [...Object.values(outputErrors), 'tool-output-shape-denied', 'tool-function-shape-denied', 'tool-argument-shape-denied', 'tool-run-or-epoch-denied', 'tool-payload-shape-denied', 'finish-must-be-separate', 'protected-tool-path', 'plan-required-before-source-execution', 'verified-current-evidence-required', 'passing-current-checks-required'].includes(error.message) ? error.message : 'tool-binding-or-shape-denied';
               const candidate = ledger.status(binding.runId).candidate, verifiedEvidence = ledger.evidence(binding).filter(row => row.state === 'verified' && row.kind !== 'provider'
                 && canonicalJSON(row.result.candidate) === canonicalJSON(candidate)).map(row => row.id);
+              const rejection = { allowed: false, error: reason, verifiedEvidence,
+                contract: { runId: binding.runId, epoch: binding.epoch, arguments: ['runId', 'epoch', 'operation', 'payload'], payloads: shapes, finishAlone: true,
+                  output: { summaryMax: 4096, uniqueEvidenceMax: 64, documentsMax: 8, uniqueDocumentKinds: ['research', 'specification', 'design', 'review'],
+                    documentTitleMax: 240, paragraphsMin: 1, paragraphsMax: 64, paragraphMax: 8192, findingsMax: 32, findingTextMax: 4096,
+                    instruction: 'Use one document per kind; combine multiple sections as paragraphs. Output and nested fields must match the tool schema exactly.' } } };
               for (const call of value.tool_calls) {
-                const denied = await request('source', { operation: 'denied', requestHash: hash(call) }, async () => ({ allowed: false, error: reason }), undefined, 'denied');
-                messages.push({ role: 'tool', tool_name: tool.function.name, content: canonicalJSON({ evidenceId: denied.id, allowed: false, error: reason, verifiedEvidence }) });
+                const denied = await request('source', { operation: 'denied', requestHash: hash(call) }, async () => rejection, undefined, 'denied');
+                messages.push({ role: 'tool', tool_name: tool.function.name, content: canonicalJSON({ evidenceId: denied.id, ...rejection }) });
               }
               continue;
             }
@@ -194,8 +204,16 @@ export function createDevelopmentEngine({ ledger, policy, supervisor, connection
                 ledger.advance(binding, output); published(); finished = true; break;
               }
               const check = call.operation === 'run' ? captured.checks.find(check => check.command === call.payload.command) : null;
-              const result = await worker(call.operation, call.payload, call.operation === 'write' ? 'implementation' : call.operation === 'run' ? check ? 'tests' : 'command' : 'source', check?.name);
-              messages.push({ role: 'tool', tool_name: tool.function.name, content: canonicalJSON({ evidenceId: result.id, candidate: ledger.status(binding.runId).candidate, result: result.result }) });
+              try {
+                const result = await worker(call.operation, call.payload, call.operation === 'write' ? 'implementation' : call.operation === 'run' ? check ? 'tests' : 'command' : 'source', check?.name);
+                messages.push({ role: 'tool', tool_name: tool.function.name, content: canonicalJSON({ evidenceId: result.id, candidate: ledger.status(binding.runId).candidate, result: result.result }) });
+              } catch (error) {
+                if (!['list', 'read'].includes(call.operation) || error.code !== 'development-tool-denied') throw error;
+                current(); const denied = ledger.evidence(binding).at(-1);
+                if (denied.state !== 'denied') throw error;
+                messages.push({ role: 'tool', tool_name: tool.function.name, content: canonicalJSON({ evidenceId: denied.id, state: 'denied', allowed: false,
+                  error: 'source-unavailable-or-denied', instruction: 'Do not retry denied paths. Continue this Issue with permitted source; denied IDs are not success evidence.' }) });
+              }
             }
             if (finished) break;
           }

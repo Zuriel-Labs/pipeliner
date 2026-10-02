@@ -10,6 +10,19 @@ const id = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,95
 const sha = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const text = (value, maximum = 4096) => typeof value === 'string' && value.trim().length > 0 && value.length <= maximum && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(value);
 function candidate(value) { record(value, ['sourceCommit', 'gitTree']); if (!Object.values(value).every(v => typeof v === 'string' && /^[a-f0-9]{40}$/.test(v))) throw new Error('Invalid Development candidate'); }
+export function developmentIntegrationAuthority(captured, state, source) {
+  candidate(source);
+  const step = captured.pipeline.steps.find(step => step.id === state.step);
+  if (state.state !== 'candidate' || step?.kind !== 'pr-integration' || step.routes.success !== 'complete'
+    || source.gitTree !== state.candidate.gitTree) throw new Error('Development integration candidate or captured route changed');
+  if (captured.pipeline.steps.some(step => step.kind === 'pm-qa')) {
+    if (state.qa?.decision !== 'approve' || canonicalJSON(source) !== canonicalJSON(state.qa.showcase.candidate)) throw new Error('Development integration needs current captured PM QA');
+    return { kind: 'pm-qa', hash: state.qa.hash };
+  }
+  if (state.qa || state.qaHistory?.length) throw new Error('Development ungated integration cannot contain PM QA');
+  if (captured.executionProfile?.kind !== 'pipeliner-desktop' || captured.executionProfile.version !== 1) throw new Error('Development ungated integration needs a captured Desktop-compatible profile');
+  return { kind: 'standing-policy', profile: captured.executionProfile, revision: captured.run.policyRevision, hash: captured.run.policyHash, pipelineHash: captured.run.pipelineHash };
+}
 function document(value) {
   record(value, ['title', 'paragraphs']);
   if (!text(value.title, 240) || !Array.isArray(value.paragraphs) || !value.paragraphs.length || value.paragraphs.length > 64 || !value.paragraphs.every(v => text(v, 8192))) throw new Error('Invalid Development document');
@@ -92,7 +105,11 @@ export function openDevelopmentStore(directory) {
   }
   return Object.freeze({
     create(run, settings) {
-      canonicalJSON(run); canonicalJSON(settings); record(settings, ['pipeline', 'source', 'developer', 'skillsHash', 'issueHash', 'checks', 'logBytes']);
+      canonicalJSON(run); canonicalJSON(settings); record(settings, ['pipeline', 'source', 'developer', 'skillsHash', 'issueHash', 'checks', 'logBytes'], ['executionProfile', 'integrationMethod']);
+      if (settings.integrationMethod !== undefined && !['merge', 'squash'].includes(settings.integrationMethod)) throw new Error('Invalid captured integration method');
+      if (settings.executionProfile) { record(settings.executionProfile, ['kind', 'version']);
+        if (settings.executionProfile.kind !== 'pipeliner-desktop' || settings.executionProfile.version !== 1) throw new Error('Invalid Desktop execution profile'); }
+      if (!settings.pipeline.steps.some(step => step.kind === 'pm-qa') && !settings.executionProfile) throw new Error('Ungated Development needs explicit Desktop profile migration');
       validatePipeline(settings.pipeline, true); candidate(settings.source);
       record(settings.developer, ['id', 'connection', 'model']);
       if (settings.developer.id !== run.dev || !['codex', 'ollama'].includes(settings.developer.connection) || !text(settings.developer.model, 160)) throw new Error('Invalid captured Development model');
@@ -218,9 +235,9 @@ export function openDevelopmentStore(directory) {
       record(value, ['candidate', 'source', 'resultHash', 'pullRequest']); candidate(value.candidate); candidate(value.source);
       if (!sha(value.resultHash) || !Number.isSafeInteger(value.pullRequest) || value.pullRequest < 1) throw new Error('Invalid Development integration');
       return transact(db, () => {
-        const { captured, state } = bound(binding), step = captured.pipeline.steps.find(step => step.id === state.step);
-        if (state.state !== 'candidate' || step?.kind !== 'pr-integration' || step.routes.success !== 'complete' || value.candidate.gitTree !== state.candidate.gitTree
-          || !state.qa || state.qa.decision !== 'approve' || canonicalJSON(value.source) !== canonicalJSON(state.qa.showcase.candidate)) throw new Error('Development integration does not match the approved candidate');
+        const { captured, state } = bound(binding);
+        developmentIntegrationAuthority(captured, state, value.source);
+        if (value.candidate.gitTree !== state.candidate.gitTree) throw new Error('Development integration tree changed');
         state.integration = value; write(state); return immutable(value);
       });
     },

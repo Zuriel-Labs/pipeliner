@@ -9,7 +9,7 @@ import { developmentWorkerProgram } from './worker-tools.mjs';
 import { starterSkills, starterHash } from './starter.mjs';
 import { createDevelopmentEngine } from './engine.mjs';
 import { publishDevelopmentCandidate, developmentPublication, candidateJob } from './github.mjs';
-import { buildDevelopmentShowcase, readDevelopmentCandidate, readIntegrationCandidate, readRequiredChecks, verifyMergedCandidate, mergeDevelopmentCandidate, integrationOutcome, integrationObservation } from './integration.mjs';
+import { buildDevelopmentShowcase, readAutonomousBranch, readIntegrationMethod, readDevelopmentCandidate, readIntegrationCandidate, readRequiredChecks, verifyMergedCandidate, mergeDevelopmentCandidate, integrationOutcome, integrationObservation } from './integration.mjs';
 import { containsSecret } from '../connections/commands.mjs';
 import { developmentShapes, developmentCommand } from './commands.mjs';
 import { developmentIssueHash } from './state.mjs';
@@ -41,12 +41,13 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
   function status() {
     if (closed) return { ...lastSnapshot, storageAvailable: false, preview: null };
     sync(); const target = selected ? workspace(selected) : null, available = Boolean(store && policy && ledger);
-    let run = null, execution = null, view = null, development = null, runDeveloper = null, stepLabel = null;
+    let run = null, execution = null, view = null, development = null, runDeveloper = null, stepLabel = null, integrationReady = false;
     if (available) {
       view = policy.worker.read(selected); run = selected ? policy.runtime.status(selected) : null;
       if (run) {
         try { development = ledger.status(run.id); const captured = ledger.captured(run.id); runDeveloper = captured.developer;
           stepLabel = captured.pipeline.steps.find(step => step.id === development.step)?.label ?? development.state;
+          integrationReady = development.state === 'candidate' && captured.pipeline.steps.find(step => step.id === development.step)?.kind === 'pr-integration';
         } catch { /* Reservation may precede its first ledger record. */ }
         execution = supervisor?.status(selected) ?? null;
       }
@@ -57,7 +58,7 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
       permissions: view ? { host: view.values['permissions.ceiling'], repository: view.values['permissions.grants'], required: developmentPermissions } : null,
       skills: starterSkills.map(({ instructions: _instructions, ...skill }) => ({ ...skill, scope: selected, enabled: view?.values['skills.bundledEnabled'].value ?? false })),
       busy: tasks.has(selected) || controls.has(selected), run, runDeveloper, stepLabel, development, execution: execution ? { worker: execution.worker, pending: execution.pending, error: execution.error } : null,
-      preview, publication, qa: development?.qa ?? null, message: messages.get(selected) ?? null, error: errors.get(selected) ?? null,
+      preview, publication, qa: development?.qa ?? null, integrationReady, message: messages.get(selected) ?? null, error: errors.get(selected) ?? null,
       pending: store?.pending('development').filter(effect => effect.binding.repository === selected).map(({ step, state }) => ({ step, state })) ?? [],
       limitations: 'Execution uses the qualified Node/Git restricted worker on this Mac. Other toolchains, host-native execution, installers and other OS evidence remain pending.',
     };
@@ -152,8 +153,14 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     supervisor.control(binding, 'pause'); await supervisor.settle(target.id);
     if (policy.runtime.status(target.id).control !== 'paused') throw new Error('Development worker pause could not be verified.');
     const publication = developmentPublication(store, ledger, run);
-    if (ledger.captured(run.id).pipeline.steps.find(step => step.id === state.step)?.kind === 'pm-qa') ledger.offerQA(binding, buildDevelopmentShowcase({ ledger, run, workspace: target, publication }));
-    messages.set(target.id, 'Candidate PR prepared. Review the current Showcase, then approve this tested version or describe the correction needed. Approval includes the displayed integration and closeout outcome.'); publish();
+    if (ledger.captured(run.id).pipeline.steps.find(step => step.id === state.step)?.kind === 'pm-qa') {
+      ledger.offerQA(binding, buildDevelopmentShowcase({ ledger, run, workspace: target, publication }));
+      messages.set(target.id, 'Candidate PR prepared. Review the current Showcase, then approve this tested version or describe the correction needed. Approval includes the displayed integration and closeout outcome.'); publish();
+    } else {
+      saveIntegrationContext(target, issue);
+      messages.set(target.id, 'Candidate PR prepared. Captured PM policy has no testing gate. Verifying required checks and exact integration before closeout.'); publish();
+      await integrate(target, { issue }, signal);
+    }
   }
   async function start(target, number, signal) {
     if (!supervisor) throw new Error('Development worker unavailable.');
@@ -163,11 +170,20 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     if (!dev || developmentPermissions.some(permission => !grant.capabilities.includes(permission)) || !grant.connections.includes('github') || !grant.connections.includes(dev.connection) || !grant.bundledSkills) throw new Error('Development needs a qualified assigned Dev and both host and repository permissions.');
     const identity = inspectWorkspace(target.path, { repository: target.id, owner: target.slug.split('/')[0], name: target.slug.split('/')[1] });
     if (workspaceData(identity).localKey !== target.localKey) throw new Error('Development local workspace changed.');
-    const snapshot = snapshotWorkspace(identity), profile = executionProfile(snapshot.files, target), held = await acquire(target, signal); let issue;
-    if (profile.release.strategy !== 'none' || view.values['pipelines.development'].value.steps.some(step => !['agent', 'check', 'pm-qa', 'pr-integration'].includes(step.kind)
-      || step.kind === 'pr-integration' && step.routes.success !== 'complete')) { release(held); throw new Error('Development configured delivery or post-integration steps need a qualified path before execution.'); }
+    const snapshot = snapshotWorkspace(identity), profile = executionProfile(snapshot.files, target), held = await acquire(target, signal); let issue, integrationMethod;
     const unchangedPolicy = () => { signal.throwIfAborted(); if (policy.worker.read(target.id).hash !== view.hash) throw new Error('Development configuration changed during preflight.'); };
     try {
+      const pipeline = view.values['pipelines.development'].value, ungated = !pipeline.steps.some(step => step.kind === 'pm-qa');
+      if (profile.release.strategy !== 'none' || profile.release.cycle || pipeline.steps.some(step => !['agent', 'check', 'pm-qa', 'pr-integration'].includes(step.kind)
+        || step.kind === 'pr-integration' && step.routes.success !== 'complete')) throw new Error('Development configured delivery or post-integration steps need a qualified path before execution.');
+      if (pipeline.steps.some(step => step.permissions.some(permission => !grant.capabilities.includes(permission)))) throw new Error('Development captured step permissions are unavailable before execution.');
+      if (view.values['limits.tokens'].value !== null || view.values['limits.costUsd'].value !== null) throw new Error('Development hard provider metric is unavailable before execution.');
+      if (ungated && !['pm-autonomous', 'scheduled-autonomous', 'custom'].includes(view.values['autonomy.scenario'].value)) throw new Error('Development ungated execution needs explicit PM selection of the Desktop workflow.');
+      if (ungated && !dev.noPrompts) throw new Error('Development provider prompt-free execution is unqualified.');
+      const provider = await connections.acquireProvider(dev.connection, dev.model, signal);
+      try { provider.check(); unchangedPolicy(); } finally { provider.close(); }
+      integrationMethod = await readIntegrationMethod(held.app, target); unchangedPolicy();
+      if (ungated) await readAutonomousBranch(held.app, target, profile, snapshot.candidate.sourceCommit);
       const catalog = await api.readCatalog(held.app, held.project, target); issue = catalog.issues.find(value => value.number === number);
       if (!issue || issue.state !== 'OPEN' || !issue.ready || !issue.itemId || ['Priority', 'Impact', 'Effort'].some(role => !issue.metadata[role])
         || catalog.active.some(active => active.number !== number) || !['Backlog', 'In Progress'].includes(issue.status)) throw new Error('Development needs a Ready Issue with complete metadata and no other active Issue.');
@@ -196,6 +212,7 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     unchangedPolicy();
     const reservation = await policy.runtime.reserve(identity, { commandId: randomUUID(), issue: number, pipeline: 'development', policyHash: view.hash }), run = reservation.run;
     ledger.create(run, { pipeline: view.values['pipelines.development'].value, source: snapshot.candidate, developer: { id: dev.id, connection: dev.connection, model: dev.model }, skillsHash: starterHash, issueHash: developmentIssueHash({ number: issue.number, title: issue.title, body: issue.body }),
+      executionProfile: { kind: 'pipeliner-desktop', version: 1 }, integrationMethod,
       checks: profile.quality.commands.map((command, index) => ({ name: 'Repository check ' + (index + 1), command })), logBytes: Math.min(50, view.values['privacy.runLogMiB'].value) * 1024 * 1024 });
     await execute(target, run, snapshot, profile, issue, signal);
   }
@@ -252,9 +269,14 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     current(); const actual = await inspect(); current();
     if (before.state !== 'verified') store.finish(before.id, 'verified', actual); return actual;
   }
+  function saveIntegrationContext(target, issue) {
+    const context = store.issueContext(target.id), integrationIssue = Object.fromEntries(['id', 'number', 'itemId', 'ready', 'metadata'].map(key => [key, issue[key]]));
+    store.saveIssueContext(target.id, { ...context, development: { ...context?.development, integrationIssue } });
+  }
   async function integrate(target, old, signal) {
     let run = policy.runtime.status(target.id);
-    old ??= { issue: store.issueContext(target.id)?.development?.qaIssue };
+    const context = store.issueContext(target.id)?.development;
+    old ??= { issue: context?.integrationIssue ?? context?.qaIssue };
     if (!run || !old.issue) throw new Error('Development integration closeout context unavailable.');
     const identity = inspectWorkspace(target.path, { repository: target.id, owner: target.slug.split('/')[0], name: target.slug.split('/')[1] });
     if (workspaceData(identity).localKey !== target.localKey) throw new Error('Development local workspace changed.');
@@ -333,8 +355,7 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
       if (payload.operation === 'qa-feedback' && remote.pull.merged) throw new Error('Development candidate already merged; feedback needs a new verified execution segment.');
       signal.throwIfAborted();
       if (payload.operation === 'qa-approve') {
-        const context = store.issueContext(target.id), qaIssue = { id: issue.id, number: issue.number, itemId: issue.itemId, ready: issue.ready, metadata: issue.metadata };
-        store.saveIssueContext(target.id, { ...context, development: { ...context?.development, qaIssue } });
+        saveIntegrationContext(target, issue);
       }
       ledger.decideQA(binding, { inputId: randomUUID(), hash: payload.hash, decision: payload.operation === 'qa-approve' ? 'approve' : 'feedback', text: payload.text ?? 'Approved' }); publish();
       if (payload.operation === 'qa-feedback') await fieldEffect(target, held, candidateJob(ledger, run) + '-feedback', issue, 'In Progress', signal);
@@ -378,7 +399,10 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     }
     if (payload.operation === 'start') return operate(target, signal => start(target, payload.number ?? store.issueContext(target.id)?.selected, signal));
     if (['qa-approve', 'qa-feedback'].includes(payload.operation)) return operate(target, signal => pmDecision(target, payload, signal));
-    if (payload.operation === 'resume' && policy.runtime.status(target.id) && ledger.status(policy.runtime.status(target.id).id).qa?.decision === 'approve') return operate(target, signal => integrate(target, null, signal));
+    if (payload.operation === 'resume') {
+      const run = policy.runtime.status(target.id), state = run && ledger.status(run.id), captured = run && ledger.captured(run.id);
+      if (state?.state === 'candidate' && captured.pipeline.steps.find(step => step.id === state.step)?.kind === 'pr-integration') return operate(target, signal => integrate(target, null, signal));
+    }
     return control(target, payload.operation);
   }
   return Object.freeze({ status, dispatch, observe, inspectIntegration, sync() { sync(); publish(); }, async idle() { await Promise.allSettled([...tasks.values()].map(task => task.done)); await Promise.allSettled([...controls.values()]); },

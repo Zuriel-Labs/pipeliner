@@ -1,21 +1,44 @@
 import { createHash } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { canonicalJSON } from '../core/settings.mjs';
 import { githubRequest } from '../repositories/github.mjs';
+import { developmentIntegrationAuthority } from './state.mjs';
 
 export const integrationHash = value => createHash('sha256').update(canonicalJSON(value)).digest('hex');
 const sha = value => typeof value === 'string' && /^[a-f0-9]{40}$/.test(value);
 const positive = value => Number.isSafeInteger(value) && value > 0;
 const currentTree = (row, candidate) => canonicalJSON(row.candidate) === canonicalJSON(candidate);
 const prefix = workspace => '/repos/' + workspace.slug;
+function pending(name) { const error = new Error('Development integration evidence is pending: ' + name); error.code = 'integration-pending'; return error; }
 
-export function buildDevelopmentShowcase({ ledger, run, workspace, publication }) {
+export async function readIntegrationMethod(lease, workspace, expected) {
+  const repository = await githubRequest(lease, 'GET', prefix(workspace));
+  if (repository.id !== workspace.numericId || repository.node_id !== workspace.repositoryId
+    || typeof repository.allow_merge_commit !== 'boolean' || typeof repository.allow_squash_merge !== 'boolean') throw new Error('Development repository merge-method capability is unavailable.');
+  const allowed = { merge: repository.allow_merge_commit, squash: repository.allow_squash_merge };
+  if (expected !== undefined) { if (!Object.hasOwn(allowed, expected) || !allowed[expected]) throw new Error('Development captured merge method or repository control changed.'); return expected; }
+  const method = ['merge', 'squash'].find(method => allowed[method]);
+  if (!method) throw new Error('Development repository has no qualified integration method before execution.');
+  return method;
+}
+
+export async function readAutonomousBranch(lease, workspace, profile, sourceCommit) {
+  const name = profile.repository.defaultBranch, branch = await githubRequest(lease, 'GET', prefix(workspace) + '/branches/' + encodeURIComponent(name));
+  if (branch.name !== name || branch.commit?.sha !== sourceCommit || branch.protected !== false) throw new Error('Development protected or changed integration branch needs a qualified autonomous path before execution.');
+}
+
+export function verifyDevelopmentEvidence({ ledger, run, publication }) {
   const state = ledger.status(run.id), outputs = ledger.outputs(run.id).filter(row => currentTree(row, state.candidate) && row.output.outcome === 'success');
   const evidence = ledger.evidence({ runId: run.id, epoch: run.epoch }), results = evidence.filter(row => row.kind === 'tests' && row.state === 'verified' && currentTree(row.result, state.candidate));
   const captured = ledger.captured(run.id), latest = outputs.filter(row => row.output.documents.some(document => document.kind === 'review')).at(-1)?.output;
   if (!latest || latest.findings.some(finding => ['high', 'critical'].includes(finding.severity))
     || !evidence.some(row => row.kind === 'review' && row.state === 'verified' && currentTree(row.result, state.candidate))
     || publication.candidate.gitTree !== state.candidate.gitTree || !captured.checks.every(check => results.some(row => row.result.result.name === check.name
-    && row.result.result.command === check.command && row.result.result.exitCode === 0 && !row.result.result.truncated && !row.result.result.timedOut))) throw new Error('Development Showcase requires actual current checks');
+    && row.result.result.command === check.command && row.result.result.exitCode === 0 && !row.result.result.truncated && !row.result.result.timedOut))) throw new Error('Development integration requires actual current checks and review');
+  return { captured, latest };
+}
+export function buildDevelopmentShowcase({ ledger, run, workspace, publication }) {
+  const { captured, latest } = verifyDevelopmentEvidence({ ledger, run, publication });
   const findings = (latest.findings ?? []).map(finding => ({ problem: finding.text, remediation: 'Review this reported ' + finding.severity + ' finding before approval.', evidence: 'Current candidate review.' }));
   return { scope: 'issue', issue: run.issue, summary: latest.summary, findings,
     testResults: captured.checks.map(check => check.name + ': passed actual ' + check.command + ' on this tree.'),
@@ -59,13 +82,20 @@ export async function readRequiredChecks(lease, workspace, head, required) {
     const split = name.lastIndexOf(' / '), workflow = split >= 0 ? name.slice(0, split) : null, job = split >= 0 ? name.slice(split + 3) : name;
     const direct = statuses.filter(status => status.context === name);
     let matches = checks.filter(check => check.name === job);
-    if (!workflow && direct.length) { if (direct.length !== 1 || direct[0].state !== 'success' || matches.length) throw new Error('Development required check failed, pending or ambiguous: ' + name); return { name, kind: 'status', id: direct[0].id, head, state: 'success' }; }
+    if (!workflow && direct.length) {
+      if (direct.length !== 1 || matches.length) throw new Error('Development required check is ambiguous: ' + name);
+      if (direct[0].state === 'pending') throw pending(name);
+      if (direct[0].state !== 'success') throw new Error('Development required check failed: ' + name);
+      return { name, kind: 'status', id: direct[0].id, head, state: 'success' };
+    }
     if (workflow) {
       const runs = workflows.filter(run => run.name === workflow).sort((a, b) => b.id - a.id), latest = runs[0];
-      if (!latest || latest.status !== 'completed' || latest.conclusion !== 'success') throw new Error('Development required workflow check missing, failed or pending: ' + name);
+      if (!latest || latest.status !== 'completed') throw pending(name);
+      if (latest.conclusion !== 'success') throw new Error('Development required workflow check failed: ' + name);
       matches = matches.filter(check => check.check_suite.app?.slug === 'github-actions' && check.check_suite.id === latest.check_suite_id);
     }
-    if (matches.length !== 1 || matches[0].status !== 'completed' || matches[0].conclusion !== 'success') throw new Error('Development required check missing, failed, ambiguous or pending: ' + name);
+    if (!matches.length || matches.length === 1 && matches[0].status !== 'completed') throw pending(name);
+    if (matches.length !== 1 || matches[0].conclusion !== 'success') throw new Error('Development required check failed or ambiguous: ' + name);
     return { name, kind: 'check-run', id: matches[0].id, head, state: 'success' };
   });
 }
@@ -89,8 +119,10 @@ export async function readIntegrationCandidate(input) {
   const checks = await readRequiredChecks(lease, workspace, publication.head, profile.quality.requiredChecks);
   if (pull.merged === true) return { candidate: publication.candidate, checks, merged: true, pull };
   const base = await githubRequest(lease, 'GET', root + '/git/ref/heads/' + encodeURIComponent(profile.repository.defaultBranch));
-  if (pull.state !== 'open' || pull.merged !== false || pull.mergeable !== true || ['blocked', 'dirty', 'unknown'].includes(pull.mergeable_state)
+  if (pull.state !== 'open' || pull.merged !== false || ['blocked', 'dirty'].includes(pull.mergeable_state)
     || pull.base.sha !== publication.base || base.ref !== 'refs/heads/' + profile.repository.defaultBranch || base.object?.type !== 'commit' || base.object.sha !== publication.base) throw new Error('Development integration candidate or external control changed');
+  if (pull.mergeable === null || pull.mergeable_state === 'unknown') throw pending('GitHub mergeability');
+  if (pull.mergeable !== true) throw new Error('Development integration candidate or external control changed');
   return { candidate: publication.candidate, checks, merged: false, pull };
 }
 
@@ -118,19 +150,33 @@ export async function mergeDevelopmentCandidate({ store, runtime, ledger, lease,
   const binding = { runId: run.id, epoch: run.epoch }, state = ledger.status(run.id), captured = ledger.captured(run.id);
   const current = () => { lease.check(); authority(); };
   current();
-  if (!state.qa || state.qa.decision !== 'approve' || canonicalJSON(state.qa.showcase.candidate) !== canonicalJSON(publication.candidate)
-    || captured.pipeline.steps.find(step => step.id === state.step)?.kind !== 'pr-integration'
-    || captured.pipeline.steps.find(step => step.id === state.step).routes.success !== 'complete' || profile.release?.strategy !== 'none') throw new Error('Development approved source-only integration unavailable');
-  const inspected = await readIntegrationCandidate({ lease, workspace, publication, profile, capturedSource: captured.source }); current();
-  const request = { sha: publication.head, merge_method: 'merge' }, expectedHash = integrationOutcome(publication);
+  if (profile.release?.strategy !== 'none') throw new Error('Development source-only integration unavailable');
+  const approval = developmentIntegrationAuthority(captured, state, publication.candidate);
+  verifyDevelopmentEvidence({ ledger, run, publication });
+  let inspected;
+  for (;;) {
+    current();
+    try { inspected = await readIntegrationCandidate({ lease, workspace, publication, profile, capturedSource: captured.source }); break; }
+    catch (error) {
+      if (error.code !== 'integration-pending') throw error;
+      const remaining = run.createdAt + run.limits?.['limits.agentSeconds'] * 1000 - Date.now();
+      if (!Number.isFinite(remaining) || remaining <= 0) throw new Error('Development captured deadline exhausted while waiting for integration evidence.');
+      await delay(Math.min(2000, remaining), undefined, { signal: lease.signal });
+    }
+  }
+  current();
+  const method = captured.integrationMethod ?? 'merge';
+  if (!inspected.merged) { await readIntegrationMethod(lease, workspace, method); current(); }
+  if (approval.kind === 'standing-policy' && !inspected.merged) { await readAutonomousBranch(lease, workspace, profile, publication.base); current(); }
+  const request = { sha: publication.head, merge_method: method }, expectedHash = integrationOutcome(publication);
   const action = runtime.intent(binding, { commandId: 'integrate-' + publication.head, step: state.step, operation: 'github.pr.merge', candidate: publication.candidate,
-    requestHash: integrationHash(request), preconditionsHash: integrationHash({ base: publication.base, checks: inspected.checks, qaHash: state.qa.hash }), expectedHash });
+    requestHash: integrationHash(request), preconditionsHash: integrationHash({ base: publication.base, checks: inspected.checks, authority: approval }), expectedHash });
   const intent = store.prepare(run.id + '-integration', 'merge-' + publication.head, { kind: 'development', runId: run.id, repository: run.repository,
     issue: run.issue, candidate: publication.candidate, publication, actionId: action.id, expectedHash });
   if (intent.state === 'denied') throw new Error('Development merge was denied; explicit recovery is required');
   if (intent.state === 'prepared') {
     if (inspected.merged) {
-      // An external merge still passes the same checks, QA and exact integration readback.
+      // An external merge still passes captured authority, checks and exact integration readback.
       if (!runtime.dispatch(binding, action.id).dispatched || !store.dispatch(intent.id)) throw new Error('Development external integration record changed');
     } else {
       current(); if (!runtime.dispatch(binding, action.id).dispatched || !store.dispatch(intent.id)) throw new Error('Development merge dispatch changed');

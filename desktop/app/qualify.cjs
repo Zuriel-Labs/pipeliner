@@ -380,6 +380,10 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
         assert.equal(await js('document.documentElement.scrollWidth<=innerWidth'), true); window.webContents.setZoomFactor(1); window.setSize(1180, 840);
         await js("document.getElementById('chat-nav').click();window.scrollTo(0,document.getElementById('chat-development-run').offsetTop-90)");
         writeFileSync(path.join(directory, 'qa-capture.png'), (await window.webContents.capturePage()).toPNG(), { flag: 'wx', mode: 0o600 });
+        window.webContents.send('development:status', { ...display, revision: display.revision + 1, qa: null, integrationReady: true, pending: [{ step: 'merge', state: 'uncertain' }] });
+        await wait(() => js("!document.getElementById('chat-development-qa-approve')"));
+        assert.equal(await js("document.getElementById('chat-development-resume').disabled"), false);
+        assert.equal(await js("document.getElementById('chat-development-run').textContent.includes('under captured authority')"), true);
         // Restore the real manager after the intentionally forged/stale display fixture.
         for (let i = 0; i < 110; i++) development.sync(); await wait(() => js("!document.getElementById('chat-development-qa-approve')"));
       });

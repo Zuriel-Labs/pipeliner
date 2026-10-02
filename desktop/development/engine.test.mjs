@@ -33,7 +33,7 @@ function fixture() {
     if (request.operation === 'run') return { exitCode: Buffer.from(files[0].content, 'base64').toString().includes('= 2') ? 0 : 1, output: 'Fixture check', truncated: false, timedOut: false };
     throw new Error('tool denied');
   };
-  const supervisor = { tool: async (...args) => ({ ok: true, result: await perform(...args) }) };
+  const supervisor = { tool: async (...args) => args[1].operation === 'read' && args[1].path === 'missing.mjs' ? { ok: false, error: 'tool-denied-or-incomplete' } : ({ ok: true, result: await perform(...args) }) };
   const policy = { runtime: { status: () => run }, worker: { authority: () => ({ dev: run.dev, connections: ['ollama'], capabilities: permissions, bundledSkills: true }) } };
   const connections = { acquireProvider: async (id, model) => { assert.equal(id, 'ollama'); assert.equal(model, 'test-model'); return lease; } };
   return { ledger, source, binding, run, permissions, operations, lease, set next(value) { next = value; }, get turns() { return turns; },
@@ -115,5 +115,45 @@ test('invented finish evidence produces a bounded denial and lets the model corr
     };
     await assert.rejects(f.engine.run(f.binding, f.context), /fixture-stop/);
     assert.equal(f.ledger.outputs(f.binding.runId).length, 0); assert.equal(f.operations.includes('write'), false);
+  } finally { f.cleanup(); }
+});
+
+test('completed read denials stay denied and allow permitted recovery without authority expansion', async () => {
+  const f = fixture();
+  try {
+    f.next = async (input, turn) => {
+      if (turn === 1) return call(f, 'read', { path: '/host-canary' });
+      if (turn === 2) { assert.equal(JSON.parse(input.messages.at(-1).content).error, 'protected-tool-path'); return call(f, 'read', { path: 'missing.mjs' }); }
+      if (turn === 3) { const denied = JSON.parse(input.messages.at(-1).content); assert.equal(denied.state, 'denied'); assert.equal(denied.allowed, false); return call(f, 'list', {}); }
+      if (turn === 4) return call(f, 'finish', output([latestEvidence(input)], documents));
+      throw Error('fixture-stop-after-recovered-research');
+    };
+    await assert.rejects(f.engine.run(f.binding, f.context), /fixture-stop/);
+    assert.equal(f.ledger.outputs(f.binding.runId)[0].step, 'research');
+    assert.equal(f.ledger.evidence(f.binding).filter(row => row.kind === 'source' && row.state === 'denied').length, 2);
+    assert.equal(f.operations.includes('write'), false); assert.equal(f.turns, 5);
+  } finally { f.cleanup(); }
+});
+
+test('invalid tool binding and payload receive the exact contract and recover inside the same captured authority', async () => {
+  const f = fixture();
+  try {
+    f.next = async (input, turn) => {
+      if (turn === 1) { const value = call(f, 'list', {}); delete value.tool_calls[0].function.arguments.runId; return value; }
+      if (turn === 2) { const denied = JSON.parse(input.messages.at(-1).content); assert.equal(denied.error, 'tool-argument-shape-denied'); return call(f, 'list', {}, 99); }
+      if (turn === 3) { const denied = JSON.parse(input.messages.at(-1).content);
+        assert.equal(denied.error, 'tool-run-or-epoch-denied'); assert.deepEqual([denied.contract.runId, denied.contract.epoch], [f.binding.runId, f.binding.epoch]);
+        return call(f, 'list', { permissions: ['host.launch'] }); }
+      if (turn === 4) { const denied = JSON.parse(input.messages.at(-1).content);
+        assert.equal(denied.error, 'tool-payload-shape-denied'); assert.deepEqual(denied.contract.payloads.list, []); return call(f, 'list', {}); }
+      if (turn === 5) return call(f, 'finish', output([latestEvidence(input)], [...documents, documents[0]]));
+      if (turn === 6) { const denied = JSON.parse(input.messages.at(-1).content); assert.equal(denied.error, 'duplicate-development-document');
+        assert.deepEqual(denied.contract.output.uniqueDocumentKinds, ['research', 'specification', 'design', 'review']); return call(f, 'finish', output(denied.verifiedEvidence, documents)); }
+      throw Error('fixture-stop-after-contract-recovery');
+    };
+    await assert.rejects(f.engine.run(f.binding, f.context), /fixture-stop/);
+    assert.equal(f.ledger.outputs(f.binding.runId)[0].step, 'research'); assert.equal(f.operations.includes('write'), false);
+    const denied = f.ledger.evidence(f.binding).filter(row => row.kind === 'source' && row.state === 'denied');
+    assert.equal(denied.length, 4); assert.equal(denied[0].result.result.contract.runId, f.binding.runId);
   } finally { f.cleanup(); }
 });

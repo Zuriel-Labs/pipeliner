@@ -91,6 +91,7 @@ export async function initPipelines({ el, message }) {
         card.append(el('p', after.label + ': ' + readable(before.value) + ' → ' + readable(after.value) + ' · ' + after.source));
       }
     }
+    if (proposal.after['pipelines.development']?.value.steps.every(step => step.kind !== 'pm-qa')) card.append(el('p', 'This selects the PM-controlled Desktop workflow with no testing approval gate for new runs. Existing repository profile files stay unchanged; other framework agents keep their configured testing requirements. Required checks and external controls still apply.', 'protected-state'));
     card.append(button('Apply this pipeline', 'apply', { hash: proposal.hash }, 'pipeline-apply'), button('Discard draft', 'discard')); return card;
   }
   function render(snapshot) {

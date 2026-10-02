@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { canonicalJSON, developmentTemplate } from '../core/settings.mjs';
 import { openDevelopmentStore, documentHTML } from './state.mjs';
+import { presetChanges } from '../pipelines/model.mjs';
 
 const hash = value => createHash('sha256').update(canonicalJSON(value)).digest('hex');
 const source = { sourceCommit: 'a'.repeat(40), gitTree: 'b'.repeat(40) };
@@ -15,7 +16,7 @@ function fixture(edit = () => {}) {
   edit(pipeline);
   const run = { id: 'run-one', repository: 'repo-one', issue: 1, dev: 'dev-one', epoch: 1, policyRevision: 1,
     policyHash: 'c'.repeat(64), pipelineHash: hash(pipeline), limits: { 'limits.stepTurns': 3, 'limits.issueTurns': 5, 'limits.agentSeconds': 1800 } };
-  const captured = { pipeline, source, developer: { id: run.dev, connection: 'ollama', model: 'test-model' }, skillsHash: 'd'.repeat(64), issueHash: 'e'.repeat(64), checks: [{ name: 'Repository checks', command: 'node --test' }], logBytes: 1048576 };
+  const captured = { pipeline, source, executionProfile: { kind: 'pipeliner-desktop', version: 1 }, developer: { id: run.dev, connection: 'ollama', model: 'test-model' }, skillsHash: 'd'.repeat(64), issueHash: 'e'.repeat(64), checks: [{ name: 'Repository checks', command: 'node --test' }], logBytes: 1048576 };
   let store = openDevelopmentStore(directory); store.create(run, captured);
   return { run, captured, directory, binding: { runId: run.id, epoch: 1 }, get store() { return store; }, reopen() { store.close(); store = openDevelopmentStore(directory); }, cleanup() { store.close(); rmSync(directory, { recursive: true }); } };
 }
@@ -32,6 +33,36 @@ function qaCandidate(f) {
     target: 'Synthetic unit source', prerequisites: [], steps: [{ action: 'Inspect the source.', expected: 'Scoped value change.' }], regressions: ['Original source preserved.'],
     limitations: ['Synthetic unit test; no Human QA.'], nextOutcome: 'Integrate the exact source and close the Issue.', approvalPhrase: 'Approved', candidate: source };
 }
+
+test('captured ungated policy integrates without creating QA; candidate drift and gated bypass fail', () => {
+  const f = fixture(pipeline => Object.assign(pipeline, presetChanges('pm-autonomous')['pipelines.development']));
+  const proof = { candidate: { ...source, sourceCommit: 'f'.repeat(40) }, source, resultHash: 'f'.repeat(64), pullRequest: 3 };
+  try {
+    qaCandidate(f); assert.equal(f.store.status(f.run.id).step, 'integrate');
+    f.store.recordIntegration(f.binding, proof); f.reopen(); f.store.complete(f.binding, proof.resultHash);
+    assert.equal(f.store.status(f.run.id).state, 'complete'); assert.equal(f.store.status(f.run.id).qa, undefined);
+    assert.equal(f.store.status(f.run.id).qaHistory, undefined);
+  } finally { f.cleanup(); }
+  const gated = fixture();
+  try { qaCandidate(gated); assert.throws(() => gated.store.recordIntegration(gated.binding, proof), /integration|candidate/i); }
+  finally { gated.cleanup(); }
+  const drift = fixture(pipeline => Object.assign(pipeline, presetChanges('pm-autonomous')['pipelines.development']));
+  try { qaCandidate(drift); drift.store.setCandidate(drift.binding, { ...source, gitTree: 'e'.repeat(40) });
+    assert.throws(() => drift.store.recordIntegration(drift.binding, proof), /integration|candidate/i); }
+  finally { drift.cleanup(); }
+});
+
+test('legacy gated captures remain readable; ungated captures require the exact Desktop migration version', () => {
+  const f = fixture(), { executionProfile: _profile, ...legacy } = f.captured;
+  try {
+    const run = { ...f.run, id: 'legacy-run' }; f.store.create(run, legacy); f.reopen();
+    assert.equal(f.store.captured(run.id).executionProfile, undefined);
+    const pipeline = presetChanges('pm-autonomous')['pipelines.development'], autonomous = { ...legacy, pipeline };
+    const next = { ...f.run, id: 'autonomous-run', pipelineHash: hash(pipeline) };
+    assert.throws(() => f.store.create(next, autonomous), /explicit Desktop profile migration/);
+    assert.throws(() => f.store.create(next, { ...autonomous, executionProfile: { kind: 'pipeliner-desktop', version: 2 } }), /Invalid Desktop execution profile/);
+  } finally { f.cleanup(); }
+});
 
 test('PM QA decisions bind to the current Showcase; feedback preserves counters and invalidates approval', () => {
   const f = fixture();

@@ -15,13 +15,13 @@ export async function initDevelopment({ el, message }) {
     card.append(el('h2', run ? 'Issue #' + run.issue + ' · Development' : 'Development'), el('p', state.repositoryLabel ?? 'Select a repository first.', 'small'));
     if (run) {
       card.append(el('p', run.control === 'paused' ? 'Paused · work preserved' : run.control === 'running' ? 'Running' : run.control, 'protected-state'),
-        el('p', development?.state === 'candidate' ? 'Candidate ready for the configured PM Testing and integration step.' : development ? state.stepLabel + ' · ' + development.state : 'Preparing the captured run.'),
+        el('p', development?.state === 'candidate' ? state.integrationReady ? 'Verifying exact candidate integration and closeout under captured authority.' : 'Candidate ready for the configured PM Testing step.' : development ? state.stepLabel + ' · ' + development.state : 'Preparing the captured run.'),
         el('p', devLabel(state.runDeveloper) + ' · Worker: ' + (state.execution?.worker ?? 'not started'), 'small'));
       const controls = el('div', undefined, 'connection-actions');
       for (const [operation, label] of [['pause', 'Pause'], ['resume', 'Resume'], ['stop', 'Stop']]) {
         const node = button(label, operation, {}, prefix + '-' + operation);
         // Local controls remain available while a provider request is running.
-        node.disabled = pending || operation === 'resume' && (!['paused', 'stopped', 'recovery-required'].includes(run.control) || state.pending.length > 0 && state.qa?.decision !== 'approve');
+        node.disabled = pending || operation === 'resume' && (!['paused', 'stopped', 'recovery-required'].includes(run.control) || state.pending.length > 0 && !state.integrationReady && state.qa?.decision !== 'approve');
         controls.append(node);
       } card.append(controls);
       if (development) card.append(el('p', 'Model turns: ' + development.turns + '. ' + (development.usage.unavailable ? 'Some token usage is unavailable.' : 'Reported tokens: ' + (development.usage.input + development.usage.output) + '.'), 'small'));

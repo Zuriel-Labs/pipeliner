@@ -16,7 +16,8 @@ test('scoped publication reconciles a lost branch and PR reply without replay; w
   const run = { id: 'run-one', repository: workspace.id, issue: 7, epoch: 1, createdAt: 1700000000000 };
   const candidate = { sourceCommit: 'a'.repeat(40), gitTree: sourceTree(files) }, captured = { source: { sourceCommit: candidate.sourceCommit, gitTree: sourceTree(source) }, run,
     checks: [{ name: 'Fixture check', command: 'node --test' }] };
-  const ledger = { status: () => ({ state: 'candidate', candidate }), captured: () => captured,
+  const history = [];
+  const ledger = { status: () => ({ state: 'candidate', candidate, qaHistory: history }), captured: () => captured,
     outputs: () => [{ candidate, output: { outcome: 'success', documents: ['research', 'specification', 'design', 'review'].map(kind => ({ kind, title: kind, paragraphs: ['Fixture evidence.'] })), findings: [] } }],
     evidence: () => [{ id: 'check', kind: 'tests', state: 'verified', result: { candidate, result: { name: 'Fixture check', command: 'node --test', exitCode: 0 } } },
       { id: 'review', kind: 'review', state: 'verified', result: { candidate, result: {} } }] };
@@ -40,12 +41,16 @@ test('scoped publication reconciles a lost branch and PR reply without replay; w
     }
     if (path.includes('/git/commits/')) return Response.json({ ...commit, message: commit.message.replace(/\n$/, '') });
     if (path.endsWith('/git/refs') && post) { branchWrites++; branch = { ref: body.ref, object: { type: 'commit', sha: body.sha } }; throw new Error('lost synthetic branch reply'); }
+    if (path.includes('/git/refs/heads/') && request.method === 'PATCH') {
+      assert.equal(body.force, false); branchWrites++; branch.object.sha = body.sha; pull.head.sha = body.sha; throw new Error('lost synthetic updated branch reply');
+    }
     if (path.includes('/git/ref/heads/')) return branch ? Response.json(branch) : Response.json({}, { status: 404 });
     if (path.endsWith('/pulls') && !post) return Response.json(pull ? [pull] : []);
     if (path.endsWith('/pulls') && post) {
       pullWrites++; pull = { number: 3, state: 'open', title: body.title, body: body.body, html_url: 'https://github.com/fixture/repo/pull/3',
         head: { ref: body.head, sha: commit.sha, repo: { id: 1, node_id: 'R1' } }, base: { ref: body.base, sha: candidate.sourceCommit, repo: { id: 1, node_id: 'R1' } } }; throw new Error('lost synthetic PR reply');
     }
+    if (path.endsWith('/pulls/3') && request.method === 'PATCH') { pullWrites++; Object.assign(pull, body); throw new Error('lost synthetic updated PR reply'); }
     if (path.endsWith('/pulls/3')) return Response.json({ ...pull, head: { ...pull.head, sha: wrong ? 'f'.repeat(40) : pull.head.sha } });
     throw new Error('unexpected synthetic request');
   };
@@ -57,7 +62,12 @@ test('scoped publication reconciles a lost branch and PR reply without replay; w
     assert.equal(result.pullRequest.number, 3); assert.equal(result.candidate.gitTree, candidate.gitTree); assert.equal(result.candidate.sourceCommit, commit.sha);
     assert.equal(branchWrites, 1); assert.equal(pullWrites, 1); assert.ok(pull.body.includes('Refs #7')); assert.ok(pull.body.includes('color-scheme'));
     await publishDevelopmentCandidate(input); assert.equal(branchWrites, 1); assert.equal(pullWrites, 1);
+    const formerHead = commit.sha; history.push({ decision: 'feedback' }); files[0].content = Buffer.from('export const value = 3;\n').toString('base64'); candidate.gitTree = sourceTree(files);
+    const updated = await publishDevelopmentCandidate(input);
+    assert.equal(updated.pullRequest.number, result.pullRequest.number); assert.equal(updated.pullRequest.branch, result.pullRequest.branch);
+    assert.equal(commit.parents[0].sha, formerHead); assert.equal(branchWrites, 2); assert.equal(pullWrites, 2);
+    await publishDevelopmentCandidate(input); assert.equal(branchWrites, 2); assert.equal(pullWrites, 2);
     wrong = true; await assert.rejects(publishDevelopmentCandidate(input), /readback|candidate/);
-    assert.equal(branchWrites, 1); assert.equal(pullWrites, 1); assert.equal(store.effects(run.id).every(effect => effect.state === 'verified'), true);
+    assert.equal(branchWrites, 2); assert.equal(pullWrites, 2); assert.equal(store.effects(run.id).every(effect => effect.state === 'verified'), true);
   } finally { store.close(); rmSync(root, { recursive: true }); }
 });

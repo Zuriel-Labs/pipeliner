@@ -76,7 +76,9 @@ app.whenReady().then(async () => {
   pipelines = makePipelines(1);
   const publishDevelopment = snapshot => { if (window && !window.isDestroyed()) window.webContents.send('development:status', snapshot); };
   const makeDevelopment = initialRevision => createDevelopmentManager({ store: workspaceStore, policy, ledger: developmentStore, supervisor, initialRevision,
-    connections: { developers: () => manager.developers(), status: () => manager.status(), acquire: (...args) => manager.acquire(...args), acquireProvider: (...args) => manager.acquireProvider(...args) }, onChange: publishDevelopment });
+    connections: { developers: () => manager.developers(), status: () => manager.status(), acquire: (...args) => manager.acquire(...args), acquireProvider: (...args) => manager.acquireProvider(...args) }, onChange: publishDevelopment,
+    openCandidate: value => shell.openExternal(value),
+    ...(qualifying ? { api: require('./qualify.cjs').issueApi } : {}) });
   development = makeDevelopment(1);
   protocol.handle('pipeliner', request => {
     const name = request.method === 'GET' ? asset(request.url) : null;
@@ -120,7 +122,8 @@ app.whenReady().then(async () => {
       maxConcurrency: 1, background: false, connections: manager.status().connections.map(connection => ({ id: connection.id, provider: connection.id.startsWith('github') ? 'github' : connection.id,
         repositories: workspaceStore.workspaces().filter(workspace => !connection.id.startsWith('github') || connection.repositories.some(repo => repo.id === workspace.repositoryId)).map(workspace => workspace.id),
         healthy: ['connected', 'limited'].includes(connection.health) })), developers: manager.developers(), extensions: [] }),
-      inspectors: { repository: input => development.observe(input), worker: binding => supervisor.inspectWorker(binding), effect: action => supervisor.inspectEffect(action) } });
+      inspectors: { repository: input => development.observe(input), worker: binding => supervisor.inspectWorker(binding),
+        effect: action => action.operation === 'github.pr.merge' ? development.inspectIntegration(action) : supervisor.inspectEffect(action) } });
     const { openDevelopmentStore } = await moduleAt('../development/state.mjs');
     const { openExecutionSupervisor } = await moduleAt('../core/execution.mjs');
     developmentStore = openDevelopmentStore(directory);

@@ -25,7 +25,7 @@ try {
     const line = report.split('\n').find(value => value.startsWith('{"desktopQualification"'));
     if (!line) throw new Error('native-report-missing');
     const result = JSON.parse(line); result.launcher = { pid: child.pid, exitCode: code, helperCompiledLocally: true, rawLogsSuppressed: true };
-    for (const [available, file, suffix, key] of [['captureAvailable', 'window-capture.png', '', 'capturePath'], ['nativeCaptureAvailable', 'secure-field.png', '-native', 'nativeCapturePath']]) {
+    for (const [available, file, suffix, key] of [['captureAvailable', 'window-capture.png', '', 'capturePath'], ['nativeCaptureAvailable', 'secure-field.png', '-native', 'nativeCapturePath'], ['qaCaptureAvailable', 'qa-capture.png', '-qa', 'qaCapturePath']]) {
       if (!process.argv.includes('--retain-owned-capture') || !result[available]) continue;
       const source = join(temporary, file), info = await lstat(source);
       if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.uid !== process.getuid() || info.size > 10 * 1024 * 1024) throw new Error('capture-ownership-invalid');

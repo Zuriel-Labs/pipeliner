@@ -255,6 +255,19 @@ export function openExecutionSupervisor(directory, { store }) {
       return immutable({ received: true, verified: false });
     },
     async settle(repository) { const run = store.runtime.status(repository); if (run) await inFlight.get(run.id); return this.status(repository); },
+    async cleanupRun(binding) {
+      const run = current(binding);
+      if (!['paused', 'stopped'].includes(run.control) || inFlight.has(run.id)) throw new Error('Stopped owned execution required before cleanup');
+      const rows = db.prepare('SELECT run_id,epoch FROM workers WHERE run_id=? ORDER BY epoch').all(run.id).map(value => rowFor({ runId: value.run_id, epoch: value.epoch }));
+      if (!rows.length) return { workspaceRemoved: true, containersRemoved: true, noResourcesCreated: true };
+      await environment.prepare();
+      for (const row of rows) await termination({ runId: row.run_id, epoch: row.epoch });
+      for (const row of [...new Map(rows.map(row => [row.data.manifest.workspace, row])).values()]) await environment.removeWorkspace(row.data.manifest);
+      const otherRuns = db.prepare('SELECT DISTINCT run_id,repository FROM workers WHERE run_id!=?').all(run.id)
+        .filter(row => store.runtime.status(row.repository)?.id === row.run_id);
+      if (!otherRuns.length) await environment.stop();
+      return { workspaceRemoved: true, containersRemoved: true, sharedRuntimeRetained: true, sharedRuntimeStopped: !otherRuns.length };
+    },
     async pauseForeground() {
       requireOpen();
       foregroundPausing = true;

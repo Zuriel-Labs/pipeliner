@@ -4,7 +4,7 @@ import { join, dirname } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { canonicalJSON, record } from './settings.mjs';
-import { workerToolProgram } from '../development/worker-tools.mjs';
+import { workerToolProgram, developmentWorkerProgram } from '../development/worker-tools.mjs';
 import { checkedFiles } from '../development/source.mjs';
 
 export const workerDisk = { url: 'https://cloud-images.ubuntu.com/releases/resolute/release-20260720/ubuntu-26.04-server-cloudimg-arm64.img', digest: 'sha256:7bcf159e29ad0000bfed9c57875908c39268f5ed1257f4958fa6a9f5f60edd54' };
@@ -238,6 +238,14 @@ export function openWorkerEnvironment(directory) {
     async remove(manifest, id) {
       const observation = await this.terminate(manifest, id);
       if (observation.id) { await checked(['nerdctl', 'rm', observation.id]); if ((await inspect(manifest)).state !== 'absent') throw new Error('Owned container cleanup not verified'); }
+    },
+    async removeWorkspace(manifest) {
+      restrictedWorkerArgs(manifest, developmentWorkerProgram);
+      await verifyEnvironment();
+      if ((await inspect(manifest)).state !== 'absent') throw new Error('Owned container must be removed before workspace cleanup');
+      const result = await checked(['python3', '-c', 'import os,sys,stat,shutil; p,r=sys.argv[1:]; m=p+".owner"; b=os.path.dirname(p); assert os.path.realpath(b)==b and os.stat(b).st_uid==os.getuid();\nif os.path.lexists(p) or os.path.lexists(m):\n t=os.lstat(m); assert stat.S_ISREG(t.st_mode) and t.st_uid==os.getuid() and t.st_nlink==1; f=os.open(m,os.O_RDONLY|os.O_NOFOLLOW); assert os.read(f,1024).decode()==r; os.close(f)\n if os.path.lexists(p):\n  s=os.lstat(p); assert stat.S_ISDIR(s.st_mode) and s.st_uid==os.getuid(); shutil.rmtree(p)\n os.unlink(m)\nassert not os.path.lexists(p) and not os.path.lexists(m); print("removed")', manifest.workspace, manifest.runId]);
+      if (result !== 'removed') throw new Error('Owned workspace cleanup not verified');
+      return { workspaceRemoved: true };
     },
     async stop() {
       const instance = await inventory();

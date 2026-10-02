@@ -213,6 +213,17 @@ try {
   await assert.rejects(supervisor.tool(former, { operation: 'list' }), /epoch/);
   const exported = await tool({ operation: 'export' }); assert.notEqual(sourceTree(exported.files), snapshot.candidate.gitTree); assert.equal(readFileSync(join(checkout, 'app.mjs'), 'utf8'), 'export const value = 1;\n');
   check('fresh-epoch-retains-candidate-and-preserves-local-source');
+  supervisor.control(binding, 'stop'); await supervisor.settle('R_development');
+  // Inject a crash boundary after directory removal but before its ownership marker is removed.
+  const cleanupInventory = new DatabaseSync(join(directory, 'execution.sqlite'), { readOnly: true }); let ownedManifest;
+  try { ownedManifest = JSON.parse(cleanupInventory.prepare('SELECT document FROM workers WHERE run_id=? ORDER BY epoch DESC LIMIT 1').get(binding.runId).document).manifest; } finally { cleanupInventory.close(); }
+  await supervisor.prepare();
+  execFileSync('/opt/homebrew/bin/limactl', ['shell', 'engine', '--', 'python3', '-c', 'import os,sys,shutil; p,r=sys.argv[1:]; assert open(p+".owner").read()==r and os.path.isdir(p); shutil.rmtree(p)', ownedManifest.workspace, ownedManifest.runId],
+    { env: { PATH: '/opt/homebrew/bin:/usr/bin:/bin', HOME: join(directory, 'home'), LIMA_HOME: join(directory, 'lima'), LC_ALL: 'C' }, timeout: 15000, stdio: 'pipe' });
+  const removed = await supervisor.cleanupRun(binding); assert.equal(removed.workspaceRemoved, true); assert.equal(removed.containersRemoved, true);
+  assert.equal(readFileSync(join(checkout, 'app.mjs'), 'utf8'), 'export const value = 1;\n'); assert.equal(readFileSync(protectedPath, 'utf8'), 'SYNTHETIC-PROTECTED\n');
+  assert.equal(policy.runtime.status('R_development').releasedAt, null); await supervisor.cleanupRun(binding);
+  check('owned-run-workspace-cleanup-preserves-host-source-and-claim', removed);
   }
 } catch (failure) { error = 'Development worker qualification failed: ' + (/^[A-Za-z0-9 ,;:.\/-]{1,200}$/.test(failure.message) ? failure.message : 'inspect private local failure'); }
 finally {
@@ -239,7 +250,7 @@ finally {
     } catch { cleanup.failed = true; cleanup.github = { failed: true, repository: fixtureRepository.full_name }; }
   }
 }
-const passed = !error && results.length === (githubFixture ? 5 : agent ? 3 : 7) && cleanup?.workspaceRemoved && !cleanup.failed;
+const passed = !error && results.length === (githubFixture ? 5 : agent ? 3 : 8) && cleanup?.workspaceRemoved && !cleanup.failed;
 console.log(JSON.stringify({ passed, issue: 42, milliseconds: performance.now() - started, host: { os: execFileSync('/usr/bin/sw_vers', ['-productVersion'], { encoding: 'utf8' }).trim(), architecture: process.arch, node: process.version },
   workerVersions, image, results, error, cleanup, notRun: [githubFixture ? 'Current scoped App authentication and real Project integration; direct Cloud credential path' : agent ? 'Real GitHub Issue/PR journey and direct Cloud credential path' : 'Real provider/Issue/PR journey', 'Native Desktop UI/keyboard', 'Human PM QA', 'Windows/Linux', 'Host native app execution'] }));
 process.exitCode = passed ? 0 : 1;

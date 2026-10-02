@@ -8,7 +8,9 @@ import { snapshotWorkspace } from './source.mjs';
 import { developmentWorkerProgram } from './worker-tools.mjs';
 import { starterSkills, starterHash } from './starter.mjs';
 import { createDevelopmentEngine } from './engine.mjs';
-import { publishDevelopmentCandidate } from './github.mjs';
+import { publishDevelopmentCandidate, developmentPublication, candidateJob } from './github.mjs';
+import { buildDevelopmentShowcase, readDevelopmentCandidate, readIntegrationCandidate, readRequiredChecks, verifyMergedCandidate, mergeDevelopmentCandidate, integrationOutcome, integrationObservation } from './integration.mjs';
+import { containsSecret } from '../connections/commands.mjs';
 import { developmentShapes, developmentCommand } from './commands.mjs';
 import { developmentIssueHash } from './state.mjs';
 export { developmentShapes, developmentCommand } from './commands.mjs';
@@ -29,9 +31,10 @@ export function executionProfile(source, workspace) {
 }
 
 // The registered PM frame gets dispatch. Execution agents never receive this manager.
-export function createDevelopmentManager({ store, policy, ledger, connections, supervisor, onChange = () => {}, initialRevision = 1 }) {
+export function createDevelopmentManager({ store, policy, ledger, connections, supervisor, onChange = () => {}, initialRevision = 1, api = github, openCandidate }) {
   let selected = store?.selected() ?? null, revision = initialRevision, conversation = randomUUID(), preview = null, closed = false, closing = false, lastSnapshot;
   const tasks = new Map(), controls = new Map(), messages = new Map(), errors = new Map();
+  const observations = new Map();
   const workspace = id => { const value = store?.workspaces().find(value => value.id === id); if (!value) throw new Error('Development repository unavailable.'); return value; };
   const invalidate = () => { if (preview) policy.control.invalidate(preview.inputId); preview = null; };
   function sync() { const next = store?.selected() ?? null; if (next !== selected) { invalidate(); selected = next; conversation = randomUUID(); revision++; } }
@@ -48,13 +51,13 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
         execution = supervisor?.status(selected) ?? null;
       }
     }
-    const publication = run ? store.effects(run.id).find(effect => effect.step === 'pull-request' && effect.state === 'verified')?.result ?? null : null;
+    const publication = run && development ? developmentPublication(store, ledger, run) : null;
     return lastSnapshot = { revision, workspaceId: selected, repositoryLabel: target?.name ?? null, storageAvailable: available,
       configuredDev: view?.values['agents.dev'] ?? null, developers: connections.developers(),
       permissions: view ? { host: view.values['permissions.ceiling'], repository: view.values['permissions.grants'], required: developmentPermissions } : null,
       skills: starterSkills.map(({ instructions: _instructions, ...skill }) => ({ ...skill, scope: selected, enabled: view?.values['skills.bundledEnabled'].value ?? false })),
       busy: tasks.has(selected) || controls.has(selected), run, runDeveloper, stepLabel, development, execution: execution ? { worker: execution.worker, pending: execution.pending, error: execution.error } : null,
-      preview, publication, message: messages.get(selected) ?? null, error: errors.get(selected) ?? null,
+      preview, publication, qa: development?.qa ?? null, message: messages.get(selected) ?? null, error: errors.get(selected) ?? null,
       pending: store?.pending('development').filter(effect => effect.binding.repository === selected).map(({ step, state }) => ({ step, state })) ?? [],
       limitations: 'Execution uses the qualified Node/Git restricted worker on this Mac. Other toolchains, host-native execution, installers and other OS evidence remain pending.',
     };
@@ -76,12 +79,22 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
   }
   const release = held => { held.app.close(); if (held.project !== held.app) held.project.close(); };
   async function observe({ repository, issue }) {
-    const target = workspace(repository), held = await acquire(target);
+    const target = workspace(repository), borrowed = observations.get(repository), held = borrowed ?? await acquire(target);
     try {
-      const catalog = await github.readCatalog(held.app, held.project, target), current = catalog.issues.find(value => value.number === issue);
+      const catalog = await api.readCatalog(held.app, held.project, target), current = catalog.issues.find(value => value.number === issue);
       if (!current) throw new Error('Development Issue unavailable.');
-      return { repository, issue, status: current.status, state: current.state, active: catalog.active.map(({ number, status }) => ({ issue: number, status })), observedAt: Date.now() };
-    } finally { release(held); }
+      const result = { repository, issue, status: current.status, state: current.state, active: catalog.active.map(({ number, status }) => ({ issue: number, status })), observedAt: Date.now() };
+      const run = policy.runtime.status(repository);
+      if (run) {
+        const state = ledger.status(run.id);
+        if (state.integration) {
+          const proof = await verifyMergedCandidate({ lease: held.app, workspace: target, publication: developmentPublication(store, ledger, run) });
+          if (canonicalJSON(proof.source) !== canonicalJSON(state.integration.source) || canonicalJSON(proof.candidate) !== canonicalJSON(state.integration.candidate)) throw new Error('Development integration readback changed.');
+          result.integration = { candidate: state.integration.source, resultHash: state.integration.resultHash }; result.observedAt = Date.now();
+        }
+      }
+      return result;
+    } finally { if (!borrowed) release(held); }
   }
   function operate(target, fn) {
     if (closed || closing || tasks.has(target.id) || controls.has(target.id)) throw new Error('Development operation already pending.');
@@ -96,10 +109,10 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     }).finally(() => { tasks.delete(target.id); publish(); });
     return { accepted: true, snapshot: status() };
   }
-  function authority(target, run, signal) {
+  function authority(target, run, signal, closeout = false) {
     signal?.throwIfAborted(); if (closed || closing) throw new Error('Development app is closing.');
     const current = policy.runtime.status(target.id), grant = policy.worker.authority(target.id, run.policyRevision);
-    if (!current || current.id !== run.id || current.epoch !== run.epoch || current.control !== 'running' || grant.dev !== run.dev
+    if (!current || current.id !== run.id || current.epoch !== run.epoch || !(closeout ? ['running', 'paused', 'stopped'] : ['running']).includes(current.control) || grant.dev !== run.dev
       || developmentPermissions.some(permission => !grant.capabilities.includes(permission)) || !grant.connections.includes('github')) throw new Error('Development run authority unavailable or revoked.');
   }
   async function fieldEffect(target, held, job, issue, name, signal) {
@@ -108,10 +121,10 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     signal.throwIfAborted();
     if (intent.state === 'prepared') {
       if (!store.dispatch(intent.id)) throw new Error('Development status dispatch changed.');
-      try { await github.setField(held.project, target, issue.itemId, 'Status', name); }
+      try { await api.setField(held.project, target, issue.itemId, 'Status', name); }
       catch (error) { if (error.message !== 'write-result-uncertain') { store.finish(intent.id, 'uncertain', { error: 'status-needs-readback' }); throw error; } }
     }
-    const catalog = await github.readCatalog(held.app, held.project, target), actual = catalog.issues.find(value => value.id === issue.id);
+    const catalog = await api.readCatalog(held.app, held.project, target), actual = catalog.issues.find(value => value.id === issue.id);
     if (!actual || actual.status !== name || actual.state !== 'OPEN' || actual.itemId !== issue.itemId || actual.ready !== issue.ready
       || ['Priority', 'Impact', 'Effort'].some(role => actual.metadata[role] !== issue.metadata[role]) || catalog.active.length !== 1 || catalog.active[0].id !== issue.id) throw new Error('Development active Issue readback changed.');
     if (intent.state !== 'verified') store.finish(intent.id, 'verified', { issue: actual.number, status: name, activeCount: 1 }); return actual;
@@ -129,16 +142,18 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     const exported = response.result;
     const held = await acquire(target, signal);
     try {
-      const detail = await github.readDetail(held.app, target, run.issue);
+      const detail = await api.readDetail(held.app, target, run.issue);
       if (detail.state !== 'OPEN' || !detail.ready || detail.title !== issue.title || detail.body !== issue.body || detail.dependencies.some(dependency => dependency.state !== 'CLOSED')) throw new Error('Development Issue or dependency changed before publication.');
       await publishDevelopmentCandidate({ store, ledger, lease: held.app, workspace: target, run, source: snapshot.files, files: exported.files, profile, title: issue.title, authority: () => authority(target, run, signal) });
-      const catalog = await github.readCatalog(held.app, held.project, target), current = catalog.issues.find(value => value.number === run.issue);
-      await fieldEffect(target, held, run.id, current, 'Pending Review', signal);
+      const catalog = await api.readCatalog(held.app, held.project, target), current = catalog.issues.find(value => value.number === run.issue);
+      await fieldEffect(target, held, candidateJob(ledger, run), current, 'Pending Review', signal);
     } finally { release(held); }
     await policy.runtime.reserve(identity, { commandId: 'candidate-' + run.id + '-' + run.epoch, issue: run.issue, pipeline: 'development' });
     supervisor.control(binding, 'pause'); await supervisor.settle(target.id);
     if (policy.runtime.status(target.id).control !== 'paused') throw new Error('Development worker pause could not be verified.');
-    messages.set(target.id, 'Candidate PR prepared. Core Development checks and review are recorded. The configured PM Testing and integration boundary is pending.'); publish();
+    const publication = developmentPublication(store, ledger, run);
+    if (ledger.captured(run.id).pipeline.steps.find(step => step.id === state.step)?.kind === 'pm-qa') ledger.offerQA(binding, buildDevelopmentShowcase({ ledger, run, workspace: target, publication }));
+    messages.set(target.id, 'Candidate PR prepared. Review the current Showcase, then approve this tested version or describe the correction needed. Approval includes the displayed integration and closeout outcome.'); publish();
   }
   async function start(target, number, signal) {
     if (!supervisor) throw new Error('Development worker unavailable.');
@@ -149,12 +164,14 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     const identity = inspectWorkspace(target.path, { repository: target.id, owner: target.slug.split('/')[0], name: target.slug.split('/')[1] });
     if (workspaceData(identity).localKey !== target.localKey) throw new Error('Development local workspace changed.');
     const snapshot = snapshotWorkspace(identity), profile = executionProfile(snapshot.files, target), held = await acquire(target, signal); let issue;
+    if (profile.release.strategy !== 'none' || view.values['pipelines.development'].value.steps.some(step => !['agent', 'check', 'pm-qa', 'pr-integration'].includes(step.kind)
+      || step.kind === 'pr-integration' && step.routes.success !== 'complete')) { release(held); throw new Error('Development configured delivery or post-integration steps need a qualified path before execution.'); }
     const unchangedPolicy = () => { signal.throwIfAborted(); if (policy.worker.read(target.id).hash !== view.hash) throw new Error('Development configuration changed during preflight.'); };
     try {
-      const catalog = await github.readCatalog(held.app, held.project, target); issue = catalog.issues.find(value => value.number === number);
+      const catalog = await api.readCatalog(held.app, held.project, target); issue = catalog.issues.find(value => value.number === number);
       if (!issue || issue.state !== 'OPEN' || !issue.ready || !issue.itemId || ['Priority', 'Impact', 'Effort'].some(role => !issue.metadata[role])
         || catalog.active.some(active => active.number !== number) || !['Backlog', 'In Progress'].includes(issue.status)) throw new Error('Development needs a Ready Issue with complete metadata and no other active Issue.');
-      const detail = await github.readDetail(held.app, target, number);
+      const detail = await api.readDetail(held.app, target, number);
       const boundIssue = { number, title: detail.title, body: detail.body };
       if (detail.dependencies.some(dependency => dependency.state !== 'CLOSED') || detail.pullRequests.some(pr => pr.state === 'OPEN')) throw new Error('Development dependencies or an existing PR prevent a new run.');
       const login = held.app.value.account.login;
@@ -170,7 +187,7 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
         try { await githubRequest(held.app, 'PATCH', '/repos/' + target.slug + '/issues/' + number, { assignees: [login] }); }
         catch (error) { if (error.message !== 'write-result-uncertain') { store.finish(intent.id, 'uncertain', { error: 'assignment-needs-readback' }); throw error; } }
       }
-      const actual = await github.readIssue(held.app, target, number);
+      const actual = await api.readIssue(held.app, target, number);
       if (actual.assignees.length !== 1 || actual.assignees[0] !== login || actual.state !== 'OPEN' || !actual.ready
         || actual.title !== boundIssue.title || actual.body !== boundIssue.body) throw new Error('Development assignment or Issue input readback changed.');
       if (intent.state !== 'verified') store.finish(intent.id, 'verified', { assignee: login, issue: number });
@@ -199,7 +216,7 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
           const identity = inspectWorkspace(target.path, { repository: target.id, owner: target.slug.split('/')[0], name: target.slug.split('/')[1] }), snapshot = snapshotWorkspace(identity);
           const captured = ledger.captured(run.id); if (canonicalJSON(snapshot.candidate) !== canonicalJSON(captured.source)) throw new Error('Development captured source changed before resume.');
           const held = await acquire(target, signal); let issue;
-          try { issue = await github.readIssue(held.app, target, run.issue); } finally { release(held); }
+          try { issue = await api.readIssue(held.app, target, run.issue); } finally { release(held); }
           if (developmentIssueHash({ number: issue.number, title: issue.title, body: issue.body }) !== captured.issueHash) throw new Error('Development captured Issue changed before resume.');
           await execute(target, next, snapshot, executionProfile(snapshot.files, target), issue, signal);
         });
@@ -207,13 +224,136 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     })().catch(error => { errors.set(target.id, safeError(error)); messages.set(target.id, safeError(error)); }).finally(() => { controls.delete(target.id); publish(); });
     controls.set(target.id, work); publish(); return { accepted: true, snapshot: status() };
   }
+  async function inspectIntegration(action) {
+    const target = workspace(action.repository), run = policy.runtime.status(target.id), borrowed = observations.get(target.id), held = borrowed ?? await acquire(target);
+    try {
+      const publication = run && developmentPublication(store, ledger, run), state = run && ledger.status(run.id);
+      if (!run || run.id !== action.runId || run.issue !== action.issue || action.operation !== 'github.pr.merge' || action.step !== state.step
+        || !publication || action.expectedHash !== integrationOutcome(publication) || canonicalJSON(action.candidate) !== canonicalJSON(publication.candidate)) throw new Error('Development integration action binding unavailable.');
+      const identity = inspectWorkspace(target.path, { repository: target.id, owner: target.slug.split('/')[0], name: target.slug.split('/')[1] });
+      const snapshot = snapshotWorkspace(identity), profile = executionProfile(snapshot.files, target);
+      if (workspaceData(identity).localKey !== target.localKey || canonicalJSON(snapshot.candidate) !== canonicalJSON(ledger.captured(run.id).source)) throw new Error('Development captured source changed before readback.');
+      await readRequiredChecks(held.app, target, publication.head, profile.quality.requiredChecks);
+      const proof = { ...await verifyMergedCandidate({ lease: held.app, workspace: target, publication }), resultHash: action.expectedHash };
+      ledger.recordIntegration({ runId: run.id, epoch: run.epoch }, proof);
+      return integrationObservation(action, proof);
+    } finally { if (!borrowed) release(held); }
+  }
+  async function closeoutEffect(run, step, payload, mutate, inspect, current) {
+    current();
+    const before = store.prepare(run.id + '-closeout', step, { kind: 'development', runId: run.id, repository: run.repository, issue: run.issue, ...payload });
+    if (before.state === 'denied') throw new Error('Development closeout requires recovery.');
+    if (before.state === 'prepared') {
+      current();
+      if (!store.dispatch(before.id)) throw new Error('Development closeout dispatch changed.');
+      try { await mutate(); current(); }
+      catch (error) { store.finish(before.id, 'uncertain', { error: 'closeout-needs-readback' }); if (error.message !== 'write-result-uncertain') throw error; }
+    }
+    current(); const actual = await inspect(); current();
+    if (before.state !== 'verified') store.finish(before.id, 'verified', actual); return actual;
+  }
+  async function integrate(target, old, signal) {
+    let run = policy.runtime.status(target.id);
+    old ??= { issue: store.issueContext(target.id)?.development?.qaIssue };
+    if (!run || !old.issue) throw new Error('Development integration closeout context unavailable.');
+    const identity = inspectWorkspace(target.path, { repository: target.id, owner: target.slug.split('/')[0], name: target.slug.split('/')[1] });
+    if (workspaceData(identity).localKey !== target.localKey) throw new Error('Development local workspace changed.');
+    supervisor.attach(identity);
+    if (run.pendingAction && ['dispatched', 'uncertain'].includes(run.pendingAction.state)) await policy.runtime.reconcile({ runId: run.id, epoch: run.epoch }, run.pendingAction.id);
+    const recorded = ledger.status(run.id).integration;
+    if (!recorded && run.control !== 'running') { run = await policy.runtime.resume({ runId: run.id, epoch: run.epoch }); ledger.rebind(run.id, run.epoch); }
+    const snapshot = snapshotWorkspace(identity), profile = executionProfile(snapshot.files, target), publication = developmentPublication(store, ledger, run);
+    if (canonicalJSON(snapshot.candidate) !== canonicalJSON(ledger.captured(run.id).source)) throw new Error('Development captured source changed before integration.');
+    const held = await acquire(target, signal); observations.set(target.id, held);
+    try {
+      const current = () => authority(target, run, signal);
+      const closeout = () => { held.app.check(); held.project.check(); authority(target, run, signal, true); };
+      closeout();
+      let proof;
+      if (recorded) {
+        await readRequiredChecks(held.app, target, publication.head, profile.quality.requiredChecks); closeout();
+        const actual = await verifyMergedCandidate({ lease: held.app, workspace: target, publication });
+        if (canonicalJSON(actual.candidate) !== canonicalJSON(recorded.candidate) || canonicalJSON(actual.source) !== canonicalJSON(recorded.source)) throw new Error('Development recorded integration changed.');
+        proof = recorded;
+      } else { proof = await mergeDevelopmentCandidate({ store, runtime: policy.runtime, ledger, lease: held.app, workspace: target, run, publication, profile, authority: current }); current(); }
+      const binding = { runId: run.id, epoch: run.epoch };
+      supervisor.control(binding, 'pause'); await supervisor.settle(target.id);
+      closeout(); await supervisor.cleanupRun(binding); closeout();
+      const before = await api.readIssue(held.app, target, run.issue);
+      if (developmentIssueHash({ number: before.number, title: before.title, body: before.body }) !== ledger.captured(run.id).issueHash) throw new Error('Development Issue changed before closeout.');
+      const catalog = await api.readCatalog(held.app, held.project, target), currentIssue = catalog.issues.find(value => value.number === run.issue);
+      if (!currentIssue || currentIssue.id !== old.issue.id || currentIssue.itemId !== old.issue.itemId || currentIssue.ready !== old.issue.ready
+        || ['Priority', 'Impact', 'Effort'].some(role => currentIssue.metadata[role] !== old.issue.metadata[role])
+        || catalog.active.some(value => value.number !== run.issue) || currentIssue.state === 'OPEN' && catalog.active.length !== 1) throw new Error('Development closeout Issue or Project context changed.');
+      await closeoutEffect(run, 'issue-close', { integration: proof, issueId: before.id },
+        () => githubRequest(held.app, 'PATCH', '/repos/' + target.slug + '/issues/' + run.issue, { state: 'closed', state_reason: 'completed' }), async () => {
+          const actual = await api.readIssue(held.app, target, run.issue);
+          if (actual.id !== before.id || actual.state !== 'CLOSED' || actual.ready !== before.ready || actual.title !== before.title || actual.body !== before.body
+            || canonicalJSON(actual.assignees) !== canonicalJSON(before.assignees) || canonicalJSON(actual.labels) !== canonicalJSON(before.labels)) throw new Error('Development Issue closeout readback changed.');
+          return { issue: run.issue, state: actual.state };
+        }, closeout);
+      await closeoutEffect(run, 'project-done', { integration: proof, project: target.project.id }, async () => {
+        const issue = old.issue; await api.setField(held.project, target, issue.itemId, 'Status', 'Done');
+      }, async () => {
+        const catalog = await api.readCatalog(held.app, held.project, target), actual = catalog.issues.find(value => value.number === run.issue);
+        if (!actual || actual.state !== 'CLOSED' || actual.status !== 'Done' || catalog.active.length || actual.itemId !== old.issue.itemId || actual.ready !== old.issue.ready
+          || ['Priority', 'Impact', 'Effort'].some(role => actual.metadata[role] !== old.issue.metadata[role])) throw new Error('Development Project closeout readback changed.');
+        return { issue: run.issue, status: 'Done', activeCount: 0 };
+      }, closeout);
+      const refs = async () => {
+        const values = await githubRequest(held.app, 'GET', '/repos/' + target.slug + '/git/matching-refs/heads/' + encodeURIComponent(publication.branch));
+        if (!Array.isArray(values) || values.length > 100 || values.some(value => typeof value.ref !== 'string' || !value.object)) throw new Error('Development owned branch readback incomplete.');
+        return values.filter(value => value.ref === 'refs/heads/' + publication.branch);
+      };
+      await closeoutEffect(run, 'branch-cleanup', { branch: publication.branch, head: publication.head }, async () => {
+        const actual = await refs();
+        if (actual.length > 1 || actual.length && actual[0].object.sha !== publication.head) throw new Error('Development owned branch changed before cleanup.');
+        if (actual.length) await githubRequest(held.app, 'DELETE', '/repos/' + target.slug + '/git/refs/heads/' + encodeURIComponent(publication.branch));
+      }, async () => { if ((await refs()).length) throw new Error('Development owned branch cleanup unverified.'); return { branchRemoved: true }; }, closeout);
+      closeout(); await policy.runtime.release(binding); ledger.complete(binding, proof.resultHash);
+      messages.set(target.id, 'Issue #' + run.issue + ' complete. The exact tested tree is integrated; Issue and Project closeout, owned cleanup and reservation release are verified.'); publish();
+    } finally { observations.delete(target.id); release(held); }
+  }
+  async function pmDecision(target, payload, signal) {
+    const run = policy.runtime.status(target.id), binding = run && { runId: run.id, epoch: run.epoch }, state = run && ledger.status(run.id);
+    if (!run || !state?.qa || state.qa.decision || state.qa.hash !== payload.hash || containsSecret(payload.text ?? 'Approved')
+      || payload.operation === 'qa-approve' && payload.text !== undefined && developmentCommand(payload.text)?.operation !== 'qa-approve') throw new Error('Development current Showcase or safe PM input unavailable.');
+    const identity = inspectWorkspace(target.path, { repository: target.id, owner: target.slug.split('/')[0], name: target.slug.split('/')[1] }), snapshot = snapshotWorkspace(identity), profile = executionProfile(snapshot.files, target);
+    if (workspaceData(identity).localKey !== target.localKey || canonicalJSON(snapshot.candidate) !== canonicalJSON(ledger.captured(run.id).source)) throw new Error('Development captured source changed before PM decision.');
+    authority(target, run, signal, true);
+    const publication = developmentPublication(store, ledger, run), held = await acquire(target, signal); let issue;
+    try {
+      const catalog = await api.readCatalog(held.app, held.project, target); issue = catalog.issues.find(value => value.number === run.issue);
+      const detail = await api.readDetail(held.app, target, run.issue);
+      if (!issue || issue.state !== 'OPEN' || !issue.ready || catalog.active.length !== 1 || catalog.active[0].number !== run.issue
+        || developmentIssueHash({ number: detail.number, title: detail.title, body: detail.body }) !== ledger.captured(run.id).issueHash
+        || detail.dependencies.some(value => value.state !== 'CLOSED')) throw new Error('Development current Issue, readiness or dependency changed.');
+      const input = { lease: held.app, workspace: target, publication, profile, capturedSource: ledger.captured(run.id).source };
+      const remote = await (payload.operation === 'qa-approve' ? readIntegrationCandidate(input) : readDevelopmentCandidate(input));
+      if (payload.operation === 'qa-feedback' && remote.pull.merged) throw new Error('Development candidate already merged; feedback needs a new verified execution segment.');
+      signal.throwIfAborted();
+      if (payload.operation === 'qa-approve') {
+        const context = store.issueContext(target.id), qaIssue = { id: issue.id, number: issue.number, itemId: issue.itemId, ready: issue.ready, metadata: issue.metadata };
+        store.saveIssueContext(target.id, { ...context, development: { ...context?.development, qaIssue } });
+      }
+      ledger.decideQA(binding, { inputId: randomUUID(), hash: payload.hash, decision: payload.operation === 'qa-approve' ? 'approve' : 'feedback', text: payload.text ?? 'Approved' }); publish();
+      if (payload.operation === 'qa-feedback') await fieldEffect(target, held, candidateJob(ledger, run) + '-feedback', issue, 'In Progress', signal);
+    } finally { release(held); }
+    if (payload.operation === 'qa-approve') return integrate(target, { issue }, signal);
+    const nextState = ledger.status(run.id); if (nextState.state === 'blocked') throw new Error('Development captured feedback route is blocked.');
+    supervisor.control(binding, 'resume'); await supervisor.settle(target.id);
+    const next = policy.runtime.status(target.id); if (next.control !== 'running' || next.epoch <= run.epoch) throw new Error('Development feedback resume could not be verified.');
+    ledger.rebind(run.id, next.epoch); await execute(target, next, snapshot, profile, issue, signal);
+  }
   function dispatch(payload) {
     const target = ready(); canonicalJSON(payload);
     if (payload.operation === 'chat') {
       record(payload, ['operation', 'text']); const action = developmentCommand(payload.text);
       if (!action || action.operation === 'show') return { snapshot: status(), message: 'Choose a qualified Dev, review host and repository permissions, then ask to start a specific Ready Issue. Local Pause, Stop and Resume remain available.' };
       if (action.operation === 'choose-provider') { const dev = connections.developers().find(dev => dev.connection === action.provider); if (!dev) return { snapshot: status(), message: 'That provider has no qualified execution model. Connect and test it in Connections first.' }; return dispatch({ operation: 'dev-prepare', dev: dev.id }); }
-      if (action.operation === 'apply') action.hash = preview?.hash; return dispatch(action);
+      if (action.operation === 'apply') action.hash = preview?.hash;
+      if (['qa-approve', 'qa-feedback'].includes(action.operation)) action.hash = status().qa?.hash;
+      return dispatch(action);
     }
     const shape = developmentShapes[payload.operation]; if (!shape) throw new Error('Development operation unavailable.'); record(payload, ['operation', ...shape[0]], shape[1]);
     if (payload.operation === 'dev-prepare') {
@@ -231,10 +371,17 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
       messages.set(target.id, 'Development configuration applied for the reviewed scope. Active runs retain captured authority; revocation affects the next action.'); publish(); return { snapshot: status() };
     }
     if (payload.operation === 'cancel') { invalidate(); publish(); return { snapshot: status(), message: 'Development configuration change cancelled.' }; }
+    if (payload.operation === 'open-candidate') {
+      const publication = status().publication;
+      if (!publication || !Number.isSafeInteger(publication.number) || publication.number < 1 || !openCandidate) throw new Error('Development candidate target unavailable.');
+      return operate(target, () => openCandidate('https://github.com/' + target.slug + '/pull/' + publication.number));
+    }
     if (payload.operation === 'start') return operate(target, signal => start(target, payload.number ?? store.issueContext(target.id)?.selected, signal));
+    if (['qa-approve', 'qa-feedback'].includes(payload.operation)) return operate(target, signal => pmDecision(target, payload, signal));
+    if (payload.operation === 'resume' && policy.runtime.status(target.id) && ledger.status(policy.runtime.status(target.id).id).qa?.decision === 'approve') return operate(target, signal => integrate(target, null, signal));
     return control(target, payload.operation);
   }
-  return Object.freeze({ status, dispatch, observe, sync() { sync(); publish(); }, async idle() { await Promise.allSettled([...tasks.values()].map(task => task.done)); await Promise.allSettled([...controls.values()]); },
+  return Object.freeze({ status, dispatch, observe, inspectIntegration, sync() { sync(); publish(); }, async idle() { await Promise.allSettled([...tasks.values()].map(task => task.done)); await Promise.allSettled([...controls.values()]); },
     async close() { closing = true; invalidate(); for (const task of tasks.values()) task.controller.abort(); try { await this.idle(); const snapshot = status(); await supervisor?.shutdown();
       lastSnapshot = { ...snapshot, run: selected && policy ? policy.runtime.status(selected) : null, execution: snapshot.execution ? { worker: 'stopped', pending: null, error: null } : null }; closed = true;
     } catch (error) { closing = false; throw error; } } });

@@ -57,9 +57,9 @@ exports.workspaceOptions = async ({ directory, helper, nativeFolderEntry }) => {
         project.fields = [...project.fields.filter(item => item.id !== changed.id), changed]; return copy(changed); } } };
 };
 
-exports.run = async ({ window, directory, vault, manager, workspaces, issues, pipelines, policy, workspaceChannel, issueChannel, pipelineChannel, channel, windowReadyMs }) => {
+exports.run = async ({ window, directory, vault, manager, workspaces, issues, pipelines, policy, development, developmentChannel, workspaceChannel, issueChannel, pipelineChannel, channel, windowReadyMs }) => {
   const started = performance.now(), checks = [], measurements = [];
-  const pipelineScope = process.argv.includes('--qualify-pipelines'), issueScope = pipelineScope || process.argv.includes('--qualify-issues');
+  const developmentScope = process.argv.includes('--qualify-development'), pipelineScope = process.argv.includes('--qualify-pipelines'), issueScope = developmentScope || pipelineScope || process.argv.includes('--qualify-issues');
   const js = code => window.webContents.executeJavaScript(code);
   const wait = async predicate => { const until = Date.now() + 10000; while (!await predicate()) { if (Date.now() >= until) throw new Error('qualification-wait-timeout'); await new Promise(resolve => setTimeout(resolve, 50)); } };
   let pipelineControl;
@@ -319,7 +319,47 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
         assert.equal(await js("document.getElementById('pipeline-apply').textContent"), 'Apply this pipeline');
       });
     }
+    if (developmentScope) {
+      await check('development-native-Dev-preview-and-keyboard-apply', async () => {
+        const epoch = vault.begin('ollama'); vault.save('ollama', epoch, { credential: fixtureKey, view: { health: 'connected', selectedModel: 'deepseek-v4.1-flash', models: [{ id: 'deepseek-v4.1-flash', name: 'DeepSeek fixture' }],
+          capability: { model: 'deepseek-v4.1-flash', testedAt: Date.now(), stream: true, toolLoop: true, resumed: true, scope: 'Synthetic native fixture only.' } } });
+        manager.start('ollama', 'refresh'); await manager.idle('ollama');
+        await js("document.getElementById('chat-nav').click();document.getElementById('prompt').value='Use Ollama as the Dev';document.getElementById('composer').requestSubmit()");
+        await wait(() => Boolean(development.status().preview));
+        assert.equal(development.status().configuredDev.value, null);
+        assert.equal(development.status().preview.scope, 'repository');
+        await js("document.getElementById('settings-nav').click();document.getElementById('settings-agents').click();document.getElementById('dev-apply').focus()");
+        window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+        await wait(() => Boolean(development.status().configuredDev.value));
+        assert.equal(development.status().configuredDev.binding.model, 'deepseek-v4.1-flash');
+        assert.equal(await js("document.body.textContent.includes('synthetic-native-entry-only')"), false);
+      });
+      await check('development-native-scope-and-registered-frame-fences', async () => {
+        await js("document.getElementById('dev-permissions-host').click()"); await wait(() => Boolean(development.status().preview));
+        const frame = window.webContents.mainFrame, payload = { operation: 'apply', hash: development.status().preview.hash, contextRevision: development.status().revision };
+        assert.equal(development.status().preview.target, null); assert.equal(development.status().preview.scope, 'host');
+        assert.throws(() => developmentChannel.dispatch({ sender: {}, senderFrame: frame }, payload));
+        assert.throws(() => developmentChannel.dispatch({ sender: window.webContents, senderFrame: frame }, { ...payload, contextRevision: payload.contextRevision - 1 }));
+        assert.throws(() => developmentChannel.dispatch({ sender: window.webContents, senderFrame: frame }, { ...payload, Ready: true }));
+        await js("document.getElementById('dev-apply').focus()"); window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+        await wait(() => !development.status().preview); assert(development.status().permissions.host.value.includes('provider.turn'));
+        assert.equal(development.status().permissions.repository.value.includes('provider.turn'), false);
+        await js("document.getElementById('dev-permissions-repository').click()"); await wait(() => Boolean(development.status().preview));
+        assert.equal(development.status().preview.target, development.status().workspaceId); await js("document.getElementById('dev-cancel').click()"); await wait(() => !development.status().preview);
+        assert.equal(development.status().permissions.repository.value.includes('provider.turn'), false);
+      });
+      await check('development-native-starter-inventory-and-chat-status', async () => {
+        await js("document.getElementById('dev-starter-skills').open=true");
+        const skills = development.status().skills; assert.equal(skills.length, 4); assert.equal(new Set(skills.map(skill => skill.id)).size, 4);
+        assert(skills.every(skill => skill.version === '1.0.0' && skill.license === 'MIT' && /^[a-f0-9]{64}$/.test(skill.digest)));
+        assert.equal(development.status().run, null);
+        await js("document.getElementById('chat-nav').click();document.getElementById('prompt').value='Show development';document.getElementById('composer').requestSubmit()");
+        await wait(() => js("document.getElementById('transcript').textContent.includes('qualified Dev')"));
+        assert.equal(await js("Boolean(document.getElementById('chat-development-start'))"), true);
+      });
+    }
     await check('themes-narrow-zoom-high-contrast-reduced-motion', async () => {
+      if (developmentScope) await js("document.getElementById('settings-nav').click();document.getElementById('settings-agents').click()");
       for (const theme of ['light', 'dark']) for (const view of ['repositories', 'issues', 'settings']) { nativeTheme.themeSource = theme; await js(`document.getElementById('${view}-nav').click()`); assert.equal(await js('document.documentElement.scrollWidth<=innerWidth'), true); }
       await js("document.getElementById('issues-nav').click()");
       await js('window.scrollTo(0,document.documentElement.scrollHeight)'); assert.equal(await js("document.getElementById('issues-nav').getBoundingClientRect().top>=76 && document.getElementById('issues-nav').getBoundingClientRect().bottom<=innerHeight"), true);
@@ -328,9 +368,15 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
       window.webContents.setZoomFactor(2); await new Promise(resolve => setTimeout(resolve, 100));
       for (const view of pipelineScope ? ['issues', 'settings'] : ['issues']) { await js(`document.getElementById('${view}-nav').click()`); assert.equal(await js('document.documentElement.scrollWidth<=innerWidth'), true); } window.webContents.setZoomFactor(1);
       window.webContents.debugger.attach('1.3'); await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'forced-colors', value: 'active' }, { name: 'prefers-reduced-motion', value: 'reduce' }] });
-      assert.equal(await js("matchMedia('(forced-colors:active)').matches && matchMedia('(prefers-reduced-motion:reduce)').matches"), true); window.webContents.debugger.detach();
+      assert.equal(await js("matchMedia('(forced-colors:active)').matches && matchMedia('(prefers-reduced-motion:reduce)').matches"), true);
+      await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'forced-colors', value: 'none' }] });
+      assert.equal(await js("matchMedia('(forced-colors:active)').matches"), false); window.webContents.debugger.detach();
       window.setSize(1180, 840); nativeTheme.themeSource = 'dark'; await js('window.scrollTo(0,0)'); await new Promise(resolve => setTimeout(resolve, 100));
       if (pipelineScope) await js("document.getElementById('settings-nav').click();document.getElementById('settings-pipelines').click();document.getElementById('pipeline-step-1').open=true;window.scrollTo(0,document.getElementById('pipeline-draft').offsetTop-100)");
+      if (developmentScope) await js("document.getElementById('settings-nav').click();document.getElementById('settings-agents').click();document.getElementById('dev-starter-skills').open=true");
+      await js('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))'); await new Promise(resolve => setTimeout(resolve, 100));
+      if (developmentScope) assert.equal(await js("!document.getElementById('settings-view').hidden && !document.getElementById('agent-settings').hidden && document.getElementById('settings-nav').getAttribute('aria-current')==='page'"), true);
+      assert.equal(await js("getComputedStyle(document.body).backgroundColor==='rgb(16, 23, 34)'"), true);
       capture = (await window.webContents.capturePage()).toPNG(); writeFileSync(path.join(directory, 'window-capture.png'), capture, { flag: 'wx', mode: 0o600 });
     });
     await check('foreground-close-cancels-actual-owned-native-entry', async () => {
@@ -346,7 +392,7 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
       assert.equal(folderCancelled, true);
     });
   } catch { const snapshot = workspaces.status(); workspaceEvidence = { checkpoint: workspaceStage, busy: snapshot.busy, state: snapshot.draft?.state, error: snapshot.draft?.error, folderSelected: Boolean(snapshot.draft?.folder), projectCount: snapshot.draft?.projects?.length ?? 0 }; process.exitCode = 1; }
-  const report = { desktopQualification: pipelineScope ? 'versioned-pipeline-editing' : 'protected-issue-intake', checks, passed: checks.length === (pipelineScope ? 23 : issueScope ? 18 : 21) && checks.every(c => c.passed), milliseconds: Math.round(performance.now() - started), windowReadyFromMainEntryMs: windowReadyMs, measurements,
+  const report = { desktopQualification: developmentScope ? 'development-controls' : pipelineScope ? 'versioned-pipeline-editing' : 'protected-issue-intake', checks, passed: checks.length === (developmentScope ? 21 : pipelineScope ? 23 : issueScope ? 18 : 21) && checks.every(c => c.passed), milliseconds: Math.round(performance.now() - started), windowReadyFromMainEntryMs: windowReadyMs, measurements,
     versions: { electron: process.versions.electron, chromium: process.versions.chrome, node: process.versions.node, sqlite: process.versions.sqlite, os: process.platform, architecture: process.arch },
     nativeEvidence, workspaceEvidence, folderFailure, folderCancelled, synthetic: 'Synthetic GitHub/model replies and first folder selection; actual native secure field, folder-panel cancellation, protected storage, local Git and own window',
     notRun: issueScope ? ['Unchanged Codex unauthenticated discovery', 'Unchanged public GitHub App qualification', 'Unchanged invalid Cloud key probe'] : [],

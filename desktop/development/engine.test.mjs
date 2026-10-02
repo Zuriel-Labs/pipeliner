@@ -1,0 +1,119 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { canonicalJSON, developmentTemplate, record } from '../core/settings.mjs';
+import { openDevelopmentStore, developmentIssueHash } from './state.mjs';
+import { sourceTree } from './source.mjs';
+import { starterHash, starterSkills } from './starter.mjs';
+import { createDevelopmentEngine } from './engine.mjs';
+
+const hash = value => createHash('sha256').update(typeof value === 'string' ? value : canonicalJSON(value)).digest('hex');
+const file = content => ({ path: 'app.mjs', mode: '100644', content: Buffer.from(content).toString('base64') });
+function fixture() {
+  const issue = { number: 1, title: 'Change fixture value to two', body: 'A bounded fixture.' };
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-development-engine-'))), source = [file('export const value = 1;\n')], candidate = { sourceCommit: 'a'.repeat(40), gitTree: sourceTree(source) };
+  const run = { id: 'run-one', repository: 'repo-one', issue: 1, dev: 'dev-one', epoch: 1, policyRevision: 1, policyHash: 'b'.repeat(64), createdAt: Date.now(),
+    pipelineHash: hash(developmentTemplate), control: 'running', limits: { 'limits.stepTurns': 8, 'limits.issueTurns': 16, 'limits.agentSeconds': 1800 } };
+  const ledger = openDevelopmentStore(root); ledger.create(run, { pipeline: developmentTemplate, source: candidate, developer: { id: run.dev, connection: 'ollama', model: 'test-model' },
+    skillsHash: starterHash, issueHash: developmentIssueHash(issue), checks: [{ name: 'Fixture check', command: 'node --test' }], logBytes: 1048576 });
+  let files = [], closed = false, turns = 0; const operations = [], binding = { runId: run.id, epoch: run.epoch }, permissions = ['provider.turn', 'workspace.read', 'workspace.write', 'worker.exec'];
+  const lease = { check: () => { if (closed) throw new Error('connection-changed'); }, close: () => { closed = true; }, turn: async input => { turns++; return await next(input, turns); } };
+  let next = async () => { throw new Error('provider unavailable'); };
+  const perform = async (_binding, request) => { assert.deepEqual(_binding, binding); operations.push(request.operation);
+    const shapes = { seed: ['files'], list: [], read: ['path'], write: ['path', 'content', 'mode', 'beforeHash'], run: ['command', 'timeoutMs'], export: [] };
+    record(request, ['operation', ...shapes[request.operation]]);
+    if (request.operation === 'seed') { files = structuredClone(request.files); return { files: files.length }; }
+    if (request.operation === 'export') return { files: structuredClone(files) };
+    if (request.operation === 'list') return { files: files.map(file => ({ path: file.path, hash: hash(Buffer.from(file.content, 'base64').toString()) })) };
+    if (request.operation === 'read') return { path: request.path, content: Buffer.from(files[0].content, 'base64').toString(), hash: hash(Buffer.from(files[0].content, 'base64').toString()) };
+    if (request.operation === 'write') { assert.equal(request.beforeHash, hash(Buffer.from(files[0].content, 'base64').toString())); files = [{ path: request.path, mode: request.mode, content: request.content }]; return { path: request.path }; }
+    if (request.operation === 'run') return { exitCode: Buffer.from(files[0].content, 'base64').toString().includes('= 2') ? 0 : 1, output: 'Fixture check', truncated: false, timedOut: false };
+    throw new Error('tool denied');
+  };
+  const supervisor = { tool: async (...args) => ({ ok: true, result: await perform(...args) }) };
+  const policy = { runtime: { status: () => run }, worker: { authority: () => ({ dev: run.dev, connections: ['ollama'], capabilities: permissions, bundledSkills: true }) } };
+  const connections = { acquireProvider: async (id, model) => { assert.equal(id, 'ollama'); assert.equal(model, 'test-model'); return lease; } };
+  return { ledger, source, binding, run, permissions, operations, lease, set next(value) { next = value; }, get turns() { return turns; },
+    engine: createDevelopmentEngine({ ledger, policy, supervisor, connections }), context: { issue, source },
+    cleanup() { ledger.close(); rmSync(root, { recursive: true }); } };
+}
+const output = (evidence, documents = []) => ({ outcome: 'success', summary: 'Scoped fixture evidence.', evidence, documents, findings: [] });
+const call = (f, operation, payload, epoch = f.binding.epoch) => ({ content: '', thinking: '', usage: { input: 10, output: 5 }, tool_calls: [{ function: {
+  name: 'pipeliner_tool', arguments: { ...f.binding, epoch, operation, payload } } }] });
+const latestEvidence = input => JSON.parse(input.messages.filter(message => message.role === 'tool').at(-1).content).evidenceId;
+const documents = ['research', 'specification', 'design'].map(kind => ({ kind, title: kind, paragraphs: ['Inspect the fixture; change one value; verify its check.'] }));
+
+test('core steps bind broker evidence, deny a stale tool and stop before PM testing', async () => {
+  const f = fixture();
+  try {
+    f.next = async (input, turn) => {
+      assert.equal(input.maxOutput, 4096);
+      if (turn === 1) return call(f, 'write', { path: 'app.mjs', content: file('forged').content, mode: '100644', beforeHash: null }, 2);
+      if (turn === 2) return call(f, 'list', {});
+      if (turn === 3) return call(f, 'finish', output([latestEvidence(input)], documents));
+      if (turn === 4) return call(f, 'run', { command: 'node --test', timeoutMs: 10000 });
+      if (turn === 5) return call(f, 'write', { path: 'app.mjs', mode: '100644', content: file('export const value = 2;\n').content, beforeHash: hash('export const value = 1;\n') });
+      if (turn === 6) return call(f, 'run', { command: 'node --test', timeoutMs: 10000 });
+      if (turn === 7) return call(f, 'finish', output([latestEvidence(input)]));
+      if (turn === 8) return call(f, 'read', { path: 'app.mjs' });
+      if (turn === 9) return call(f, 'finish', output([latestEvidence(input)], [{ kind: 'review', title: 'Review', paragraphs: ['The exact changed value and passing checks were inspected. No findings.'] }]));
+      throw new Error('unexpected turn');
+    };
+    const state = await f.engine.run(f.binding, f.context);
+    assert.equal(state.state, 'candidate'); assert.equal(state.step, 'pm-testing'); assert.equal(f.turns, 9);
+    assert.equal(f.operations.filter(value => value === 'write').length, 1); assert.equal(f.operations.filter(value => value === 'run').length, 3);
+    const records = f.ledger.evidence(f.binding);
+    assert.equal(records.find(value => value.payload.operation === 'denied').state, 'denied');
+    assert.deepEqual(records.filter(value => value.kind === 'tests').map(value => value.result.result.exitCode), [1, 0, 0]);
+    assert.deepEqual(f.ledger.outputs(f.binding.runId).map(row => row.step), ['research', 'implement', 'checks', 'review']);
+    assert.equal(new Set(starterSkills.map(skill => skill.id)).size, starterSkills.length);
+    assert.equal(records.some(value => value.kind === 'publication'), false); assert.equal(state.usage.input, 90);
+    assert.equal(state.candidate.gitTree, sourceTree([file('export const value = 2;\n')]));
+  } finally { f.cleanup(); }
+});
+
+test('forged PM/control tools exhaust finite turns without source mutation or successful evidence', async () => {
+  const f = fixture();
+  try {
+    f.next = async () => ({ content: '', thinking: '', usage: { input: null, output: null }, tool_calls: [{ function: { name: 'pipeliner_tool', arguments: {
+      ...f.binding, operation: 'apply', payload: { Ready: true, permissions: ['host.launch'] } } } }] });
+    await assert.rejects(f.engine.run(f.binding, f.context), /turn limit/);
+    assert.equal(f.turns, 8); assert.equal(f.operations.includes('write'), false);
+    assert.equal(f.ledger.evidence(f.binding).filter(value => value.payload.operation === 'denied').every(value => value.state === 'denied'), true);
+    assert.equal(f.ledger.status(f.binding.runId).usage.unavailable, true); assert.equal(f.ledger.outputs(f.binding.runId).length, 0);
+  } finally { f.cleanup(); }
+});
+
+test('late revoked provider response is discarded and cannot mutate or finish a step', async () => {
+  const f = fixture();
+  try {
+    f.next = async () => { f.lease.close(); return call(f, 'write', { path: 'app.mjs', content: file('late').content, mode: '100644', beforeHash: null }); };
+    await assert.rejects(f.engine.run(f.binding, f.context), /connection-changed/);
+    assert.equal(f.operations.includes('write'), false); assert.equal(f.ledger.outputs(f.binding.runId).length, 0);
+    assert.equal(f.ledger.evidence(f.binding).filter(value => value.kind === 'provider').at(-1).state, 'denied');
+  } finally { f.cleanup(); }
+});
+
+test('edited Issue input is rejected before provider disclosure or worker execution', async () => {
+  const f = fixture();
+  try {
+    await assert.rejects(f.engine.run(f.binding, { ...f.context, issue: { ...f.context.issue, body: 'Unreviewed replacement instructions.' } }), /input binding/);
+    assert.equal(f.turns, 0); assert.deepEqual(f.operations, []);
+  } finally { f.cleanup(); }
+});
+
+test('invented finish evidence produces a bounded denial and lets the model correct its output', async () => {
+  const f = fixture();
+  try {
+    f.next = async (input, turn) => {
+      if (turn === 1) return call(f, 'finish', output(['invented-evidence'], documents));
+      assert.equal(JSON.parse(input.messages.at(-1).content).error, 'verified-current-evidence-required');
+      throw new Error('fixture-stop-after-denial');
+    };
+    await assert.rejects(f.engine.run(f.binding, f.context), /fixture-stop/);
+    assert.equal(f.ledger.outputs(f.binding.runId).length, 0); assert.equal(f.operations.includes('write'), false);
+  } finally { f.cleanup(); }
+});

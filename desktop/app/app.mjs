@@ -2,6 +2,7 @@ import { containsSecret, connectionCommand } from './commands.mjs';
 import { initWorkspaces } from './workspaces.mjs';
 import { initIssues } from './issues.mjs';
 import { initPipelines } from './pipelines.mjs';
+import { initDevelopment } from './development.mjs';
 
 let state = null, returnFocus = null; const drafts = new Map(), previousBusy = new Set();
 const $ = id => document.getElementById(id);
@@ -104,17 +105,19 @@ const issues = await initIssues({ el, message, setContext, show: () => {
   for (const id of ['chat-nav', 'settings-nav', 'repositories-nav', 'issues-nav']) { $(id).classList.toggle('current', id === 'issues-nav'); if (id === 'issues-nav') $(id).setAttribute('aria-current', 'page'); else $(id).removeAttribute('aria-current'); }
 } });
 const pipelines = await initPipelines({ el, message });
+const development = await initDevelopment({ el, message });
 $('composer').addEventListener('submit', event => { event.preventDefault(); const text = $('prompt').value.trim(); if (!text) return;
   if (containsSecret(text)) { $('prompt').value = ''; message('Use the protected connection surface for keys. Nothing was saved or sent.'); $('prompt').focus(); return; }
-  if (!connectionCommand(text).connection && pipelines.handles(text)) pipelines.chat(text);
+  if (!connectionCommand(text).connection && development.handles(text)) development.chat(text);
+  else if (!connectionCommand(text).connection && pipelines.handles(text)) pipelines.chat(text);
   else if (!connectionCommand(text).connection && issues.handles(text)) issues.chat(text);
   else if (!connectionCommand(text).connection && workspaces.handles(text)) workspaces.chat(text);
   else request({ operation: 'chat', text }, text);
 });
 $('chat-nav').addEventListener('click', () => showSettings(false)); $('settings-nav').addEventListener('click', () => showSettings());
-for (const category of ['connections', 'pipelines']) $('settings-' + category).addEventListener('click', () => {
-  $('connection-settings').hidden = category !== 'connections'; $('pipeline-settings').hidden = category !== 'pipelines';
-  for (const name of ['connections', 'pipelines']) $('settings-' + name).setAttribute('aria-pressed', String(name === category));
+for (const category of ['connections', 'pipelines', 'agents']) $('settings-' + category).addEventListener('click', () => {
+  $('connection-settings').hidden = category !== 'connections'; $('pipeline-settings').hidden = category !== 'pipelines'; $('agent-settings').hidden = category !== 'agents';
+  for (const name of ['connections', 'pipelines', 'agents']) $('settings-' + name).setAttribute('aria-pressed', String(name === category));
 });
 for (const button of document.querySelectorAll('[data-settings]')) button.addEventListener('click', () => showSettings());
 for (const button of document.querySelectorAll('[data-chat]')) button.addEventListener('click', () => request({ operation: 'chat', text: button.dataset.chat }, button.dataset.chat));

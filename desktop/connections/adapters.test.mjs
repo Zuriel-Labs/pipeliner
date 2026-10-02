@@ -62,3 +62,26 @@ test('Codex model catalog checks every page and rejects repeated cursors', async
   assert.deepEqual((await codexModels(server)).map(m => m.id), ['first', 'second']); assert.equal(requests, 2);
   await assert.rejects(codexModels({ request: async () => ({ data: [{ model: 'same' }], nextCursor: 'next' }) }), /catalog-invalid/);
 });
+
+test('Cloud turns keep historical qualification, enforce model/output bounds and use the direct Cloud route', async () => {
+  let calls = 0, mode = 'ok';
+  const send = async (url, request) => {
+    assert.equal(new URL(url).origin, 'https://ollama.com'); assert.equal(request.headers.Authorization, 'Bearer synthetic-private-provider-key');
+    if (url.endsWith('/api/tags')) return Response.json({ models: mode === 'removed' ? [] : [{ name: 'test-model' }] });
+    calls++; const body = JSON.parse(request.body); assert.equal(body.model, 'test-model'); assert.equal(body.options.num_predict, 2048);
+    return new Response(JSON.stringify({ model: mode === 'substituted' ? 'other-model' : 'test-model', done: true, done_reason: mode === 'truncated' ? 'length' : 'stop',
+      prompt_eval_count: 11, eval_count: 4, message: { role: 'assistant', content: 'synthetic result' } }) + '\n');
+  };
+  const adapter = ollamaAdapter({ entry: async () => {}, send }), signal = new AbortController().signal;
+  const value = { credential: 'synthetic-private-provider-key', view: { health: 'connected', selectedModel: 'test-model', models: [{ id: 'test-model' }],
+    capability: { model: 'test-model', testedAt: 123, stream: true, toolLoop: true, resumed: true, scope: 'Synthetic provider path only.' } } };
+  const refreshed = await adapter.refresh({ value, signal }); assert.deepEqual(refreshed.view.capability, value.view.capability); assert.equal(calls, 0);
+  const request = { value: refreshed, model: 'test-model', messages: [{ role: 'user', content: 'Synthetic fixture.' }], tools: [], maxOutput: 2048, signal };
+  const result = await adapter.turn(request); assert.equal(result.content, 'synthetic result'); assert.deepEqual(result.usage, { input: 11, output: 4 });
+  await assert.rejects(adapter.turn({ ...request, model: 'other-model' }), /capability-unverified/);
+  await assert.rejects(adapter.turn({ ...request, maxOutput: 0 }), /output-limit-invalid/); assert.equal(calls, 1);
+  mode = 'substituted'; await assert.rejects(adapter.turn(request), /model-mismatch/);
+  mode = 'truncated'; await assert.rejects(adapter.turn(request), /output-truncated/);
+  mode = 'removed'; const removed = await adapter.refresh({ value, signal }); assert.equal(removed.view.health, 'limited'); assert.equal(removed.view.capability, null);
+  await assert.rejects(adapter.turn({ ...request, value: removed }), /capability-unverified/); assert.equal(calls, 3);
+});

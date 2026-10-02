@@ -110,14 +110,16 @@ export function createRuntime(db, { transaction: commit, policy, clock: wallCloc
   function uncertain(run) { return db.prepare(`SELECT id FROM runtime_actions WHERE run_id=? AND state IN ('dispatched','uncertain') LIMIT 1`).get(run.id); }
   return Object.freeze({
     async reserve(identity, request) {
-      const workspace = workspaceData(identity); canonicalJSON(request); record(request, ['commandId', 'issue', 'pipeline']);
+      const workspace = workspaceData(identity); canonicalJSON(request); record(request, ['commandId', 'issue', 'pipeline'], ['policyHash']);
       if (!identifier(request.commandId) || !Number.isSafeInteger(request.issue) || request.issue < 1 || !['development', 'release'].includes(request.pipeline)) throw new Error('Invalid reservation request');
+      if (request.policyHash !== undefined && !sha(request.policyHash)) throw new Error('Invalid reservation policy hash');
       const observation = await repositoryRead(workspace.repository, request.issue); activeRead(observation);
       return transaction(() => {
         fresh(observation.observedAt);
         const fingerprint = digest({ repository: workspace.repository, ...request }), previous = db.prepare('SELECT * FROM runtime_commands WHERE id=?').get(request.commandId);
         if (previous) { if (previous.fingerprint !== fingerprint) throw new Error('Reservation command identity conflict'); return immutable({ created: false, run: visible(db.prepare('SELECT * FROM runtime_runs WHERE id=?').get(previous.run_id)) }); }
         const captured = policy.read(workspace.repository), grant = policy.authority(workspace.repository, captured.revision);
+        if (request.policyHash !== undefined && request.policyHash !== captured.hash) throw new Error('Development configuration changed during reservation');
         if (!grant.dev || captured.values['agents.dev'].value !== grant.dev) throw new Error('Configured Dev unavailable');
         const existingRepository = db.prepare('SELECT * FROM runtime_repositories WHERE id=? OR (host=? AND slug=?)').all(workspace.repository, workspace.host, workspace.slug);
         if (existingRepository.some(r => r.id !== workspace.repository || r.host !== workspace.host || r.slug !== workspace.slug)) throw new Error('Canonical remote identity conflict');

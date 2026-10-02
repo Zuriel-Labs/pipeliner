@@ -181,9 +181,13 @@ export function selectedModel(models, route) {
 }
 
 export async function chat(key, model, messages, tools, route = 'cloud', options = {}) {
-  const result = await api('/api/chat', key, { route, ...options, body: {
-    model, messages, tools, stream: true, think: false, options: { temperature: 0, num_predict: 128 },
-  }, consume: options.consume ?? ((response) => parseStream(response.body)) }, options.send ?? fetch);
+  const numPredict = options.numPredict ?? 128;
+  if (!Number.isSafeInteger(numPredict) || numPredict < 1 || numPredict > 8192) throw new Error('output-limit-invalid');
+  const timeoutMs = options.timeoutMs ?? 30000;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 120000) throw new Error('timeout-limit-invalid');
+  const result = await api('/api/chat', key, { ...options, route, body: {
+    model, messages, tools, stream: true, think: false, options: { temperature: 0, num_predict: numPredict },
+  }, consume: options.consume ?? ((response) => parseStream(response.body)) }, options.send ?? fetch, timeoutMs);
   if (result.responseModel !== model && !(route === 'local-cloud' && model.endsWith(':cloud') && result.responseModel === model.slice(0, -6))) throw new Error('model-mismatch');
   if (result.doneReason === 'length') throw new Error('output-truncated');
   return result;

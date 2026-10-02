@@ -1,4 +1,5 @@
 import { connectionIds } from './vault.mjs';
+import { createHash } from 'node:crypto';
 
 const catalog = Object.freeze({
   github: { name: 'GitHub', destination: 'api.github.com · github.com', explanation: 'Scoped App access to authorized repositories and organization Projects. Account, installation and resource metadata go to GitHub.' },
@@ -6,7 +7,7 @@ const catalog = Object.freeze({
   codex: { name: 'Codex', destination: 'ChatGPT managed OAuth · Codex service', explanation: 'Codex manages ChatGPT login and refresh in its own protected provider home. Account and model discovery go to Codex.' },
   ollama: { name: 'Ollama Cloud', destination: 'https://ollama.com/api', explanation: 'A protected API key goes directly to Ollama Cloud. Model discovery sends authentication only. No local model or automatic provider fallback.' },
 });
-export const safeConnectionError = error => /^(http-\d{3}|graphql-(forbidden|rejected|insufficient-scopes|validation|not-found)|cancelled|timeout|reauthentication-required|authorization-(expired|denied)|device-flow-disabled|secure-storage-unavailable|protected-record-invalid|connection-changed|provider-unavailable|provider-storage-blocked|capability-unverified|catalog-invalid|model-unavailable|partial-access|account-changed|app-changed|response-too-large|response-invalid|read-failed|transport-failed|native-entry-failed|native-entry-cancelled)$/.test(error?.message) ? error.message : 'connection-check-failed';
+export const safeConnectionError = error => /^(http-\d{3}|graphql-(forbidden|rejected|insufficient-scopes|validation|not-found)|cancelled|timeout|reauthentication-required|authorization-(expired|denied)|device-flow-disabled|secure-storage-unavailable|protected-record-invalid|connection-changed|provider-unavailable|provider-storage-blocked|capability-unverified|catalog-invalid|model-unavailable|model-mismatch|output-truncated|partial-access|account-changed|app-changed|response-too-large|response-invalid|read-failed|transport-failed|native-entry-failed|native-entry-cancelled)$/.test(error?.message) ? error.message : 'connection-check-failed';
 
 // Host-only handle. Workers and renderer receive status, never this object or records.
 export function createConnectionManager({ vault, adapters, onChange = () => {}, initialRevision = 1 }) {
@@ -24,6 +25,8 @@ export function createConnectionManager({ vault, adapters, onChange = () => {}, 
         repositories: view.repositories ?? [], projects: view.projects ?? [], installations: view.installations ?? [], owners: view.owners ?? [],
         resourceCompleteness: view.resourceCompleteness ?? null, permissions: view.permissions ?? [],
         models: view.models ?? [], selectedModel: view.selectedModel ?? null, capability: view.capability ?? null,
+        executionAvailable: Boolean(adapters[id]?.turn && !task && view.health === 'connected' && view.selectedModel && view.capability?.model === view.selectedModel
+          && ['stream', 'toolLoop', 'resumed'].every(key => view.capability[key] === true)),
         credentialStatus: view.credentialStatus ?? (value ? 'Protected locally; rechecked before use' : 'No local credential'),
         error, busy: Boolean(task), cleanupPending: Boolean(value?.cleanupPending),
       };
@@ -75,23 +78,59 @@ export function createConnectionManager({ vault, adapters, onChange = () => {}, 
       .finally(() => { if (tasks.get(id) === task) { tasks.delete(id); changed(); } });
     return { accepted: true, snapshot: status(), message: 'Disconnected locally. Provider authorization may remain; remove it in provider settings if needed.' };
   }
+  async function acquire(id, signal) {
+    signal?.throwIfAborted(); start(id, 'refresh'); const refresh = tasks.get(id), abort = () => refresh.controller.abort();
+    signal?.addEventListener('abort', abort, { once: true }); if (signal?.aborted) abort();
+    try { while (tasks.has(id)) await tasks.get(id).done; }
+    finally { signal?.removeEventListener('abort', abort); }
+    requireReady(id); signal?.throwIfAborted();
+    const stored = vault.get(id);
+    if (errors.has(id) || !stored.value || stored.value.cleanupPending || !['connected', 'limited'].includes(stored.value.view?.health)
+      || id !== 'codex' && !stored.value.credential) throw new Error('connection-unavailable');
+    const controller = new AbortController(), group = leases.get(id) ?? new Set(); leases.set(id, group); group.add(controller);
+    const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+    return Object.freeze({ id, epoch: stored.epoch, value: stored.value, signal: combined,
+      check() { combined.throwIfAborted(); if (closed || tasks.has(id) || !vault.current(id, stored.epoch)) throw new Error('connection-changed'); },
+      close() { controller.abort(); group.delete(controller); },
+    });
+  }
   return Object.freeze({ status, start, cancel, disconnect,
+    developers() { return status().connections.filter(connection => connection.executionAvailable).map(connection => ({
+      id: connection.id + '_' + createHash('sha256').update(connection.selectedModel).digest('hex').slice(0, 12), connection: connection.id, model: connection.selectedModel, metrics: [],
+    })); },
     async idle(id) { while (tasks.has(id)) await tasks.get(id).done; },
     // Host-only lease. The renderer and execution agents never receive this record.
     async acquire(id, signal) {
       if (!['github', 'github-setup'].includes(id)) throw new Error('connection-denied');
-      signal?.throwIfAborted(); start(id, 'refresh'); const refresh = tasks.get(id), abort = () => refresh.controller.abort();
-      signal?.addEventListener('abort', abort, { once: true }); if (signal?.aborted) abort();
-      try { while (tasks.has(id)) await tasks.get(id).done; }
-      finally { signal?.removeEventListener('abort', abort); }
-      requireReady(id); signal?.throwIfAborted();
-      const stored = vault.get(id);
-      if (errors.has(id) || !stored.value?.credential || !['connected', 'limited'].includes(stored.value.view?.health)) throw new Error('connection-unavailable');
-      const controller = new AbortController(), group = leases.get(id) ?? new Set(); leases.set(id, group); group.add(controller);
-      const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
-      return Object.freeze({ id, epoch: stored.epoch, value: stored.value, signal: combined,
-        check() { combined.throwIfAborted(); if (closed || tasks.has(id) || !vault.current(id, stored.epoch)) throw new Error('connection-changed'); },
-        close() { controller.abort(); group.delete(controller); },
+      return acquire(id, signal);
+    },
+    async acquireProvider(id, model, signal) {
+      requireReady(id);
+      if (!['ollama', 'codex'].includes(id) || typeof adapters[id].turn !== 'function') throw new Error('capability-unverified');
+      const lease = await acquire(id, signal), view = lease.value.view;
+      if (view.health !== 'connected' || view.selectedModel !== model || view.capability?.model !== model || !view.models?.some(item => item.id === model)
+        || !Number.isSafeInteger(view.capability.testedAt) || view.capability.testedAt < 1 || !['stream', 'toolLoop', 'resumed'].every(key => view.capability[key] === true)) {
+        lease.close(); throw new Error('capability-unverified');
+      }
+      let pending = false;
+      return Object.freeze({ id, model, epoch: lease.epoch, signal: lease.signal, check: lease.check, close: lease.close,
+        async turn(input) {
+          lease.check();
+          if (pending) throw new Error('provider-turn-pending');
+          if (!input || Object.keys(input).sort().join(',') !== 'maxOutput,messages,tools' || !Array.isArray(input.messages) || !Array.isArray(input.tools)
+            || !Number.isSafeInteger(input.maxOutput) || input.maxOutput < 1 || input.maxOutput > 8192 || Buffer.byteLength(JSON.stringify(input)) > 1024 * 1024) throw new Error('provider-input-invalid');
+          pending = true;
+          try {
+            const result = await adapters[id].turn({ ...input, value: lease.value, model, signal: lease.signal });
+            lease.check(); return result;
+          } catch (error) {
+            if (!lease.signal.aborted && !tasks.has(id) && vault.current(id, lease.epoch)) {
+              const code = safeConnectionError(error), epoch = vault.begin(id); fence(id); errors.set(id, code);
+              vault.save(id, epoch, { ...lease.value, view: { ...view, health: ['http-401', 'reauthentication-required', 'account-changed'].includes(code) ? 'reauthentication' : 'offline', capability: null } }); changed();
+            }
+            throw error;
+          } finally { pending = false; }
+        },
       });
     },
     epoch(id) { requireReady(id); return vault.get(id).epoch; },

@@ -84,3 +84,32 @@ test('host lease is fresh, stays private and is fenced on disconnect or caller c
     await assert.rejects(waiting); assert.equal(manager.status().connections[0].busy, false);
   } finally { await manager.close(); vault.close(); rmSync(root, { recursive: true, force: true }); }
 });
+
+test('provider lease binds a tested model, hides credentials and discards late or concurrent turns', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-provider-lease-'))); chmodSync(root, 0o700);
+  const vault = await openVault(root, wrap); let finish, calls = 0, observedSignal;
+  const value = { credential: 'synthetic-private-provider-key', view: { health: 'connected', selectedModel: 'test-model', models: [{ id: 'test-model' }],
+    capability: { model: 'test-model', testedAt: 1, stream: true, toolLoop: true, resumed: true } } };
+  const adapter = { connect: async () => value, refresh: async ({ value }) => value, disconnect: async () => {},
+    turn: ({ value: privateValue, model, signal }) => { assert.equal(privateValue.credential, value.credential); assert.equal(model, 'test-model');
+      calls++; observedSignal = signal; return new Promise(resolve => { finish = resolve; }); } };
+  const manager = createConnectionManager({ vault, adapters: { ollama: adapter } });
+  try {
+    manager.start('ollama', 'connect'); await manager.idle('ollama');
+    await assert.rejects(manager.acquireProvider('ollama', 'other-model'), /capability-unverified/);
+    await assert.rejects(manager.acquireProvider('codex', 'test-model'));
+    assert.equal(calls, 0);
+    const lease = await manager.acquireProvider('ollama', 'test-model'); assert.equal(lease.value, undefined);
+    assert.equal(JSON.stringify(manager.status()).includes(value.credential), false);
+    const input = { messages: [{ role: 'user', content: 'Synthetic fixture only.' }], tools: [], maxOutput: 2048 };
+    const pending = lease.turn(input); await Promise.resolve();
+    await assert.rejects(lease.turn(input), /provider-turn-pending/); assert.equal(calls, 1);
+    manager.disconnect('ollama'); assert.equal(observedSignal.aborted, true);
+    finish({ content: 'late result' }); await assert.rejects(pending); await manager.idle('ollama'); lease.close();
+    manager.start('ollama', 'connect'); await manager.idle('ollama');
+    adapter.turn = async () => { throw new Error('http-401'); };
+    const next = await manager.acquireProvider('ollama', 'test-model'); await assert.rejects(next.turn(input), /http-401/);
+    assert.equal(manager.status().connections.find(c => c.id === 'ollama').health, 'reauthentication');
+    assert.throws(() => next.check()); await assert.rejects(manager.acquireProvider('ollama', 'test-model')); next.close();
+  } finally { await manager.close(); vault.close(); rmSync(root, { recursive: true, force: true }); }
+});

@@ -140,6 +140,7 @@ export function ollamaAdapter({ entry, send = fetch }) {
       selectedModel: retained ? value.view.selectedModel : null, capability: retained ? value.view.capability : null } };
   }
   return {
+    noPrompts: true, // The qualified HTTP tool loop has no approval-request protocol.
     async connect({ signal }) {
       const result = await entry(signal); signal.throwIfAborted();
       return refresh({ value: { credential: result.key }, signal });

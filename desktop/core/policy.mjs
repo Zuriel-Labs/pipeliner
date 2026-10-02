@@ -25,10 +25,11 @@ function catalogData(value) {
         if (!['github', 'codex', 'ollama'].includes(item.provider) || !ids(item.repositories) || item.repositories.some(r => !value.repositories.includes(r))
           || (item.healthy !== undefined && typeof item.healthy !== 'boolean')) throw new Error('Invalid connection binding');
       } else if (key === 'developers') {
-        record(item, ['id', 'connection', 'metrics'], ['model']);
+        record(item, ['id', 'connection', 'metrics'], ['model', 'noPrompts']);
         if (!value.connections.some(c => c.id === item.connection && ['codex', 'ollama'].includes(c.provider)) || !Array.isArray(item.metrics)
           || item.metrics.some(m => !['tokens', 'cost'].includes(m)) || new Set(item.metrics).size !== item.metrics.length
-          || (item.model !== undefined && (typeof item.model !== 'string' || !item.model.length || item.model.length > 240))) throw new Error('Invalid Dev binding');
+          || (item.model !== undefined && (typeof item.model !== 'string' || !item.model.length || item.model.length > 240))
+          || item.noPrompts !== undefined && typeof item.noPrompts !== 'boolean') throw new Error('Invalid Dev binding');
       } else {
         record(item, ['id', 'digest']);
         if (typeof item.digest !== 'string' || !/^[a-f0-9]{64}$/.test(item.digest)) throw new Error('Invalid extension pin');

@@ -97,6 +97,7 @@ export function createConnectionManager({ vault, adapters, onChange = () => {}, 
   return Object.freeze({ status, start, cancel, disconnect,
     developers() { return status().connections.filter(connection => connection.executionAvailable).map(connection => ({
       id: connection.id + '_' + createHash('sha256').update(connection.selectedModel).digest('hex').slice(0, 12), connection: connection.id, model: connection.selectedModel, metrics: [],
+      noPrompts: adapters[connection.id]?.noPrompts === true,
     })); },
     async idle(id) { while (tasks.has(id)) await tasks.get(id).done; },
     // Host-only lease. The renderer and execution agents never receive this record.

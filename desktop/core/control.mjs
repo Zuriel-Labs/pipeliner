@@ -1,5 +1,6 @@
 import { canonicalJSON, record } from './settings.mjs';
 import { connectionCommand } from '../connections/commands.mjs';
+import { setupCommand } from '../repositories/commands.mjs';
 
 function trustedContext(event, { contents, url, context }) {
   if (contents.isDestroyed() || event?.sender !== contents || !event.senderFrame || event.senderFrame !== contents.mainFrame
@@ -87,5 +88,21 @@ export function createConnectionControlChannel(manager, binding) {
     if (action.operation === 'disconnect') return manager.disconnect(action.connection);
     if (!['connect', 'refresh', 'test'].includes(action.operation)) throw new Error('Unknown connection operation');
     return manager.start(action.connection, action.operation, action.model);
+  } });
+}
+
+export function createWorkspaceControlChannel(manager, binding) {
+  return Object.freeze({ dispatch(event, payload) {
+    const current = trustedContext(event, binding); canonicalJSON(payload);
+    if (payload?.operation === 'status') { record(payload, ['operation']); return manager.status(); }
+    const shapes = {
+      begin: [['mode'], ['values']], chat: [['text'], []], choose: [['field', 'value'], []], map: [['role', 'field'], []],
+      folder: [[], []], prepare: [[], []], apply: [['hash'], []], cancel: [[], []], repair: [[], []], select: [['workspace'], []], install: [[], []],
+    };
+    const shape = shapes[payload?.operation]; if (!shape) throw new Error('Unknown setup operation');
+    record(payload, ['operation', 'contextRevision', ...shape[0]], shape[1]);
+    if (payload.contextRevision !== current.revision) throw new Error('Control context changed');
+    if (payload.operation === 'chat') { const action = setupCommand(payload.text); return action ? manager.dispatch(action) : manager.status().draft ? manager.dispatch({ operation: 'answer', text: payload.text }) : { message: 'Ask to import or create a project, or choose one setup action below.' }; }
+    return manager.dispatch(payload);
   } });
 }

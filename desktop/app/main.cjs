@@ -12,9 +12,9 @@ const helper = argument('--key-helper');
 app.setName('Pipeliner'); app.setPath('userData', dataDirectory); app.setPath('crashDumps', path.join(dataDirectory, 'crashes'));
 protocol.registerSchemesAsPrivileged([{ scheme: 'pipeliner', privileges: { standard: true, secure: true } }]);
 if (!app.requestSingleInstanceLock()) app.exit(0);
-let window, manager, vault, closing = false, verifiedClose = false;
+let window, manager, vault, workspaces, workspaceStore, closing = false, verifiedClose = false;
 const moduleAt = file => import(pathToFileURL(path.join(__dirname, file)).href);
-const assets = new Map(['index.html', 'app.css', 'app.mjs'].map(file => [file, path.join(__dirname, file)]));
+const assets = new Map(['index.html', 'app.css', 'app.mjs', 'workspaces.mjs'].map(file => [file, path.join(__dirname, file)]));
 assets.set('commands.mjs', path.join(__dirname, '../connections/commands.mjs')); assets.set('tokens.css', path.join(__dirname, '../prototype/style.css'));
 function asset(value) {
   try { const parsed = new URL(value); return parsed.protocol === 'pipeliner:' && parsed.host === 'app' && !parsed.username && !parsed.password && !parsed.port && !parsed.search && !parsed.hash && assets.has(parsed.pathname.slice(1)) ? parsed.pathname.slice(1) : null; }
@@ -28,9 +28,11 @@ app.whenReady().then(async () => {
   if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o777) !== 0o700 || info.uid !== process.getuid() || directory !== path.resolve(dataDirectory)) throw new Error('storage-directory-invalid');
   const { createConnectionManager } = await moduleAt('../connections/manager.mjs');
   const { createConnectionControlChannel } = await moduleAt('../core/control.mjs');
+  const { createWorkspaceControlChannel } = await moduleAt('../core/control.mjs');
+  const { createWorkspaceManager } = await moduleAt('../repositories/manager.mjs');
   const { githubAdapter } = await moduleAt('../connections/github.mjs');
   const { codexAdapter, ollamaAdapter } = await moduleAt('../connections/providers.mjs');
-  const { nativeKeyEntry } = await moduleAt('../connections/native-entry.mjs');
+  const { nativeKeyEntry, nativeFolderEntry } = await moduleAt('../connections/native-entry.mjs');
   const activeConnections = new Set();
   const publish = snapshot => {
     let returned = false;
@@ -44,6 +46,15 @@ app.whenReady().then(async () => {
   };
   if (qualifying) adapters = await require('./qualify.cjs').adapters({ directory, helper, nativeKeyEntry });
   manager = createConnectionManager({ vault: null, adapters, onChange: publish });
+  const workspaceOptions = qualifying ? await require('./qualify.cjs').workspaceOptions({ directory, helper, nativeFolderEntry }) : {};
+  let workspaceBusy = false;
+  const publishWorkspaces = snapshot => { if (window && !window.isDestroyed()) { window.webContents.send('workspaces:status', snapshot); if (workspaceBusy && !snapshot.busy && !closing) { window.show(); window.focus(); window.webContents.focus(); } } workspaceBusy = snapshot.busy; };
+  const makeWorkspaces = initialRevision => createWorkspaceManager({ store: workspaceStore, initialRevision, onChange: publishWorkspaces,
+    connections: { status: () => manager.status(), acquire: (...args) => manager.acquire(...args), epoch: id => manager.epoch(id) },
+    folder: (signal, existing) => nativeFolderEntry(helper, directory, signal, existing),
+    protectedPaths: [directory, __dirname, path.join(app.getPath('home'), '.codex'), path.join(app.getPath('home'), '.agents')],
+    openInstallation: () => shell.openExternal('https://github.com/apps/pipeliner-desktop/installations/new'), ...workspaceOptions });
+  workspaces = makeWorkspaces(1);
   protocol.handle('pipeliner', request => {
     const name = request.method === 'GET' ? asset(request.url) : null;
     if (!name) return new Response('Unavailable', { status: 404 });
@@ -58,9 +69,11 @@ app.whenReady().then(async () => {
   for (const event of ['will-navigate', 'will-frame-navigate', 'will-attach-webview']) window.webContents.on(event, e => e.preventDefault());
   const channel = () => createConnectionControlChannel(manager, { contents: window.webContents, url, context: () => ({ revision: manager.status().revision }) });
   ipcMain.handle('connections:control', (event, payload) => { if (closing) throw new Error('App closing'); return channel().dispatch(event, payload); });
+  const workspaceChannel = () => createWorkspaceControlChannel(workspaces, { contents: window.webContents, url, context: () => ({ revision: workspaces.status().revision }) });
+  ipcMain.handle('workspaces:control', (event, payload) => { if (closing) throw new Error('App closing'); return workspaceChannel().dispatch(event, payload); });
   window.on('close', async event => {
     if (verifiedClose) return; event.preventDefault(); if (closing) return; closing = true;
-    try { await manager.close(); vault?.close(); verifiedClose = true; window.close(); }
+    try { await workspaces.close(); await manager.close(); workspaceStore?.close(); vault?.close(); verifiedClose = true; window.close(); }
     catch { closing = false; publish(manager.status()); }
   });
   Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Pipeliner', submenu: [{ role: 'about' }, { type: 'separator' }, { role: 'quit' }] }, { role: 'editMenu' },
@@ -72,8 +85,10 @@ app.whenReady().then(async () => {
     if (closing) { vault.close(); return; }
     const initialRevision = manager.status().revision + 1;
     manager = createConnectionManager({ vault, adapters, onChange: publish, initialRevision }); publish(manager.status());
+    const { openWorkspaceStore } = await moduleAt('../repositories/store.mjs');
+    workspaceStore = openWorkspaceStore(directory); workspaces = makeWorkspaces(workspaces.status().revision + 1); publishWorkspaces(workspaces.status());
   } catch { publish(manager.status()); }
-  if (qualifying) await require('./qualify.cjs').run({ window, directory, helper, vault, manager, channel: channel(), windowReadyMs });
+  if (qualifying) await require('./qualify.cjs').run({ window, directory, helper, vault, manager, workspaces, workspaceChannel: workspaceChannel(), channel: channel(), windowReadyMs });
 }).catch(() => { console.error('Pipeliner could not start safely.'); app.exit(1); });
 
 async function githubPrompt({ connection, verificationUri, userCode, signal, cancel }) {

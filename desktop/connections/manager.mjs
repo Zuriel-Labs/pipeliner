@@ -10,7 +10,8 @@ export const safeConnectionError = error => /^(http-\d{3}|graphql-(forbidden|rej
 
 // Host-only handle. Workers and renderer receive status, never this object or records.
 export function createConnectionManager({ vault, adapters, onChange = () => {}, initialRevision = 1 }) {
-  const tasks = new Map(), errors = new Map(); let revision = initialRevision, closed = false;
+  const tasks = new Map(), errors = new Map(), leases = new Map(); let revision = initialRevision, closed = false;
+  const fence = id => { for (const lease of leases.get(id) ?? []) lease.abort(); };
   const changed = () => { revision++; onChange(status()); };
   const requireReady = id => { if (closed || !vault || !connectionIds.includes(id) || !adapters[id]) throw new Error('connection-unavailable'); };
   function status() {
@@ -20,7 +21,7 @@ export function createConnectionManager({ vault, adapters, onChange = () => {}, 
       const view = value?.view ?? {}, task = tasks.get(id);
       return { id, ...catalog[id], health: task ? task.operation === 'disconnect' ? 'disconnecting' : `${task.operation}ing` : value?.cleanupPending ? 'cleanup-required' : view.health ?? 'disconnected',
         account: view.account ?? null, lastVerified: view.lastVerified ?? null, expiresAt: view.expiresAt ?? null,
-        repositories: view.repositories ?? [], projects: view.projects ?? [], installations: view.installations ?? [],
+        repositories: view.repositories ?? [], projects: view.projects ?? [], installations: view.installations ?? [], owners: view.owners ?? [],
         resourceCompleteness: view.resourceCompleteness ?? null, permissions: view.permissions ?? [],
         models: view.models ?? [], selectedModel: view.selectedModel ?? null, capability: view.capability ?? null,
         credentialStatus: view.credentialStatus ?? (value ? 'Protected locally; rechecked before use' : 'No local credential'),
@@ -36,7 +37,7 @@ export function createConnectionManager({ vault, adapters, onChange = () => {}, 
     if (operation !== 'connect' && (!before || before.cleanupPending || !before.credential && id !== 'codex')) throw new Error('connection-unavailable');
     if (operation === 'test' && (!['connected', 'limited'].includes(before.view?.health) ||
       !before.view.models?.some(entry => entry.id === model))) throw new Error('connection-unavailable');
-    const epoch = vault.begin(id), controller = new AbortController(), task = { operation, controller };
+    fence(id); const epoch = vault.begin(id), controller = new AbortController(), task = { operation, controller };
     tasks.set(id, task); errors.delete(id); changed();
     task.done = Promise.resolve().then(async () => {
       const result = await adapters[id][operation]({ value: before, model, signal: controller.signal });
@@ -55,13 +56,13 @@ export function createConnectionManager({ vault, adapters, onChange = () => {}, 
   function cancel(id) {
     requireReady(id); const task = tasks.get(id); if (!task || task.operation === 'disconnect') throw new Error('connection-unavailable');
     if (id === 'codex' && task.operation === 'connect') return disconnect(id);
-    const epoch = vault.begin(id), value = vault.get(id).value;
+    fence(id); const epoch = vault.begin(id), value = vault.get(id).value;
     if (value?.view) vault.save(id, epoch, { ...value, view: { ...value.view, health: 'offline', capability: null } });
     task.controller.abort(); errors.set(id, 'cancelled'); changed();
     return { accepted: true, snapshot: status() };
   }
   function disconnect(id) {
-    requireReady(id); const previous = tasks.get(id), value = vault.get(id).value, epoch = vault.erase(id);
+    requireReady(id); fence(id); const previous = tasks.get(id), value = vault.get(id).value, epoch = vault.erase(id);
     previous?.controller.abort(); errors.delete(id);
     // Managed provider credentials require verified logout even after an interrupted login.
     if (id === 'codex') vault.save(id, epoch, { cleanupPending: true, credential: null, view: { health: 'disconnected' } });
@@ -76,6 +77,24 @@ export function createConnectionManager({ vault, adapters, onChange = () => {}, 
   }
   return Object.freeze({ status, start, cancel, disconnect,
     async idle(id) { while (tasks.has(id)) await tasks.get(id).done; },
-    async close() { if (tasks.get('codex')?.operation === 'connect') disconnect('codex'); closed = true; for (const task of tasks.values()) task.controller.abort(); await Promise.allSettled([...tasks.values()].map(task => task.done)); },
+    // Host-only lease. The renderer and execution agents never receive this record.
+    async acquire(id, signal) {
+      if (!['github', 'github-setup'].includes(id)) throw new Error('connection-denied');
+      signal?.throwIfAborted(); start(id, 'refresh'); const refresh = tasks.get(id), abort = () => refresh.controller.abort();
+      signal?.addEventListener('abort', abort, { once: true }); if (signal?.aborted) abort();
+      try { while (tasks.has(id)) await tasks.get(id).done; }
+      finally { signal?.removeEventListener('abort', abort); }
+      requireReady(id); signal?.throwIfAborted();
+      const stored = vault.get(id);
+      if (errors.has(id) || !stored.value?.credential || !['connected', 'limited'].includes(stored.value.view?.health)) throw new Error('connection-unavailable');
+      const controller = new AbortController(), group = leases.get(id) ?? new Set(); leases.set(id, group); group.add(controller);
+      const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+      return Object.freeze({ id, epoch: stored.epoch, value: stored.value, signal: combined,
+        check() { combined.throwIfAborted(); if (closed || tasks.has(id) || !vault.current(id, stored.epoch)) throw new Error('connection-changed'); },
+        close() { controller.abort(); group.delete(controller); },
+      });
+    },
+    epoch(id) { requireReady(id); return vault.get(id).epoch; },
+    async close() { if (tasks.get('codex')?.operation === 'connect') disconnect('codex'); closed = true; for (const id of leases.keys()) fence(id); for (const task of tasks.values()) task.controller.abort(); await Promise.allSettled([...tasks.values()].map(task => task.done)); },
   });
 }

@@ -82,6 +82,7 @@ export async function inspectGitHub(credential, { setup = false, previousAccount
   return { credential, account: { id: account.id, node: account.node_id }, view: { account: account.login,
     health: projectsComplete ? 'connected' : 'limited', lastVerified: now(), expiresAt: credential.expiresAt,
     repositories: normalized, projects, installations, resourceCompleteness: { repositories: true, projects: projectsComplete },
+    owners: [...owners.values()].map(owner => ({ id: owner.id, node: owner.node_id, login: owner.login, type: owner.type })),
     permissions: setup ? [...credential.scopes] : Object.entries(appPermissions).map(([name, level]) => `${name}: ${level}`), models: [], capability: null } };
 }
 

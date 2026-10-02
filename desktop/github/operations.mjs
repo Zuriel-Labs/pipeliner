@@ -1,9 +1,10 @@
 import { isDeepStrictEqual } from 'node:util';
 import { collectConnection } from '../../scripts/lib/project.mjs';
 
-const protectedLabel = 'Ready for Development';
-const activeStatuses = new Set(['In Progress', 'In Review', 'Pending Review']);
-const normalizeLabel = value => value.normalize('NFKC').trim().toLowerCase();
+export const protectedLabel = 'Ready for Development';
+export const activeIssueStatuses = Object.freeze(['In Progress', 'In Review', 'Pending Review']);
+const activeStatuses = new Set(activeIssueStatuses);
+export const normalizeLabel = value => value.normalize('NFKC').trim().toLowerCase();
 const plain = value => value && typeof value === 'object' && !Array.isArray(value) &&
   [Object.prototype, null].includes(Object.getPrototypeOf(value));
 const text = (value, limit) => typeof value === 'string' && value.trim().length > 0 && value.length <= limit && !value.includes('\0');

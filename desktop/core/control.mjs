@@ -1,6 +1,7 @@
 import { canonicalJSON, record } from './settings.mjs';
 import { connectionCommand } from '../connections/commands.mjs';
 import { setupCommand } from '../repositories/commands.mjs';
+import { issueCommand } from '../issues/commands.mjs';
 
 function trustedContext(event, { contents, url, context }) {
   if (contents.isDestroyed() || event?.sender !== contents || !event.senderFrame || event.senderFrame !== contents.mainFrame
@@ -104,5 +105,25 @@ export function createWorkspaceControlChannel(manager, binding) {
     if (payload.contextRevision !== current.revision) throw new Error('Control context changed');
     if (payload.operation === 'chat') { const action = setupCommand(payload.text); return action ? manager.dispatch(action) : manager.status().draft ? manager.dispatch({ operation: 'answer', text: payload.text }) : { message: 'Ask to import or create a project, or choose one setup action below.' }; }
     return manager.dispatch(payload);
+  } });
+}
+
+export function createIssueControlChannel(manager, binding) {
+  return Object.freeze({ dispatch(event, payload) {
+    const current = trustedContext(event, binding); canonicalJSON(payload);
+    if (payload?.operation === 'status') { record(payload, ['operation']); return manager.status(); }
+    const shapes = { chat: [['text'], []], refresh: [[], []], select: [['number'], []], begin: [[], ['values']], choose: [['field', 'value'], []], prepare: [[], []],
+      create: [[], ['hash']], cancel: [[], []], repair: [[], []], ready: [['number', 'enabled'], []], 'policy-prepare': [['mode', 'agentCreation'], []], 'policy-apply': [['hash'], []], 'policy-cancel': [[], []] };
+    const shape = shapes[payload?.operation]; if (!shape) throw new Error('Unknown Issue operation');
+    record(payload, ['operation', 'contextRevision', ...shape[0]], shape[1]);
+    if (payload.contextRevision !== current.revision) throw new Error('Control context changed');
+    let action = payload;
+    if (payload.operation === 'chat') {
+      action = issueCommand(payload.text);
+      if (!action) return manager.status().draft ? manager.dispatch({ operation: 'answer', text: payload.text }) : { message: 'Ask to show Issues, draft an Issue or mark a specific Issue Ready.' };
+      if (action.operation === 'policy-prepare') { const policy = manager.status().policy; action = { ...action, mode: action.mode ?? policy?.mode.value, agentCreation: action.agentCreation ?? policy?.agentCreation.value }; }
+      if (action.operation === 'policy-apply') action = { ...action, hash: manager.status().policyPreview?.hash };
+    }
+    return manager.dispatch(action);
   } });
 }

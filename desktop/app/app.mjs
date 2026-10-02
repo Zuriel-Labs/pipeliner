@@ -1,19 +1,31 @@
 import { containsSecret, connectionCommand } from './commands.mjs';
 import { initWorkspaces } from './workspaces.mjs';
+import { initIssues } from './issues.mjs';
 
 let state = null, returnFocus = null; const drafts = new Map(), previousBusy = new Set();
 const $ = id => document.getElementById(id);
+let currentContext = null; const conversations = new Map();
+function setContext(target, label) {
+  if (target === currentContext) return;
+  conversations.set(currentContext, { nodes: [...$('transcript').childNodes], prompt: $('prompt').value }); currentContext = target;
+  const saved = conversations.get(target); $('transcript').replaceChildren(...(saved?.nodes ?? [])); $('prompt').value = saved?.prompt ?? '';
+  $('chat-title').textContent = label ? label : 'Start with a conversation.';
+  $('chat-scope').textContent = label ? 'This conversation and Issue controls apply to this repository. Connections remain installation settings.' : 'Connect your accounts here. Keys and sign-in stay in protected surfaces.';
+  if (!saved) message(label ? 'Repository selected. Ask to show Issues, draft an Issue or mark a specific Issue Ready.' : 'Connect your accounts or import a project.');
+}
 const labels = { disconnected: 'Not connected', connecting: 'Waiting for sign-in', refreshing: 'Checking access', testing: 'Testing model', disconnecting: 'Disconnecting', connected: 'Checked', limited: 'Limited / test needed', offline: 'Check needed', reauthentication: 'Sign in again', 'cleanup-required': 'Cleanup needs retry' };
 const errors = { cancelled: 'Cancelled. Existing keys stay protected; check the connection before using it.', 'native-entry-cancelled': 'Key entry cancelled.', 'http-401': 'Access was denied. Reconnect or replace your key.', 'http-403': 'The account is missing required access. Check provider permissions.', 'authorization-expired': 'Sign-in expired. Start again.', 'authorization-denied': 'Sign-in was declined.', 'provider-storage-blocked': 'Codex could not verify protected login storage. Reconnect after checking macOS Keychain.', 'secure-storage-unavailable': 'Protected storage is unavailable. Unlock macOS Keychain and reopen Pipeliner.', 'partial-access': 'The resource list was incomplete. Check access again.', 'app-changed': 'The registered GitHub App changed. Its permissions need qualification.', 'capability-unverified': 'This model did not complete the required synthetic tool test.', 'account-changed': 'The signed-in account changed. Reconnect to choose it deliberately.' };
 
 function showSettings(show = true) {
-  $('chat-view').hidden = show; $('settings-view').hidden = !show; $('workspace-view').hidden = true;
-  for (const [id, active] of [['chat-nav', !show], ['settings-nav', show], ['repositories-nav', false]]) { $(id).classList.toggle('current', active); if (active) $(id).setAttribute('aria-current', 'page'); else $(id).removeAttribute('aria-current'); }
+  $('chat-view').hidden = show; $('settings-view').hidden = !show; $('workspace-view').hidden = true; $('issues-view').hidden = true;
+  for (const [id, active] of [['chat-nav', !show], ['settings-nav', show], ['repositories-nav', false], ['issues-nav', false]]) { $(id).classList.toggle('current', active); if (active) $(id).setAttribute('aria-current', 'page'); else $(id).removeAttribute('aria-current'); }
 }
-function message(text, pm = false) {
+function message(text, pm = false, target = currentContext) {
   const article = document.createElement('article'); article.className = `message ${pm ? 'pm' : 'assistant'}`;
   const label = document.createElement('span'); label.className = 'message-label'; label.textContent = pm ? 'You' : 'Pipeliner';
-  const content = document.createElement('p'); content.textContent = text; article.append(label, content); $('transcript').append(article); article.scrollIntoView({ block: 'nearest' });
+  const content = document.createElement('p'); content.textContent = text; article.append(label, content);
+  if (target === currentContext) { $('transcript').append(article); article.scrollIntoView({ block: 'nearest' }); }
+  else { const saved = conversations.get(target) ?? { nodes: [], prompt: '' }; saved.nodes.push(article); conversations.set(target, saved); }
 }
 function el(tag, text, className) { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (className) node.className = className; return node; }
 function render(snapshot) {
@@ -65,14 +77,15 @@ function render(snapshot) {
 }
 async function request(payload, text) {
   if (!state) return;
+  const target = currentContext;
   returnFocus = document.activeElement?.id || 'prompt';
   try {
     const result = await window.pipeliner.request({ ...payload, contextRevision: state.revision });
-    if (text && !containsSecret(text)) { message(text, true); $('prompt').value = ''; }
+    if (text && !containsSecret(text)) { message(text, true, target); if (target === currentContext) $('prompt').value = ''; }
     if (result.snapshot) render(result.snapshot);
-    if (result.message) message(result.message);
-    else if (result.accepted) message('Working on the selected connection. Continue in its protected surface, or use Cancel in Settings.');
-    if (result.choices) {
+    if (result.message) message(result.message, false, target);
+    else if (result.accepted) message('Working on the selected connection. Continue in its protected surface, or use Cancel in Settings.', false, target);
+    if (result.choices && target === currentContext) {
       const choices = el('div', undefined, 'suggestions');
       for (const choice of result.choices) { const button = el('button', `Test ${choice.name}`, 'secondary'); button.addEventListener('click', () => request({ operation: 'test', connection: choice.connection, model: choice.model })); choices.append(button); }
       $('transcript').lastElementChild.append(choices);
@@ -82,12 +95,17 @@ async function request(payload, text) {
   else if (returnFocus && $(returnFocus) && !$(returnFocus).disabled) { $(returnFocus).focus(); returnFocus = null; }
 }
 const workspaces = await initWorkspaces({ el, message, show: () => {
-  $('chat-view').hidden = true; $('settings-view').hidden = true; $('workspace-view').hidden = false;
-  for (const id of ['chat-nav', 'settings-nav', 'repositories-nav']) { $(id).classList.toggle('current', id === 'repositories-nav'); if (id === 'repositories-nav') $(id).setAttribute('aria-current', 'page'); else $(id).removeAttribute('aria-current'); }
+  $('chat-view').hidden = true; $('settings-view').hidden = true; $('workspace-view').hidden = false; $('issues-view').hidden = true;
+  for (const id of ['chat-nav', 'settings-nav', 'repositories-nav', 'issues-nav']) { $(id).classList.toggle('current', id === 'repositories-nav'); if (id === 'repositories-nav') $(id).setAttribute('aria-current', 'page'); else $(id).removeAttribute('aria-current'); }
+} });
+const issues = await initIssues({ el, message, setContext, show: () => {
+  for (const id of ['chat-view', 'workspace-view', 'settings-view', 'issues-view']) $(id).hidden = id !== 'issues-view';
+  for (const id of ['chat-nav', 'settings-nav', 'repositories-nav', 'issues-nav']) { $(id).classList.toggle('current', id === 'issues-nav'); if (id === 'issues-nav') $(id).setAttribute('aria-current', 'page'); else $(id).removeAttribute('aria-current'); }
 } });
 $('composer').addEventListener('submit', event => { event.preventDefault(); const text = $('prompt').value.trim(); if (!text) return;
   if (containsSecret(text)) { $('prompt').value = ''; message('Use the protected connection surface for keys. Nothing was saved or sent.'); $('prompt').focus(); return; }
-  if (!connectionCommand(text).connection && workspaces.handles(text)) workspaces.chat(text);
+  if (!connectionCommand(text).connection && issues.handles(text)) issues.chat(text);
+  else if (!connectionCommand(text).connection && workspaces.handles(text)) workspaces.chat(text);
   else request({ operation: 'chat', text }, text);
 });
 $('chat-nav').addEventListener('click', () => showSettings(false)); $('settings-nav').addEventListener('click', () => showSettings());

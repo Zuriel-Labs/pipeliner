@@ -15,11 +15,14 @@ export function openWorkspaceStore(directory) {
   const db = new DatabaseSync(protectedFile(directory, 'workspaces.sqlite'), { allowExtension: false, timeout: 1000 });
   try {
     const version = db.prepare('PRAGMA user_version').get().user_version;
-    if (![0, 1].includes(version)) throw new Error('setup-schema-unsupported');
+    if (![0, 1, 2].includes(version)) throw new Error('setup-schema-unsupported');
     db.exec('PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;');
     if (!version) transact(db, () => {
       if (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().length) throw new Error('setup-schema-unsupported');
       db.exec("CREATE TABLE setup_draft(id INTEGER PRIMARY KEY CHECK(id=1),data TEXT NOT NULL,hash TEXT NOT NULL); CREATE TABLE workspaces(id TEXT PRIMARY KEY,repository_id TEXT NOT NULL UNIQUE,slug TEXT NOT NULL UNIQUE,local_key TEXT NOT NULL UNIQUE,data TEXT NOT NULL,hash TEXT NOT NULL); CREATE TABLE setup_effects(id TEXT PRIMARY KEY,job TEXT NOT NULL,step TEXT NOT NULL,fingerprint TEXT NOT NULL,data TEXT NOT NULL,state TEXT NOT NULL,result TEXT,UNIQUE(job,step)); CREATE TABLE workspace_selection(id INTEGER PRIMARY KEY CHECK(id=1),workspace TEXT REFERENCES workspaces(id)); PRAGMA user_version=1;");
+    });
+    if (version < 2) transact(db, () => {
+      db.exec('CREATE TABLE issue_contexts(repository TEXT PRIMARY KEY REFERENCES workspaces(id),data TEXT NOT NULL,hash TEXT NOT NULL); CREATE TABLE issue_ready(repository TEXT NOT NULL REFERENCES workspaces(id),issue TEXT NOT NULL,ready INTEGER NOT NULL CHECK(ready IN (0,1)),observed_at INTEGER NOT NULL,PRIMARY KEY(repository,issue)); PRAGMA user_version=2;');
     });
   } catch (error) { db.close(); throw error; }
   function effect(row) {
@@ -33,6 +36,19 @@ export function openWorkspaceStore(directory) {
     workspaces: () => db.prepare('SELECT data,hash FROM workspaces ORDER BY rowid').all().map(decode),
     selected: () => db.prepare('SELECT workspace FROM workspace_selection WHERE id=1').get()?.workspace ?? null,
     select(id) { if (!db.prepare('SELECT id FROM workspaces WHERE id=?').get(id)) throw new Error('workspace-unavailable'); db.prepare('INSERT INTO workspace_selection VALUES(1,?) ON CONFLICT(id) DO UPDATE SET workspace=excluded.workspace').run(id); },
+    issueContext: repository => decode(db.prepare('SELECT data,hash FROM issue_contexts WHERE repository=?').get(repository)),
+    saveIssueContext(repository, value) {
+      if (!identifier(repository) || !db.prepare('SELECT id FROM workspaces WHERE id=?').get(repository)) throw new Error('workspace-unavailable');
+      db.prepare('INSERT INTO issue_contexts VALUES(?,?,?) ON CONFLICT(repository) DO UPDATE SET data=excluded.data,hash=excluded.hash').run(repository, encode(value), digest(value));
+    },
+    observeReady(repository, issue, ready, observedAt, own = false) {
+      if (!identifier(repository) || !remoteIdentifier(issue) || typeof ready !== 'boolean' || !Number.isSafeInteger(observedAt) || observedAt < 0 || typeof own !== 'boolean') throw new Error('setup-record-invalid');
+      return transact(db, () => {
+        const before = db.prepare('SELECT ready FROM issue_ready WHERE repository=? AND issue=?').get(repository, issue);
+        db.prepare('INSERT INTO issue_ready VALUES(?,?,?,?) ON CONFLICT(repository,issue) DO UPDATE SET ready=excluded.ready,observed_at=excluded.observed_at').run(repository, issue, Number(ready), observedAt);
+        return { ready, drift: Boolean(before && Boolean(before.ready) !== ready && !own) };
+      });
+    },
     register(value) {
       if (!identifier(value?.id) || !remoteIdentifier(value.repositoryId) || typeof value.slug !== 'string' || !/^[a-z0-9-]{1,39}\/[a-z0-9_.-]{1,100}$/.test(value.slug)
         || typeof value.localKey !== 'string' || !/^\d+:\d+$/.test(value.localKey) || !isAbsolute(value.path) || !remoteIdentifier(value.project?.id)) throw new Error('setup-record-invalid');
@@ -47,7 +63,7 @@ export function openWorkspaceStore(directory) {
       });
     },
     effects: job => db.prepare('SELECT * FROM setup_effects WHERE job=? ORDER BY rowid').all(job).map(effect),
-    pending: () => db.prepare("SELECT * FROM setup_effects WHERE state IN ('dispatched','uncertain') ORDER BY rowid").all().map(effect),
+    pending: kind => db.prepare("SELECT * FROM setup_effects WHERE state IN ('dispatched','uncertain') ORDER BY rowid").all().map(effect).filter(effect => kind === undefined || (effect.binding.kind ?? 'setup') === kind),
     prepare(job, step, binding) {
       if (!identifier(job) || !identifier(step)) throw new Error('setup-record-invalid');
       return transact(db, () => {
@@ -58,6 +74,7 @@ export function openWorkspaceStore(directory) {
       });
     },
     dispatch(id) { return db.prepare("UPDATE setup_effects SET state='dispatched' WHERE id=? AND state='prepared'").run(id).changes === 1; },
+    checkpoint(id, result) { if (db.prepare("UPDATE setup_effects SET result=? WHERE id=? AND state='dispatched'").run(encode(result), id).changes !== 1) throw new Error('effect-state-conflict'); },
     finish(id, state, result = null) {
       if (!['verified', 'uncertain', 'denied'].includes(state) || db.prepare("UPDATE setup_effects SET state=?,result=? WHERE id=? AND state IN ('dispatched','uncertain')").run(state, encode(result), id).changes !== 1) throw new Error('effect-state-conflict');
     },

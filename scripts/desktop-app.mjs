@@ -6,15 +6,15 @@ import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const exec = promisify(execFile), root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const qualifying = process.argv.includes('--qualify');
-if (process.argv.slice(2).some(arg => !['--qualify', '--retain-owned-capture'].includes(arg))) throw new Error('argument-denied');
+const qualifying = process.argv.includes('--qualify') || process.argv.includes('--qualify-issues');
+if (process.argv.slice(2).some(arg => !['--qualify', '--qualify-issues', '--retain-owned-capture'].includes(arg))) throw new Error('argument-denied');
 if (process.platform !== 'darwin' || process.arch !== 'arm64') throw new Error('host-unqualified');
 const temporary = await realpath(await mkdtemp(join(tmpdir(), 'pipeliner-app-'))), helper = join(temporary, 'secure-entry');
 let child, timer, code = 1, report = '', errors = 0;
 try {
   await exec('/usr/bin/clang', ['-fobjc-arc', '-framework', 'AppKit', '-mmacosx-version-min=13.0', ...(qualifying ? ['-DPIPELINER_QUALIFY'] : []), join(root, 'desktop/connections/secure-entry.m'), '-o', helper], { timeout: 30000 });
   const electron = join(root, 'desktop/prototype/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron'); await access(electron);
-  child = spawn(electron, [join(root, 'desktop/app/main.cjs'), `--key-helper=${helper}`, ...(qualifying ? ['--qualify', `--data-directory=${temporary}`] : [])], {
+  child = spawn(electron, [join(root, 'desktop/app/main.cjs'), `--key-helper=${helper}`, ...(qualifying ? ['--qualify', ...(process.argv.includes('--qualify-issues') ? ['--qualify-issues'] : []), `--data-directory=${temporary}`] : [])], {
     env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: homedir(), TMPDIR: temporary, LANG: 'en_US.UTF-8' }, stdio: ['ignore', 'pipe', 'pipe'],
   });
   if (qualifying) timer = setTimeout(() => child.kill('SIGTERM'), 180000);

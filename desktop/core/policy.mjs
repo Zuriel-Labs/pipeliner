@@ -221,6 +221,8 @@ export function openPolicyStore(directory, { catalog, clock = Date.now, inspecto
             for (const extension of after['skills.disabled']) if (!before['skills.disabled'].includes(extension)) revoke.run(repository, 'extension', extension, revision);
             if (before['skills.bundledEnabled'] && !after['skills.bundledEnabled']) revoke.run(repository, 'bundled', 'bundled', revision);
             if (before['agents.takeover'] && !after['agents.takeover']) revoke.run(repository, 'takeover', 'automatic', revision);
+            if (before['intake.agentCreation'] && !after['intake.agentCreation']) revoke.run(repository, 'intake', 'agentCreation', revision);
+            if (before['intake.mode'] !== after['intake.mode']) revoke.run(repository, 'intake', before['intake.mode'], revision);
           }
           db.prepare('UPDATE policy_proposals SET consumed_revision=? WHERE id=? AND consumed_revision IS NULL').run(revision, p.id);
           return immutable({ applied: true, revision, hash, target: p.target, values: view({ revision, hash, document, bindings: current }, p.target, current).values });
@@ -245,7 +247,9 @@ export function openPolicyStore(directory, { catalog, clock = Date.now, inspecto
           connections, dev: dev && devAllowed(dev) ? dev : null,
           fallbacks: old['agents.fallbacks'].filter(devAllowed), takeover: old['agents.takeover'] && active['agents.takeover'] && !revoked('takeover', 'automatic'),
           extensions: old['skills.extensions'].filter(ref => !revoked('extension', ref) && !old['skills.disabled'].includes(ref) && !active['skills.disabled'].includes(ref) && stillBound('extensions', ref)),
-          bundledSkills: old['skills.bundledEnabled'] && active['skills.bundledEnabled'] && !revoked('bundled', 'bundled') });
+          bundledSkills: old['skills.bundledEnabled'] && active['skills.bundledEnabled'] && !revoked('bundled', 'bundled'),
+          intake: { mode: old['intake.mode'] === active['intake.mode'] && !revoked('intake', old['intake.mode']) ? old['intake.mode'] : 'pm',
+            agentCreation: old['intake.agentCreation'] && active['intake.agentCreation'] && !revoked('intake', 'agentCreation') } });
       },
     };
     migrateRuntime(db, directory, transaction, !version);

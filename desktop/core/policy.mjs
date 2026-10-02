@@ -230,6 +230,10 @@ export function openPolicyStore(directory, { catalog, clock = Date.now, inspecto
       },
     };
     const worker = {
+      history(target, limit = 20) {
+        targetCheck(target); if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error('Invalid history limit');
+        return immutable(db.prepare('SELECT revision,hash,created_at AS createdAt FROM policy_versions ORDER BY revision DESC LIMIT ?').all(limit));
+      },
       read(target, revision) { if (revision !== undefined && (!Number.isSafeInteger(revision) || revision < 0)) throw new Error('Invalid policy version'); return immutable(view(versionData(revision), target)); },
       propose(request) { const current = facts(); const preview = previewEdit(request, versionData(), current); const { document: _document, ...visible } = preview; return immutable({ origin: 'agent', ...visible }); },
       authority(target, revision) {

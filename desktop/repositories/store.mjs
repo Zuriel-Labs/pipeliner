@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
-import { protectedFile } from '../core/storage.mjs';
+import { protectedFile, backupDatabase } from '../core/storage.mjs';
 import { canonicalJSON } from '../core/settings.mjs';
 import { transact } from '../core/runtime.mjs';
 
@@ -15,8 +15,9 @@ export function openWorkspaceStore(directory) {
   const db = new DatabaseSync(protectedFile(directory, 'workspaces.sqlite'), { allowExtension: false, timeout: 1000 });
   try {
     const version = db.prepare('PRAGMA user_version').get().user_version;
-    if (![0, 1, 2].includes(version)) throw new Error('setup-schema-unsupported');
+    if (![0, 1, 2, 3].includes(version)) throw new Error('setup-schema-unsupported');
     db.exec('PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;');
+    if (version && version < 3) backupDatabase(db, directory, 'workspaces', version);
     if (!version) transact(db, () => {
       if (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().length) throw new Error('setup-schema-unsupported');
       db.exec("CREATE TABLE setup_draft(id INTEGER PRIMARY KEY CHECK(id=1),data TEXT NOT NULL,hash TEXT NOT NULL); CREATE TABLE workspaces(id TEXT PRIMARY KEY,repository_id TEXT NOT NULL UNIQUE,slug TEXT NOT NULL UNIQUE,local_key TEXT NOT NULL UNIQUE,data TEXT NOT NULL,hash TEXT NOT NULL); CREATE TABLE setup_effects(id TEXT PRIMARY KEY,job TEXT NOT NULL,step TEXT NOT NULL,fingerprint TEXT NOT NULL,data TEXT NOT NULL,state TEXT NOT NULL,result TEXT,UNIQUE(job,step)); CREATE TABLE workspace_selection(id INTEGER PRIMARY KEY CHECK(id=1),workspace TEXT REFERENCES workspaces(id)); PRAGMA user_version=1;");
@@ -24,13 +25,24 @@ export function openWorkspaceStore(directory) {
     if (version < 2) transact(db, () => {
       db.exec('CREATE TABLE issue_contexts(repository TEXT PRIMARY KEY REFERENCES workspaces(id),data TEXT NOT NULL,hash TEXT NOT NULL); CREATE TABLE issue_ready(repository TEXT NOT NULL REFERENCES workspaces(id),issue TEXT NOT NULL,ready INTEGER NOT NULL CHECK(ready IN (0,1)),observed_at INTEGER NOT NULL,PRIMARY KEY(repository,issue)); PRAGMA user_version=2;');
     });
+    if (version < 3) transact(db, () => {
+      db.exec('CREATE TABLE pipeline_drafts(context TEXT PRIMARY KEY,data TEXT NOT NULL,hash TEXT NOT NULL); PRAGMA user_version=3;');
+    });
   } catch (error) { db.close(); throw error; }
   function effect(row) {
     if (!row) return null; const binding = JSON.parse(row.data);
     if (digest(binding) !== row.fingerprint || !['prepared', 'dispatched', 'verified', 'uncertain', 'denied'].includes(row.state)) throw new Error('setup-record-invalid');
     return { id: row.id, job: row.job, step: row.step, binding, state: row.state, result: row.result ? JSON.parse(row.result) : null };
   }
+  function pipelineContext(repository, kind) {
+    if (!['development', 'release'].includes(kind)) throw new Error('pipeline-kind-invalid');
+    if (repository !== null && (!identifier(repository) || !db.prepare('SELECT id FROM workspaces WHERE id=?').get(repository))) throw new Error('workspace-unavailable');
+    return encode({ repository, kind });
+  }
   return Object.freeze({
+    pipelineDraft: (repository, kind) => decode(db.prepare('SELECT data,hash FROM pipeline_drafts WHERE context=?').get(pipelineContext(repository, kind))),
+    savePipelineDraft(repository, kind, draft) { db.prepare('INSERT INTO pipeline_drafts VALUES(?,?,?) ON CONFLICT(context) DO UPDATE SET data=excluded.data,hash=excluded.hash').run(pipelineContext(repository, kind), encode(draft), digest(draft)); },
+    clearPipelineDraft(repository, kind) { db.prepare('DELETE FROM pipeline_drafts WHERE context=?').run(pipelineContext(repository, kind)); },
     draft: () => decode(db.prepare('SELECT * FROM setup_draft WHERE id=1').get()),
     saveDraft(value) { if (!identifier(value?.id)) throw new Error('setup-record-invalid'); db.prepare('INSERT INTO setup_draft VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,hash=excluded.hash').run(encode(value), digest(value)); },
     workspaces: () => db.prepare('SELECT data,hash FROM workspaces ORDER BY rowid').all().map(decode),

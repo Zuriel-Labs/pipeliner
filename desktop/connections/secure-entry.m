@@ -4,6 +4,21 @@ int main(int argc, const char *argv[]) {
   @autoreleasepool {
     [NSApplication sharedApplication];
     [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+    if (argc == 2 && (strcmp(argv[1], "--folder-existing") == 0 || strcmp(argv[1], "--folder-parent") == 0)) {
+      NSOpenPanel *panel = [NSOpenPanel openPanel];
+      panel.canChooseDirectories = YES; panel.canChooseFiles = NO; panel.allowsMultipleSelection = NO; panel.resolvesAliases = YES;
+      panel.title = @"Choose a project folder"; panel.prompt = @"Choose folder";
+      panel.message = strcmp(argv[1], "--folder-existing") == 0 ? @"Choose your existing project. Pipeliner will inspect it without changing your work." : @"Choose where the new project folder will be created. Existing folders will be preserved.";
+      [NSApp activateIgnoringOtherApps:YES];
+      [panel beginWithCompletionHandler:^(NSModalResponse result) {
+        NSDictionary *reply = result == NSModalResponseOK && panel.URL.isFileURL ? @{ @"path": panel.URL.path } : @{ @"cancelled": @YES };
+        NSData *bytes = [NSJSONSerialization dataWithJSONObject:reply options:0 error:nil];
+        fwrite(bytes.bytes, 1, bytes.length, stdout); fputc('\n', stdout); fflush(stdout);
+        [NSApp stop:nil];
+      }];
+      [NSApp run];
+      return 0;
+    }
     NSAlert *alert = [[NSAlert alloc] init];
     [alert setMessageText:@"Connect Ollama Cloud"];
     [alert setInformativeText:@"Enter your API key. Pipeliner sends it only to Ollama Cloud and stores it with macOS Keychain protection. Never paste keys into chat."];

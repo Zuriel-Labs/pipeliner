@@ -17,6 +17,16 @@ function origin(value) {
   return `${match[1]}/${name}`.toLowerCase();
 }
 
+export function workspaceRemote(directory) {
+  const checkout = realpathSync(directory);
+  const urls = localGit(checkout, ['config', '--no-includes', '--local', '--get-all', 'remote.origin.url']).split('\n');
+  const pushes = localGit(checkout, ['config', '--no-includes', '--local', '--get-all', 'remote.origin.pushurl'], true);
+  if (urls.length !== 1) throw new Error('Local origin is ambiguous');
+  const slug = origin(urls[0]);
+  if (pushes && pushes.split('\n').some(value => origin(value) !== slug)) throw new Error('Local fetch and push identity mismatch');
+  return slug;
+}
+
 // Host only: remote comes from the selected, independently verified GitHub catalog.
 export function inspectWorkspace(directory, remote) {
   canonicalJSON(remote); record(remote, ['repository', 'owner', 'name']);

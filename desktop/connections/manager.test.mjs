@@ -67,3 +67,20 @@ test('managed login cancellation retains a cleanup fence until verified logout',
     assert.equal(vault.get('codex').value, null); assert.equal(logouts, 2);
   } finally { await manager.close(); vault.close(); rmSync(root, { recursive: true, force: true }); }
 });
+
+test('host lease is fresh, stays private and is fenced on disconnect or caller cancellation', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-lease-test-'))); chmodSync(root, 0o700);
+  const vault = await openVault(root, wrap);
+  const adapter = { connect: async () => connected, refresh: async ({ value }) => value, disconnect: async () => {} };
+  const manager = createConnectionManager({ vault, adapters: { github: adapter } });
+  try {
+    manager.start('github', 'connect'); await manager.idle('github');
+    const lease = await manager.acquire('github'); lease.check(); assert.equal(lease.value.credential.accessToken, connected.credential.accessToken);
+    assert.equal(JSON.stringify(manager.status()).includes(connected.credential.accessToken), false);
+    manager.disconnect('github'); assert.throws(() => lease.check()); await manager.idle('github'); lease.close();
+    manager.start('github', 'connect'); await manager.idle('github');
+    adapter.refresh = async ({ signal }) => new Promise((resolve, reject) => { signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }); if (signal.aborted) reject(new Error('cancelled')); });
+    const cancellation = new AbortController(), waiting = manager.acquire('github', cancellation.signal); cancellation.abort();
+    await assert.rejects(waiting); assert.equal(manager.status().connections[0].busy, false);
+  } finally { await manager.close(); vault.close(); rmSync(root, { recursive: true, force: true }); }
+});

@@ -1,4 +1,5 @@
-import { containsSecret } from './commands.mjs';
+import { containsSecret, connectionCommand } from './commands.mjs';
+import { initWorkspaces } from './workspaces.mjs';
 
 let state = null, returnFocus = null; const drafts = new Map(), previousBusy = new Set();
 const $ = id => document.getElementById(id);
@@ -6,8 +7,8 @@ const labels = { disconnected: 'Not connected', connecting: 'Waiting for sign-in
 const errors = { cancelled: 'Cancelled. Existing keys stay protected; check the connection before using it.', 'native-entry-cancelled': 'Key entry cancelled.', 'http-401': 'Access was denied. Reconnect or replace your key.', 'http-403': 'The account is missing required access. Check provider permissions.', 'authorization-expired': 'Sign-in expired. Start again.', 'authorization-denied': 'Sign-in was declined.', 'provider-storage-blocked': 'Codex could not verify protected login storage. Reconnect after checking macOS Keychain.', 'secure-storage-unavailable': 'Protected storage is unavailable. Unlock macOS Keychain and reopen Pipeliner.', 'partial-access': 'The resource list was incomplete. Check access again.', 'app-changed': 'The registered GitHub App changed. Its permissions need qualification.', 'capability-unverified': 'This model did not complete the required synthetic tool test.', 'account-changed': 'The signed-in account changed. Reconnect to choose it deliberately.' };
 
 function showSettings(show = true) {
-  $('chat-view').hidden = show; $('settings-view').hidden = !show;
-  for (const [id, active] of [['chat-nav', !show], ['settings-nav', show]]) { $(id).classList.toggle('current', active); if (active) $(id).setAttribute('aria-current', 'page'); else $(id).removeAttribute('aria-current'); }
+  $('chat-view').hidden = show; $('settings-view').hidden = !show; $('workspace-view').hidden = true;
+  for (const [id, active] of [['chat-nav', !show], ['settings-nav', show], ['repositories-nav', false]]) { $(id).classList.toggle('current', active); if (active) $(id).setAttribute('aria-current', 'page'); else $(id).removeAttribute('aria-current'); }
 }
 function message(text, pm = false) {
   const article = document.createElement('article'); article.className = `message ${pm ? 'pm' : 'assistant'}`;
@@ -80,9 +81,14 @@ async function request(payload, text) {
   if (!$('chat-view').hidden) $('prompt').focus();
   else if (returnFocus && $(returnFocus) && !$(returnFocus).disabled) { $(returnFocus).focus(); returnFocus = null; }
 }
+const workspaces = await initWorkspaces({ el, message, show: () => {
+  $('chat-view').hidden = true; $('settings-view').hidden = true; $('workspace-view').hidden = false;
+  for (const id of ['chat-nav', 'settings-nav', 'repositories-nav']) { $(id).classList.toggle('current', id === 'repositories-nav'); if (id === 'repositories-nav') $(id).setAttribute('aria-current', 'page'); else $(id).removeAttribute('aria-current'); }
+} });
 $('composer').addEventListener('submit', event => { event.preventDefault(); const text = $('prompt').value.trim(); if (!text) return;
   if (containsSecret(text)) { $('prompt').value = ''; message('Use the protected connection surface for keys. Nothing was saved or sent.'); $('prompt').focus(); return; }
-  request({ operation: 'chat', text }, text);
+  if (!connectionCommand(text).connection && workspaces.handles(text)) workspaces.chat(text);
+  else request({ operation: 'chat', text }, text);
 });
 $('chat-nav').addEventListener('click', () => showSettings(false)); $('settings-nav').addEventListener('click', () => showSettings());
 for (const button of document.querySelectorAll('[data-settings]')) button.addEventListener('click', () => showSettings());

@@ -1,4 +1,4 @@
-export const capabilityNames = Object.freeze(['workspace.read', 'workspace.write', 'worker.exec', 'github.read', 'github.issue.write',
+export const capabilityNames = Object.freeze(['workspace.read', 'workspace.write', 'worker.exec', 'git.push', 'github.read', 'github.issue.write',
   'github.pr.write', 'github.project.write', 'provider.turn', 'artifact.build', 'artifact.publish', 'extension.install', 'host.launch', 'host.install', 'host.automation']);
 export function immutable(value) {
   if (value && typeof value === 'object') { for (const item of Object.values(value)) immutable(item); Object.freeze(value); }

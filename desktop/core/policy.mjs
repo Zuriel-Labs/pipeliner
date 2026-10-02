@@ -3,6 +3,7 @@ import { constants, lstatSync, openSync, closeSync, existsSync, realpathSync } f
 import { join, resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { fields, defaults, capabilityNames, canonicalJSON, immutable, record, rawValues, validateState, validateValue } from './settings.mjs';
+import { migrateRuntime, createRuntime, transact } from './runtime.mjs';
 
 const digest = value => createHash('sha256').update(canonicalJSON(value)).digest('hex');
 const id = value => typeof value === 'string' && /^[A-Za-z][A-Za-z0-9_-]{0,95}$/.test(value) && !['constructor', 'prototype'].includes(value);
@@ -38,7 +39,7 @@ function catalogData(value) {
   return JSON.parse(canonicalJSON(value));
 }
 
-export function openPolicyStore(directory, { catalog, clock = Date.now }) {
+export function openPolicyStore(directory, { catalog, clock = Date.now, inspectors }) {
   const root = lstatSync(directory);
   if (!root.isDirectory() || root.isSymbolicLink() || realpathSync(directory) !== resolve(directory) || (root.mode & 0o777) !== 0o700
     || root.uid !== process.getuid()) throw new Error('Policy directory must be private, owned and canonical');
@@ -50,14 +51,11 @@ export function openPolicyStore(directory, { catalog, clock = Date.now }) {
   const now = () => { const n = clock(); if (!Number.isSafeInteger(n) || n < 0) throw new Error('Invalid policy clock'); return n; };
   const db = new DatabaseSync(path, { allowExtension: false, timeout: 1000 });
   let closed = false;
-  const transaction = fn => {
-    db.exec('BEGIN IMMEDIATE');
-    try { const result = fn(); db.exec('COMMIT'); return result; } catch (error) { db.exec('ROLLBACK'); throw error; }
-  };
+  const transaction = fn => transact(db, fn);
   const close = () => { if (!closed) { db.close(); closed = true; } };
   try {
     const version = db.prepare('PRAGMA user_version').get().user_version;
-    if (![0, 1].includes(version)) throw new Error('Unsupported policy database schema');
+    if (![0, 1, 2].includes(version)) throw new Error('Unsupported policy database schema');
     db.exec('PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;');
     if (!version) transaction(() => {
       if (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().length) throw new Error('Unrecognized policy database');
@@ -257,6 +255,8 @@ export function openPolicyStore(directory, { catalog, clock = Date.now }) {
           bundledSkills: old['skills.bundledEnabled'] && active['skills.bundledEnabled'] && !revoked('bundled', 'bundled') });
       },
     };
-    return Object.freeze({ control: Object.freeze(control), worker: Object.freeze(worker), close });
+    migrateRuntime(db, directory, transaction, !version);
+    const runtime = createRuntime(db, { transaction, policy: worker, clock: now, inspectors });
+    return Object.freeze({ control: Object.freeze(control), worker: Object.freeze(worker), runtime, close });
   } catch (error) { close(); throw error; }
 }

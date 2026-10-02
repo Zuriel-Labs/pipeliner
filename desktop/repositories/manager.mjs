@@ -24,7 +24,7 @@ export function createWorkspaceManager({ store, connections, folder, protectedPa
       repositories: publicConnections.find(connection => connection.id === 'github')?.repositories ?? [],
       owners: publicConnections.find(connection => connection.id === 'github-setup')?.owners ?? [],
       workspaces: store?.workspaces() ?? [], selected: store?.selected() ?? null,
-      pending: store?.pending().map(effect => ({ job: effect.job, step: effect.step, state: effect.state, target: effect.binding.target })) ?? [] };
+      pending: store?.pending('setup').map(effect => ({ job: effect.job, step: effect.step, state: effect.state, target: effect.binding.target })) ?? [] };
   }
   function question() {
     if (!draft || ['complete', 'cancelled'].includes(draft.state)) return null;
@@ -128,7 +128,7 @@ export function createWorkspaceManager({ store, connections, folder, protectedPa
       if (!project && projects.some(project => project.title === title)) throw new Error('project-unavailable');
       const plan = api.planFields(project?.fields ?? [], draft.mapping ?? {});
       const target = repo?.slug ?? (owner.login + '/' + values.name).toLowerCase();
-      if (store.pending().some(effect => effect.binding.target === target) && (!project || plan.some(field => field.missing.length) || !project.repositories.some(item => item.id === repo?.id))) throw new Error('setup-uncertain');
+      if (store.pending('setup').some(effect => effect.binding.target === target) && (!project || plan.some(field => field.missing.length) || !project.repositories.some(item => item.id === repo?.id))) throw new Error('setup-uncertain');
       if (!inspected) await local.destination(draft.folder, repo?.name ?? values.name, { protectedPaths });
       const preview = { target, title, folder: draft.folder, values, owner, repo, project, plan, inspected, mapping: draft.mapping ?? {},
         appEpoch: held.app?.epoch ?? null, setupEpoch: held.setup?.epoch ?? null,

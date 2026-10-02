@@ -8,6 +8,7 @@ const { app, safeStorage, nativeTheme } = require('electron');
 const moduleAt = file => import(pathToFileURL(path.join(__dirname, file)).href);
 const fixtureKey = 'synthetic-native-entry-only';
 let nativeResult, workspaceFixture, folderFailure = null, folderCancelled = false;
+const issueFixtures = new Map();
 exports.adapters = async ({ directory, helper, nativeKeyEntry }) => {
   let entries = 0;
   const { ollamaAdapter } = await moduleAt('../connections/providers.mjs');
@@ -24,6 +25,11 @@ exports.adapters = async ({ directory, helper, nativeKeyEntry }) => {
 
 exports.workspaceOptions = async ({ directory, helper, nativeFolderEntry }) => {
   const { definitions, planFields, verifyFields } = await moduleAt('../repositories/github.mjs');
+  const { issueFixture } = await moduleAt('../issues/fixture.mjs');
+  exports.issueApi = Object.fromEntries(['readCatalog', 'readIssue', 'readDependencies', 'readDetail', 'createIssue', 'addItem', 'setField', 'addDependency', 'ensureReadyLabel', 'setReady'].map(name => [name, async (...args) => {
+    const target = args[name === 'readCatalog' ? 2 : 1]; let fixture = issueFixtures.get(target.id);
+    if (!fixture) { fixture = issueFixture(target); issueFixtures.set(target.id, fixture); } return fixture.api[name](...args);
+  }]));
   const fixture = path.join(app.getPath('documents'), 'pipeliner-36-native-' + process.pid);
   mkdirSync(fixture, { mode: 0o700 });
   const info = require('node:fs').lstatSync(fixture);
@@ -51,8 +57,9 @@ exports.workspaceOptions = async ({ directory, helper, nativeFolderEntry }) => {
         project.fields = [...project.fields.filter(item => item.id !== changed.id), changed]; return copy(changed); } } };
 };
 
-exports.run = async ({ window, directory, vault, manager, workspaces, workspaceChannel, channel, windowReadyMs }) => {
+exports.run = async ({ window, directory, vault, manager, workspaces, issues, workspaceChannel, issueChannel, channel, windowReadyMs }) => {
   const started = performance.now(), checks = [], measurements = [];
+  const issueScope = process.argv.includes('--qualify-issues');
   const js = code => window.webContents.executeJavaScript(code);
   const wait = async predicate => { const until = Date.now() + 10000; while (!await predicate()) { if (Date.now() >= until) throw new Error('qualification-wait-timeout'); await new Promise(resolve => setTimeout(resolve, 50)); } };
   async function check(name, fn) { const begin = performance.now(); try { await fn(); checks.push({ name, passed: true, milliseconds: Math.round(performance.now() - begin) }); } catch (error) { checks.push({ name, passed: false, category: 'assertion-or-native-failure' }); throw error; } }
@@ -107,7 +114,7 @@ exports.run = async ({ window, directory, vault, manager, workspaces, workspaceC
       const reopened = await openVault(directory, { available: () => safeStorage.isAsyncEncryptionAvailable(), encrypt: text => safeStorage.encryptStringAsync(text), decrypt: bytes => safeStorage.decryptStringAsync(bytes) });
       try { assert.equal(reopened.get('ollama').value.credential, fixtureKey); } finally { reopened.close(); vault.erase('ollama'); }
     });
-    await check('current-codex-unauthenticated-isolated-home', async () => {
+    if (!issueScope) await check('current-codex-unauthenticated-isolated-home', async () => {
       const { protectedCodexHome, codexVersion, codexModels } = await moduleAt('../connections/providers.mjs');
       const { AppServer, checkedCliVersion } = await moduleAt('../codex/qualify.mjs'); const home = await protectedCodexHome(directory);
       assert.equal(checkedCliVersion(codexVersion), codexVersion); const server = new AppServer(home);
@@ -118,11 +125,11 @@ exports.run = async ({ window, directory, vault, manager, workspaces, workspaceC
         assert.equal(existsSync(path.join(home, 'auth.json')), false);
       } finally { await server.close(); }
     });
-    await check('live-public-github-app-identity', async () => {
+    if (!issueScope) await check('live-public-github-app-identity', async () => {
       const { readApp } = await moduleAt('../github/device.mjs'), { githubApp } = await moduleAt('../connections/github.mjs'), { appPermissions } = await moduleAt('../github/transport.mjs');
       const live = await readApp(githubApp.slug); assert.equal(live.id, githubApp.id); assert.equal(live.clientId, githubApp.clientId); assert.equal(live.owner, githubApp.owner); assert.deepEqual(live.permissions, appPermissions);
     });
-    await check('live-cloud-invalid-key-denial', async () => {
+    if (!issueScope) await check('live-cloud-invalid-key-denial', async () => {
       const { api } = await moduleAt('../ollama/qualify.mjs');
       await assert.rejects(api('/api/chat', 'deliberately-invalid-pipeliner-native-probe', { body: { model: 'deepseek-v4.1-flash', messages: [{ role: 'user', content: 'Synthetic connection test' }], stream: false } }), /http-401/);
     });
@@ -163,27 +170,101 @@ exports.run = async ({ window, directory, vault, manager, workspaces, workspaceC
         assert.equal(reopened.selected(), workspaces.status().selected); assert.equal(reopened.pending().length, 0); assert.equal(workspaceFixture.writes, 4); }
       finally { reopened.close(); }
     });
+    const chat = async text => { await js(`document.getElementById('chat-nav').click();document.getElementById('prompt').value=${JSON.stringify(text)};document.getElementById('composer').requestSubmit()`); await issues.idle(); };
+    await check('registered-issue-frame-context-and-protected-label', async () => {
+      const frame = window.webContents.mainFrame, sender = window.webContents, payload = { operation: 'ready', number: 7, enabled: true, contextRevision: issues.status().revision };
+      assert.throws(() => issueChannel.dispatch({ sender: {}, senderFrame: frame }, payload));
+      assert.throws(() => issueChannel.dispatch({ sender, senderFrame: { url: frame.url, parent: frame } }, payload));
+      assert.throws(() => issueChannel.dispatch({ sender, senderFrame: frame }, { ...payload, origin: 'pm' }));
+      assert.throws(() => issueChannel.dispatch({ sender, senderFrame: frame }, { ...payload, contextRevision: payload.contextRevision - 1 }));
+      await chat('Show Issues'); await wait(() => Boolean(issues.status().catalog));
+      await chat('"Mark Issue #7 Ready"'); assert.equal(issueFixtures.get(issues.status().workspaceId).writes.length, 0);
+    });
+    await check('chat-draft-exact-preview-and-keyboard-create', async () => {
+      await chat('Draft an Issue called Protect my local work'); await wait(() => issues.status().draft?.values.title === 'Protect my local work');
+      await chat('Keep my existing files and changes intact.'); await wait(() => Boolean(issues.status().draft.values.summary));
+      await chat('Tracked and untracked files remain unchanged.'); await wait(() => Boolean(issues.status().draft.values.acceptance));
+      for (const text of ['Set priority to P1', 'Set impact to High', 'Set effort to M', 'Set labels to type:feature', 'Depends on Issue #7']) await chat(text);
+      await chat('Review this Issue'); await wait(() => issues.status().draft.state === 'preview');
+      const fixture = issueFixtures.get(issues.status().workspaceId); assert.equal(fixture.writes.length, 0);
+      await js("document.getElementById('issues-nav').click();document.getElementById('issue-create').focus()"); await wait(() => window.isFocused());
+      window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+      await wait(() => issues.status().draft.state === 'complete'); await issues.idle();
+      assert.equal(fixture.writes.filter(value => value === 'create').length, 1); assert.deepEqual(fixture.issues[1].dependencies, [7]);
+      assert.equal(fixture.issues[1].status, 'Backlog'); assert.equal(fixture.issues[1].ready, false); assert.deepEqual(fixture.issues[1].assignees, []);
+      assert.equal(await js("document.getElementById('selected-issue').textContent.includes('Tracked and untracked files remain unchanged.')"), true);
+      assert.equal(await js("document.querySelector('#selected-issue .issue-body').textContent.includes('Summary and intended outcome\\n')"), true);
+      assert.equal(await js("document.getElementById('selected-issue').querySelectorAll('script,iframe,img').length"), 0);
+    });
+    await check('chat-ready-active-denial-and-external-drift', async () => {
+      const fixture = issueFixtures.get(issues.status().workspaceId);
+      await chat('Mark Issue #8 Ready'); await wait(() => fixture.issues[1].ready); await issues.idle();
+      assert.deepEqual(fixture.issues[1].labels, ['type:feature', 'Ready for Development']);
+      for (const status of ['In Progress', 'In Review', 'Pending Review']) {
+        fixture.issues[1].status = status; fixture.issues[1].metadata.Status = status; await chat('Show Issues'); await issues.idle();
+        await wait(() => js("document.getElementById('ready-8').disabled"));
+        await chat('Remove Ready from Issue #8'); await issues.idle(); assert.equal(issues.status().error, 'ready-active'); assert.equal(fixture.issues[1].ready, true);
+      }
+      fixture.issues[1].ready = false; fixture.issues[1].labels = ['type:feature']; await chat('Show Issues'); await issues.idle();
+      assert.deepEqual(issues.status().catalog.drift, [8]); assert.equal(issues.status().catalog.active.length, 1);
+      assert.equal(fixture.writes.filter(value => value === 'ready').length, 1);
+      fixture.issues[1].status = 'Backlog'; fixture.issues[1].metadata.Status = 'Backlog'; await chat('Show Issues');
+    });
+    await check('repository-conversation-draft-and-prompt-scope', async () => {
+      await chat('Draft an Issue called Repository one private draft'); await wait(() => issues.status().draft?.values.title === 'Repository one private draft');
+      await js("document.getElementById('prompt').value='Repository one unsent text'");
+      const first = workspaces.status().workspaces[0], before = issues.status(), secondPath = path.join(workspaceFixture.path, 'second'); mkdirSync(secondPath, { mode: 0o700 });
+      workspaceFixture.git(['-C', secondPath, 'init', '-b', 'main']); workspaceFixture.git(['-C', secondPath, 'remote', 'add', 'origin', 'https://github.com/fixture/second.git']);
+      const { inspectLocal } = await moduleAt('../repositories/local.mjs'); const inspected = await inspectLocal(secondPath, { repository: 'repo_qualification_second', owner: 'fixture', name: 'second' });
+      const { openWorkspaceStore } = await moduleAt('../repositories/store.mjs'), reopened = openWorkspaceStore(directory);
+      try { reopened.register({ ...first, id: 'repo_qualification_second', repositoryId: 'R2', numericId: 4, slug: 'fixture/second', name: 'fixture/second', path: secondPath, localKey: inspected.identity.localKey, commonPath: inspected.identity.commonPath }); }
+      finally { reopened.close(); }
+      workspaces.dispatch({ operation: 'select', workspace: 'repo_qualification_second' }); await wait(() => js("document.getElementById('chat-title').textContent==='fixture/second'"));
+      assert.equal(issues.status().draft, null); assert.equal(await js("document.getElementById('transcript').textContent.includes('Repository one private draft')"), false);
+      assert.equal(await js("document.getElementById('prompt').value"), '');
+      window.webContents.send('issues:status', before); await new Promise(resolve => setTimeout(resolve, 50));
+      assert.equal(await js("document.getElementById('chat-title').textContent"), 'fixture/second');
+      const frame = window.webContents.mainFrame; assert.throws(() => issueChannel.dispatch({ sender: window.webContents, senderFrame: frame }, { operation: 'create', contextRevision: before.revision }));
+      workspaces.dispatch({ operation: 'select', workspace: first.id }); await wait(() => js("document.getElementById('transcript').textContent.includes('Repository one private draft')"));
+      assert.equal(await js("document.getElementById('prompt').value"), 'Repository one unsent text'); assert.equal(issues.status().draft.values.title, 'Repository one private draft');
+      await chat('Cancel Issue draft');
+    });
+    await check('repository-intake-settings-exact-pm-apply', async () => {
+      await js("document.getElementById('settings-nav').click()"); assert.equal(await js("document.getElementById('intake-review').disabled"), true);
+      await js("document.getElementById('intake-mode').value='pm';document.getElementById('intake-mode').dispatchEvent(new Event('change'));document.getElementById('intake-review').click()");
+      await wait(() => Boolean(issues.status().policyPreview)); assert.equal(issues.status().policy.mode.value, 'coauthored');
+      await js("document.getElementById('intake-apply').focus()");
+      window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+      await wait(() => issues.status().policy.mode.value === 'pm'); assert.equal(issues.status().policy.mode.source, 'repository'); assert.equal(issues.status().policy.agentCreation.value, false);
+    });
     await check('themes-narrow-zoom-high-contrast-reduced-motion', async () => {
-      for (const theme of ['light', 'dark']) { nativeTheme.themeSource = theme; await js("document.getElementById('repositories-nav').click()"); assert.equal(await js('document.documentElement.scrollWidth<=innerWidth'), true); }
+      for (const theme of ['light', 'dark']) for (const view of ['repositories', 'issues', 'settings']) { nativeTheme.themeSource = theme; await js(`document.getElementById('${view}-nav').click()`); assert.equal(await js('document.documentElement.scrollWidth<=innerWidth'), true); }
+      await js("document.getElementById('issues-nav').click()");
+      await js('window.scrollTo(0,document.documentElement.scrollHeight)'); assert.equal(await js("document.getElementById('issues-nav').getBoundingClientRect().top>=76 && document.getElementById('issues-nav').getBoundingClientRect().bottom<=innerHeight"), true);
       window.setSize(420, 760); await new Promise(resolve => setTimeout(resolve, 150)); assert.equal(await js('document.documentElement.scrollWidth<=innerWidth'), true);
       window.webContents.setZoomFactor(2); await new Promise(resolve => setTimeout(resolve, 100)); assert.equal(await js('document.documentElement.scrollWidth<=innerWidth'), true); window.webContents.setZoomFactor(1);
       window.webContents.debugger.attach('1.3'); await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'forced-colors', value: 'active' }, { name: 'prefers-reduced-motion', value: 'reduce' }] });
       assert.equal(await js("matchMedia('(forced-colors:active)').matches && matchMedia('(prefers-reduced-motion:reduce)').matches"), true); window.webContents.debugger.detach();
-      window.setSize(1180, 840); nativeTheme.themeSource = 'dark'; await new Promise(resolve => setTimeout(resolve, 100));
+      window.setSize(1180, 840); nativeTheme.themeSource = 'dark'; await js('window.scrollTo(0,0)'); await new Promise(resolve => setTimeout(resolve, 100));
       capture = (await window.webContents.capturePage()).toPNG().toString('base64');
     });
     await check('foreground-close-cancels-actual-owned-native-entry', async () => {
+      const fixture = issueFixtures.get(issues.status().workspaceId);
+      fixture.delay(signal => new Promise(resolve => { signal.addEventListener('abort', resolve, { once: true }); if (signal.aborted) resolve(); }));
+      issues.dispatch({ operation: 'refresh' }); await wait(() => issues.status().busy);
       workspaces.dispatch({ operation: 'begin', mode: 'local' }); workspaces.dispatch({ operation: 'folder' });
       manager.start('ollama', 'connect'); await new Promise(resolve => setTimeout(resolve, 200)); assert.equal(manager.status().connections.find(c => c.id === 'ollama').busy, true);
       const closed = new Promise(resolve => window.once('closed', resolve)); window.close(); await closed;
       assert.equal(manager.status().connections.some(c => c.busy), false);
       assert.equal(workspaces.status().busy, false);
+      assert.equal(issues.status().busy, false);
       assert.equal(folderCancelled, true);
     });
   } catch { const snapshot = workspaces.status(); workspaceEvidence = { checkpoint: workspaceStage, busy: snapshot.busy, state: snapshot.draft?.state, error: snapshot.draft?.error, folderSelected: Boolean(snapshot.draft?.folder), projectCount: snapshot.draft?.projects?.length ?? 0 }; process.exitCode = 1; }
-  const report = { desktopQualification: 'guided-repositories', checks, passed: checks.length === 16 && checks.every(c => c.passed), milliseconds: Math.round(performance.now() - started), windowReadyFromMainEntryMs: windowReadyMs, measurements,
+  const report = { desktopQualification: 'protected-issue-intake', checks, passed: checks.length === (issueScope ? 18 : 21) && checks.every(c => c.passed), milliseconds: Math.round(performance.now() - started), windowReadyFromMainEntryMs: windowReadyMs, measurements,
     versions: { electron: process.versions.electron, chromium: process.versions.chrome, node: process.versions.node, sqlite: process.versions.sqlite, os: process.platform, architecture: process.arch },
     nativeEvidence, workspaceEvidence, folderFailure, folderCancelled, synthetic: 'Synthetic GitHub/model replies and first folder selection; actual native secure field, folder-panel cancellation, protected storage, local Git and own window',
+    notRun: issueScope ? ['Unchanged Codex unauthenticated discovery', 'Unchanged public GitHub App qualification', 'Unchanged invalid Cloud key probe'] : [],
     pending: ['Human native folder selection', 'Authenticated provider/GitHub PM journeys', 'Human task observation', 'Screen reader', 'Windows/Linux', 'Stable signed package storage identity'], capture,
     nativeCapture: existsSync(path.join(directory, 'secure-field.png')) ? readFileSync(path.join(directory, 'secure-field.png')).toString('base64') : undefined };
   console.log(JSON.stringify(report)); if (!report.passed) process.exitCode = 1;

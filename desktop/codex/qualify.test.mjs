@@ -38,6 +38,8 @@ test('only expected HTTPS login destinations can open', () => {
   assert.equal(isAllowedAuthUrl('http://chatgpt.com/auth'), false);
   assert.equal(isAllowedAuthUrl('https://chatgpt.com.evil.example/auth'), false);
   assert.equal(isAllowedAuthUrl('file:///tmp/auth'), false);
+  assert.equal(isAllowedAuthUrl('https://user:password@chatgpt.com/auth'), false);
+  assert.equal(isAllowedAuthUrl('https://chatgpt.com:8443/auth'), false);
 });
 
 test('provider child isolates Codex home while preserving macOS Keychain lookup', () => {

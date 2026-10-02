@@ -1,0 +1,69 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, chmodSync, realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { openVault } from './vault.mjs';
+import { createConnectionManager } from './manager.mjs';
+import { connectionCommand, containsSecret } from './commands.mjs';
+import { createConnectionControlChannel } from '../core/control.mjs';
+
+const wrap = { available: async () => true, encrypt: async x => Buffer.from(x), decrypt: async x => ({ result: x.toString() }) };
+const connected = { credential: { accessToken: 'ghu_syntheticFixtureOnly123' }, view: { account: 'fixture', models: [{ id: 'synthetic-model', name: 'Synthetic model' }], health: 'connected', lastVerified: 1, capability: null } };
+test('disconnect fences late sign-in and refresh; revocation blocks further tests', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-connections-test-'))); chmodSync(root, 0o700);
+  const vault = await openVault(root, wrap); let finish, requests = 0;
+  const waiting = () => new Promise(resolve => { finish = resolve; });
+  const adapter = { connect: waiting, refresh: waiting, test: async () => { requests++; return {}; }, disconnect: async () => {} };
+  const manager = createConnectionManager({ vault, adapters: { github: adapter } });
+  try {
+    manager.start('github', 'connect'); await Promise.resolve();
+    manager.disconnect('github'); finish(connected); await manager.idle('github');
+    assert.equal(vault.get('github').value, null);
+    assert.equal(manager.status().connections.find(c => c.id === 'github').health, 'disconnected');
+    const epoch = vault.begin('github'); vault.save('github', epoch, connected);
+    manager.start('github', 'refresh'); await Promise.resolve();
+    manager.disconnect('github'); finish(connected); await manager.idle('github');
+    assert.equal(vault.get('github').value, null); assert.equal(requests, 0);
+    adapter.connect = async () => connected; adapter.refresh = async () => { throw new Error('http-401'); };
+    manager.start('github', 'connect'); await manager.idle('github');
+    manager.start('github', 'refresh'); await manager.idle('github');
+    assert.equal(manager.status().connections[0].health, 'reauthentication');
+    assert.throws(() => manager.start('github', 'test'), /connection-unavailable/); assert.equal(requests, 0);
+    assert.equal(JSON.stringify(manager.status()).includes(connected.credential.accessToken), false);
+  } finally { await manager.close(); vault.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('only registered PM frame/current context can start connection work', () => {
+  const frame = { parent: null, url: 'pipeliner://app/index.html' }, contents = { isDestroyed: () => false, mainFrame: frame };
+  const calls = [], manager = { status: () => ({ revision: 4 }), start: (...args) => calls.push(args) };
+  const channel = createConnectionControlChannel(manager, { contents, url: frame.url, context: () => ({ revision: 4 }) });
+  const event = { sender: contents, senderFrame: frame }, action = { operation: 'connect', connection: 'codex', contextRevision: 4 };
+  channel.dispatch(event, action); assert.equal(calls.length, 1);
+  for (const [sender, payload] of [[{ ...event, sender: {} }, action], [{ ...event, senderFrame: { ...frame } }, action],
+    [event, { ...action, contextRevision: 3 }], [event, { ...action, token: 'forged' }], [event, { ...action, operation: 'request' }]]) {
+    assert.throws(() => channel.dispatch(sender, payload));
+  }
+  const rejected = channel.dispatch(event, { operation: 'chat', text: 'Bearer syntheticKeyValue', contextRevision: 4 });
+  assert.equal(calls.length, 1); assert.match(rejected.message, /protected/);
+  assert.equal(containsSecret('ghu_syntheticFixtureOnly123'), true);
+  assert.equal(connectionCommand('Please connect GitHub.').connection, 'github');
+  assert.equal(connectionCommand('"connect github"').connection, undefined);
+  assert.equal(connectionCommand('connect github and codex').connection, undefined);
+  assert.equal(connectionCommand('Test Codex with TestModel').model, 'TestModel');
+});
+
+test('managed login cancellation retains a cleanup fence until verified logout', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-codex-cancel-'))); chmodSync(root, 0o700);
+  const vault = await openVault(root, wrap); let finish, blocked = true, logouts = 0;
+  const adapter = { connect: () => new Promise(resolve => { finish = resolve; }), disconnect: async () => { logouts++; if (blocked) throw new Error('provider-storage-blocked'); } };
+  const manager = createConnectionManager({ vault, adapters: { codex: adapter } });
+  try {
+    manager.start('codex', 'connect'); await Promise.resolve(); manager.cancel('codex'); finish({ credential: null, view: { account: 'owned-synthetic-account', health: 'connected' } });
+    await manager.idle('codex'); assert.equal(logouts, 1);
+    assert.equal(manager.status().connections.find(c => c.id === 'codex').health, 'cleanup-required');
+    assert.throws(() => manager.start('codex', 'connect'), /connection-unavailable/);
+    blocked = false; manager.disconnect('codex'); await manager.idle('codex');
+    assert.equal(vault.get('codex').value, null); assert.equal(logouts, 2);
+  } finally { await manager.close(); vault.close(); rmSync(root, { recursive: true, force: true }); }
+});

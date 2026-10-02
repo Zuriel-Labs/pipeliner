@@ -135,7 +135,7 @@ export async function api(path, key, options = {}, send = fetch, timeoutMs = 300
       redirect: 'error',
       signal,
     });
-    if (!response.ok) throw new Error(`http-${response.status}`);
+    if (!response.ok) { await response.body?.cancel().catch(() => {}); throw new Error(`http-${response.status}`); }
     const result = options.consume ? await options.consume(response) : response;
     signal.throwIfAborted();
     return result;
@@ -147,7 +147,7 @@ export async function api(path, key, options = {}, send = fetch, timeoutMs = 300
   } finally { clearTimeout(timer); }
 }
 
-async function readBounded(body) {
+export async function readBounded(body) {
   const reader = body.getReader();
   const decoder = new TextDecoder('utf-8', { fatal: true });
   let result = '', size = 0;
@@ -165,8 +165,8 @@ async function readBounded(body) {
   } finally { reader.releaseLock(); }
 }
 
-async function catalog(key, route) {
-  const text = await api('/api/tags', key, { route, consume: (response) => readBounded(response.body) });
+export async function catalog(key, route = 'cloud', options = {}) {
+  const text = await api('/api/tags', key, { route, signal: options.signal, consume: (response) => readBounded(response.body) }, options.send ?? fetch);
   let result;
   try { result = JSON.parse(text); } catch { throw new Error('catalog-malformed'); }
   if (!Array.isArray(result.models)) throw new Error('catalog-malformed');
@@ -180,11 +180,11 @@ export function selectedModel(models, route) {
   return model;
 }
 
-async function chat(key, model, messages, tools, route, options = {}) {
+export async function chat(key, model, messages, tools, route = 'cloud', options = {}) {
   const result = await api('/api/chat', key, { route, ...options, body: {
     model, messages, tools, stream: true, think: false, options: { temperature: 0, num_predict: 128 },
-  }, consume: options.consume ?? ((response) => parseStream(response.body)) });
-  if (result.responseModel !== model && result.responseModel !== MODELS.cloud) throw new Error('model-mismatch');
+  }, consume: options.consume ?? ((response) => parseStream(response.body)) }, options.send ?? fetch);
+  if (result.responseModel !== model && !(route === 'local-cloud' && model.endsWith(':cloud') && result.responseModel === model.slice(0, -6))) throw new Error('model-mismatch');
   if (result.doneReason === 'length') throw new Error('output-truncated');
   return result;
 }

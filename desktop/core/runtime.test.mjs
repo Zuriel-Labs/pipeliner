@@ -141,6 +141,17 @@ test('Pause and Stop distinguish received from verified, retain claims and requi
   f.setStatus('In Progress'); const next = (await f.reserve(f.store, 'fresh-reservation')).run; assert.notEqual(next.id, run.id); assert.equal(next.epoch, run.epoch + 1);
 });
 
+test('recovered host can Stop locally without provider access or dispatch authority', async t => {
+  const f = fixture(t), run = (await f.reserve()).run, b = binding(run); f.store.close();
+  const recovered = f.open(); assert.equal(recovered.runtime.status(repository).control, 'recovery-required');
+  let providerCalls = 0; f.inspectors.repository = async () => { providerCalls++; throw new Error('Provider unavailable'); };
+  assert.deepEqual(recovered.runtime.requestControl(b, 'stop'), { received: true, verified: false, requested: 'stop' });
+  f.setWorker('running'); await assert.rejects(recovered.runtime.verifyControl(b), /stopped/i);
+  assert.throws(() => f.intent(b, {}, recovered), /session|recovery|stopped/i);
+  f.setWorker('stopped'); const stopped = await recovered.runtime.verifyControl(b);
+  assert.equal(stopped.run.control, 'stopped'); assert.equal(stopped.run.id, run.id); assert.equal(stopped.run.epoch, run.epoch); assert.equal(stopped.run.releasedAt, null); assert.equal(providerCalls, 0);
+});
+
 test('two real host processes race one reservation without creating another epoch', async t => {
   const f = fixture(t); const children = [];
   const program = `import { openPolicyStore } from ${JSON.stringify(new URL('./policy.mjs', import.meta.url).href)};

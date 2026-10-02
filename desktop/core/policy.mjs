@@ -1,9 +1,8 @@
 import { DatabaseSync } from 'node:sqlite';
-import { constants, lstatSync, openSync, closeSync, existsSync, realpathSync } from 'node:fs';
-import { join, resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { fields, defaults, capabilityNames, canonicalJSON, immutable, record, rawValues, validateState, validateValue } from './settings.mjs';
 import { migrateRuntime, createRuntime, transact } from './runtime.mjs';
+import { protectedFile } from './storage.mjs';
 
 const digest = value => createHash('sha256').update(canonicalJSON(value)).digest('hex');
 const id = value => typeof value === 'string' && /^[A-Za-z][A-Za-z0-9_-]{0,95}$/.test(value) && !['constructor', 'prototype'].includes(value);
@@ -40,13 +39,7 @@ function catalogData(value) {
 }
 
 export function openPolicyStore(directory, { catalog, clock = Date.now, inspectors }) {
-  const root = lstatSync(directory);
-  if (!root.isDirectory() || root.isSymbolicLink() || realpathSync(directory) !== resolve(directory) || (root.mode & 0o777) !== 0o700
-    || root.uid !== process.getuid()) throw new Error('Policy directory must be private, owned and canonical');
-  const path = join(directory, 'policy.sqlite');
-  if (!existsSync(path)) closeSync(openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600));
-  const file = lstatSync(path);
-  if (!file.isFile() || file.isSymbolicLink() || file.nlink !== 1 || file.uid !== process.getuid() || (file.mode & 0o777) !== 0o600) throw new Error('Invalid protected policy file');
+  const path = protectedFile(directory, 'policy.sqlite');
   const facts = () => catalogData(catalog());
   const now = () => { const n = clock(); if (!Number.isSafeInteger(n) || n < 0) throw new Error('Invalid policy clock'); return n; };
   const db = new DatabaseSync(path, { allowExtension: false, timeout: 1000 });

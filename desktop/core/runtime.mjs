@@ -211,7 +211,8 @@ export function createRuntime(db, { transaction: commit, policy, clock: wallCloc
     },
     requestControl(binding, operation) {
       if (!['pause', 'stop'].includes(operation)) throw new Error('Invalid control request');
-      return transaction(() => { const run = runFor(binding, true); db.prepare('UPDATE runtime_runs SET control=? WHERE id=?').run(`${operation}-requested`, run.id); return immutable({ received: true, verified: false, requested: operation }); });
+      // Trusted local cancellation may fence a previous session; it never grants dispatch authority.
+      return transaction(() => { const run = runFor(binding); db.prepare('UPDATE runtime_runs SET control=? WHERE id=?').run(`${operation}-requested`, run.id); return immutable({ received: true, verified: false, requested: operation }); });
     },
     async verifyControl(binding) {
       const run = runFor(binding); if (!['pause-requested', 'stop-requested'].includes(run.control)) throw new Error('No pending control request'); await stopped(run);

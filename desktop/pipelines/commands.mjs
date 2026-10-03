@@ -27,6 +27,8 @@ export function pipelineCommand(text) {
   else if ((match = /^start (?:this |the )?pipeline at step (\d+)$/i.exec(value))) action = { operation: 'entry', step: Number(match[1]) };
   else if ((match = /^send step (\d+) (success|failure|feedback) to (?:step (\d+)|(complete|blocked))$/i.exec(value))) action = { operation: 'set', step: Number(match[1]), field: match[2].toLowerCase(), value: match[3] ? Number(match[3]) : match[4].toLowerCase() };
   else if ((match = /^set step (\d+) (retries|visits) to (\d+)$/i.exec(value))) action = { operation: 'set', step: Number(match[1]), field: match[2].toLowerCase() === 'retries' ? 'retryLimit' : 'visitLimit', value: Number(match[3]) };
+  else if ((match = /^set step (\d+) timeout to (\d+) seconds$/i.exec(value))) action = { operation: 'set', step: Number(match[1]), field: 'timeoutSeconds', value: Number(match[2]) };
+  else if ((match = /^reset step (\d+) timeout to inherit$/i.exec(value))) action = { operation: 'set', step: Number(match[1]), field: 'timeoutSeconds', value: null };
   else if ((match = /^set step (\d+) (inputs|evidence|permissions) to (.{1,2000})$/i.exec(value))) action = { operation: 'set', step: Number(match[1]), field: match[2].toLowerCase(), value: match[3].toLowerCase() === 'none' ? [] : match[3].split(',').map(value => value.trim()) };
   else if ((match = /^set step (\d+) (?:outcome|expected result) to (.{1,240})$/i.exec(value))) action = { operation: 'set', step: Number(match[1]), field: 'expectedResult', value: match[2] };
   else if ((match = /^set step (\d+) type to (.+)$/i.exec(value)) && kind(match[2])) action = { operation: 'set', step: Number(match[1]), field: 'kind', value: kind(match[2]) };

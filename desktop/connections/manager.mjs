@@ -1,5 +1,6 @@
 import { connectionIds } from './vault.mjs';
 import { createHash } from 'node:crypto';
+import { isTransient } from '../core/reliability.mjs';
 
 const catalog = Object.freeze({
   github: { name: 'GitHub', destination: 'api.github.com · github.com', explanation: 'Scoped App access to authorized repositories and organization Projects. Account, installation and resource metadata go to GitHub.' },
@@ -126,7 +127,9 @@ export function createConnectionManager({ vault, adapters, onChange = () => {}, 
             lease.check(); return result;
           } catch (error) {
             if (!lease.signal.aborted && !tasks.has(id) && vault.current(id, lease.epoch)) {
-              const code = safeConnectionError(error), epoch = vault.begin(id); fence(id); errors.set(id, code);
+              const code = safeConnectionError(error);
+              if (isTransient(error)) { errors.set(id, code); changed(); throw error; }
+              const epoch = vault.begin(id); fence(id); errors.set(id, code);
               vault.save(id, epoch, { ...lease.value, view: { ...view, health: ['http-401', 'reauthentication-required', 'account-changed'].includes(code) ? 'reauthentication' : 'offline', capability: null } }); changed();
             }
             throw error;

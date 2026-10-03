@@ -11,9 +11,9 @@ export async function initPipelines({ el, message }) {
   function field(label, value, id, change, options, type = 'text') {
     const row = el('div', undefined, 'setup-field'), name = el('label', label), input = el(options ? 'select' : 'input'); input.id = id; name.htmlFor = id;
     if (options) for (const [value, label] of options) { const option = el('option', label); option.value = value; input.append(option); }
-    else { input.type = type; input.maxLength = 240; input.autocomplete = 'off'; if (type === 'number') { input.min = id.includes('retryLimit') || id === 'pipeline-version' ? 0 : 1; input.max = id === 'pipeline-version' ? state.current.revision : id.includes('retryLimit') ? 10 : 100; input.step = 1; } }
+    else { input.type = type; input.maxLength = 240; input.autocomplete = 'off'; if (type === 'number') { input.min = id.includes('retryLimit') || id === 'pipeline-version' ? 0 : 1; input.max = id.includes('timeoutSeconds') ? 604800 : id === 'pipeline-version' ? state.current.revision : id.includes('retryLimit') ? 10 : 100; input.step = 1; } }
     input.value = value; input.disabled = pending || !state.storageAvailable;
-    input.addEventListener('change', () => change(type === 'number' ? Number(input.value) : input.value)); row.append(name, input); return row;
+    input.addEventListener('change', () => change(type === 'number' ? id.includes('timeoutSeconds') && input.value === '' ? null : Number(input.value) : input.value)); row.append(name, input); return row;
   }
   const destination = (graph, id) => ['complete', 'blocked'].includes(id) ? id === 'complete' ? 'Complete' : 'Blocked'
     : graph.steps.some(step => step.id === id) ? 'Step ' + (graph.steps.findIndex(step => step.id === id) + 1) + ' · ' + graph.steps.find(step => step.id === id).label : 'Missing destination · correction required';
@@ -23,7 +23,7 @@ export async function initPipelines({ el, message }) {
       const item = el('li'); item.append(el('strong', step.label), el('p', state.options.types[step.kind], 'small'), el('p', 'Expected: ' + step.expectedResult));
       for (const field of ['inputs', 'evidence', 'permissions']) item.append(el('p', field.charAt(0).toUpperCase() + field.slice(1) + ': ' + (step[field].map(value => state.options[field]?.[value] ?? value).join(', ') || 'None'), 'small'));
       item.append(el('p', ['success', 'failure', 'feedback'].map(outcome => outcome + ' → ' + destination(graph, step.routes[outcome])).join(' · '), 'small'),
-        el('p', 'Retries: ' + step.retryLimit + ' · Maximum visits: ' + step.visitLimit, 'small')); list.append(item);
+        el('p', 'Retries: ' + step.retryLimit + ' · Maximum visits: ' + step.visitLimit + ' · Timeout: ' + (step.timeoutSeconds ? step.timeoutSeconds + ' seconds' : 'Inherited by step type'), 'small')); list.append(item);
     } section.append(list); return section;
   }
   function declarations(step, number, field) {
@@ -54,6 +54,7 @@ export async function initPipelines({ el, message }) {
       }
       detail.append(field('Maximum retries · 0–10', step.retryLimit, detail.id + '-retryLimit', value => edit('retryLimit', value), null, 'number'),
         field('Maximum visits · 1–100', step.visitLimit, detail.id + '-visitLimit', value => edit('visitLimit', value), null, 'number'),
+        field('Timeout in seconds · leave empty to inherit', step.timeoutSeconds ?? '', detail.id + '-timeoutSeconds', value => edit('timeoutSeconds', value), null, 'number'),
         field('Move before · rewrites start and the success sequence', String(number), detail.id + '-move', before => request({ operation: 'edit', action: { operation: 'move', step: number, before: Number(before) } }), destinations));
       const actions = el('div', undefined, 'connection-actions'); actions.append(button('Start here', 'edit', { action: { operation: 'entry', step: number } }, detail.id + '-entry'), button('Remove this step', 'edit', { action: { operation: 'remove', step: number } }, detail.id + '-remove')); detail.append(actions); card.append(detail);
     });

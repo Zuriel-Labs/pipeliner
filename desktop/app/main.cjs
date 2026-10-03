@@ -123,6 +123,7 @@ app.whenReady().then(async () => {
         repositories: workspaceStore.workspaces().filter(workspace => !connection.id.startsWith('github') || connection.repositories.some(repo => repo.id === workspace.repositoryId)).map(workspace => workspace.id),
         healthy: ['connected', 'limited'].includes(connection.health) })), developers: manager.developers(), extensions: [] }),
       inspectors: { repository: input => development.observe(input), worker: binding => supervisor.inspectWorker(binding),
+        continuity: input => development.inspectContinuity(input),
         effect: action => action.operation === 'github.pr.merge' ? development.inspectIntegration(action) : supervisor.inspectEffect(action) } });
     const { openDevelopmentStore } = await moduleAt('../development/state.mjs');
     const { openExecutionSupervisor } = await moduleAt('../core/execution.mjs');

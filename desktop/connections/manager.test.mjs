@@ -107,6 +107,10 @@ test('provider lease binds a tested model, hides credentials and discards late o
     manager.disconnect('ollama'); assert.equal(observedSignal.aborted, true);
     finish({ content: 'late result' }); await assert.rejects(pending); await manager.idle('ollama'); lease.close();
     manager.start('ollama', 'connect'); await manager.idle('ollama');
+    adapter.turn = async () => { throw new Error('http-503'); };
+    const transient = await manager.acquireProvider('ollama', 'test-model'), epoch = manager.epoch('ollama');
+    await assert.rejects(transient.turn(input), /http-503/); transient.check(); assert.equal(manager.epoch('ollama'), epoch);
+    assert.equal(manager.status().connections.find(c => c.id === 'ollama').executionAvailable, true); transient.close();
     adapter.turn = async () => { throw new Error('http-401'); };
     const next = await manager.acquireProvider('ollama', 'test-model'); await assert.rejects(next.turn(input), /http-401/);
     assert.equal(manager.status().connections.find(c => c.id === 'ollama').health, 'reauthentication');

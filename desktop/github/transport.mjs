@@ -1,11 +1,19 @@
+import { setTimeout as sleep } from 'node:timers/promises';
+import { isTransient, retryAfter, retryDelay } from '../core/reliability.mjs';
+
 export const appPermissions = Object.freeze({ actions: 'read', checks: 'read', contents: 'write', issues: 'write', metadata: 'read',
   organization_projects: 'write', pull_requests: 'write', statuses: 'read' });
 
-export function makeRequest(accessToken, send, signal) {
+export function makeRequest(accessToken, send, signal, retry) {
+  if (retry && (!Number.isSafeInteger(retry.attempts) || retry.attempts < 1 || retry.attempts > 10 || !Number.isSafeInteger(retry.deadlineAt))) throw new Error('Invalid transport retry bounds');
   return async function request(method, path, body, upload = false) {
-    const combined = signal ? AbortSignal.any([signal, AbortSignal.timeout(30000)]) : AbortSignal.timeout(30000);
-    let reader, dispatched = false;
     const mutation = method !== 'GET' && !(path === '/graphql' && body?.query?.startsWith('query('));
+    async function execute() {
+    const remaining = retry ? retry.deadlineAt - Date.now() : 30000;
+    if (remaining <= 0) throw new Error('Transport deadline exhausted');
+    const deadline = AbortSignal.timeout(Math.min(30000, remaining));
+    const combined = signal ? AbortSignal.any([signal, deadline]) : deadline;
+    let reader, dispatched = false;
     try {
       combined.throwIfAborted();
       dispatched = true;
@@ -16,7 +24,7 @@ export function makeRequest(accessToken, send, signal) {
         body: body ? upload ? body : JSON.stringify(body) : undefined });
       if (!response.ok) {
         await response.body?.cancel().catch(() => {});
-        throw new Error(`http-${response.status}`);
+        const error = new Error(`http-${response.status}`); error.retryAfterMs = retryAfter(response); throw error;
       }
       reader = response.body?.getReader();
       if (!reader) throw new Error('response-invalid');
@@ -54,5 +62,15 @@ export function makeRequest(accessToken, send, signal) {
       // A lost write reply never authorizes another dispatch.
       throw new Error(mutation && dispatched ? 'write-result-uncertain' : 'read-failed');
     } finally { reader?.releaseLock(); }
+    }
+    for (let attempt = 1; ; attempt++) {
+      try { return await execute(); }
+      catch (error) {
+        if (mutation || signal?.aborted || !isTransient(error) || attempt >= (retry?.attempts ?? 1)) throw error;
+        const delay = retryDelay(attempt, error.retryAfterMs);
+        if (Date.now() + delay >= retry.deadlineAt) throw new Error('Transport retry cannot fit remaining deadline');
+        await sleep(delay, undefined, { signal });
+      }
+    }
   };
 }

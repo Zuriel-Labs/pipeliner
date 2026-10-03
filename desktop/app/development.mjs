@@ -24,7 +24,9 @@ export async function initDevelopment({ el, message }) {
         node.disabled = pending || operation === 'resume' && (!['paused', 'stopped', 'recovery-required'].includes(run.control) || state.pending.length > 0 && !state.integrationReady && state.qa?.decision !== 'approve');
         controls.append(node);
       } card.append(controls);
-      if (development) card.append(el('p', 'Model turns: ' + development.turns + '. ' + (development.usage.unavailable ? 'Some token usage is unavailable.' : 'Reported tokens: ' + (development.usage.input + development.usage.output) + '.'), 'small'));
+      if (development) card.append(el('p', 'Model turns: ' + development.turns + ' / ' + (run.limits?.['limits.issueTurns'] ?? 'captured limit') + ' per Issue · ' + (development.stepTurns ?? 0) + ' / ' + (run.limits?.['limits.stepTurns'] ?? 'captured limit') + ' for this step.', 'small'),
+        el('p', 'Reported tokens: ' + (development.usage.input + development.usage.output) + (development.usage.unavailable ? ' · Some usage is unavailable.' : '.') + ' USD usage: unavailable.', 'small'),
+        el('p', 'Remediation cycles: ' + (development.remediationCycles ?? 0) + ' · Dev takeovers: ' + (development.takeovers?.length ?? 0) + '. Recovery preserves these counters.', 'small'));
       if (state.publication) card.append(el('p', 'PR #' + state.publication.number + ' prepared. Head: ' + state.publication.head, 'small'), button('Open candidate PR', 'open-candidate', {}, prefix + '-open-candidate'));
       if (state.qa) card.append(qaCard(prefix));
     } else if (state.workspaceId) {
@@ -65,7 +67,7 @@ export async function initDevelopment({ el, message }) {
     if (state?.qa?.hash !== snapshot.qa?.hash) feedbackDrafts.clear(); state = snapshot;
     $('development-status').replaceChildren(...(state.workspaceId ? [runCard('chat-development')] : []));
     const nodes = [el('h2', 'Agents and Models'), el('p', state.repositoryLabel ?? 'Select a repository to configure its Dev.', 'protected-state'),
-      el('p', 'Choose one qualified provider and model. New runs pin that choice. Automatic takeover and fallback remain off.', 'small')];
+      el('p', 'Choose a qualified provider and model. New runs pin that choice and any explicitly configured fallback order. Automatic takeover defaults off.', 'small')];
     if (!state.storageAvailable) nodes.push(el('p', 'Protected Development storage is unavailable.', 'availability'));
     if (state.workspaceId && state.storageAvailable) {
       const card = el('article', undefined, 'connection-card'); card.append(el('h3', 'Assigned Dev'), el('p', devLabel(state.configuredDev.binding), 'small'));

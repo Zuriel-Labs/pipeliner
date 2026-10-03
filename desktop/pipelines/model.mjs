@@ -51,6 +51,8 @@ export function editDefinition(value, action, newId = () => 'step_' + randomUUID
     } else if (['label', 'expectedResult'].includes(field)) { if (!name(action.value)) throw new Error('Invalid pipeline text'); step[field] = action.value; }
     else if (field === 'kind') { if (!Object.hasOwn(stepTypes, action.value)) throw new Error('Unknown pipeline step type'); step.kind = action.value; }
     else if (['retryLimit', 'visitLimit'].includes(field)) { if (!Number.isSafeInteger(action.value) || action.value < 0 || action.value > 1000000) throw new Error('Invalid pipeline bound'); step[field] = action.value; }
+    else if (field === 'timeoutSeconds') { if (action.value === null) delete step.timeoutSeconds;
+      else { if (!Number.isSafeInteger(action.value) || action.value < 1 || action.value > 604800) throw new Error('Invalid pipeline timeout'); step.timeoutSeconds = action.value; } }
     else throw new Error('Unknown pipeline step field');
   } else throw new Error('Unknown pipeline edit');
   canonicalJSON(graph); return graph;

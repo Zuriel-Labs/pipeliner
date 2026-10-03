@@ -31,10 +31,19 @@ const schema = `CREATE TABLE runtime_repositories (id TEXT PRIMARY KEY, host TEX
   PRAGMA user_version=2;`;
 
 export function migrateRuntime(db, directory, transaction, fresh) {
-  if (db.prepare('PRAGMA user_version').get().user_version === 2) return;
-  if (!fresh) backupDatabase(db, directory, 'policy', 1, backup => backup.prepare('SELECT COUNT(*) AS count FROM policy_versions').get().count > 0);
-  transaction(() => { if (db.prepare('PRAGMA user_version').get().user_version === 1) db.exec(schema); });
+  const version = db.prepare('PRAGMA user_version').get().user_version;
+  if (version === 3) return;
+  if (!fresh) backupDatabase(db, directory, 'policy', version, backup => backup.prepare('SELECT COUNT(*) AS count FROM policy_versions').get().count > 0);
+  transaction(() => {
+    if (version === 1) db.exec(schema);
+    db.exec(`CREATE TABLE runtime_assignments(run_id TEXT NOT NULL REFERENCES runtime_runs(id), epoch INTEGER NOT NULL, document TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY(run_id,epoch));
+      CREATE TRIGGER immutable_assignment_update BEFORE UPDATE ON runtime_assignments BEGIN SELECT RAISE(ABORT,'Immutable runtime assignment'); END;
+      CREATE TRIGGER immutable_assignment_delete BEFORE DELETE ON runtime_assignments BEGIN SELECT RAISE(ABORT,'Immutable runtime assignment'); END;
+      PRAGMA user_version=3;`);
+  });
 }
+
+export const runtimeDeveloperAllowed = (grant, dev) => Boolean(dev && (grant.dev === dev || grant.takeover && grant.fallbacks.includes(dev)));
 
 // Only the trusted host receives this object. Inspectors perform typed complete readback.
 export function createRuntime(db, { transaction: commit, policy, clock: wallClock, inspectors = {} }) {
@@ -53,6 +62,19 @@ export function createRuntime(db, { transaction: commit, policy, clock: wallCloc
       || !['running', 'pause-requested', 'stop-requested', 'paused', 'stopped', 'complete'].includes(run.control)
       || !(run.released_at === null ? activeStatuses : ['Backlog', 'On Hold', 'Done']).includes(run.status)) throw new Error('Captured run integrity check failed');
   }
+  function assignment(run) {
+    const order = policy.read(run.repository, run.policy_revision).values['agents.fallbacks'].value;
+    const rows = db.prepare('SELECT * FROM runtime_assignments WHERE run_id=? ORDER BY epoch').all(run.id);
+    let previous = run.dev, index = -1, latest = null;
+    if (rows.length > 64) throw new Error('Runtime assignment history bounds exhausted');
+    for (const row of rows) {
+      const value = JSON.parse(row.document), position = order.indexOf(value.dev);
+      if (digest(value) !== row.hash || value.runId !== run.id || value.repository !== run.repository || value.issue !== run.issue
+        || value.from !== previous || value.epoch !== row.epoch || row.epoch > run.epoch || position <= index || !sha(value.continuityHash)) throw new Error('Runtime assignment integrity failed');
+      previous = value.dev; index = position; latest = value;
+    }
+    return { dev: previous, latest };
+  }
   function runFor(binding, owner = false) {
     canonicalJSON(binding); record(binding, ['runId', 'epoch']);
     if (!identifier(binding.runId) || !Number.isSafeInteger(binding.epoch) || binding.epoch < 1) throw new Error('Invalid run binding');
@@ -65,7 +87,8 @@ export function createRuntime(db, { transaction: commit, policy, clock: wallCloc
   }
   function visible(run) {
     validateRun(run);
-    return immutable({ id: run.id, repository: run.repository, issue: run.issue, dev: run.dev, policyRevision: run.policy_revision, policyHash: run.policy_hash,
+    const selected = assignment(run);
+    return immutable({ id: run.id, repository: run.repository, issue: run.issue, dev: selected.dev, assignment: selected.latest, policyRevision: run.policy_revision, policyHash: run.policy_hash,
       pipeline: run.pipeline, pipelineHash: run.pipeline_hash, limits: JSON.parse(run.limits), epoch: run.epoch, status: run.status,
       control: run.owner !== session && ['running', 'pause-requested', 'stop-requested'].includes(run.control) ? 'recovery-required' : run.control,
       createdAt: run.created_at, releasedAt: run.released_at,
@@ -104,7 +127,7 @@ export function createRuntime(db, { transaction: commit, policy, clock: wallCloc
   }
   function authority(run, operation) {
     const grant = policy.authority(run.repository, run.policy_revision);
-    if (grant.dev !== run.dev || !grant.capabilities.includes(operations[operation])) throw new Error('Captured action authority unavailable or revoked');
+    if (!runtimeDeveloperAllowed(grant, assignment(run).dev) || !grant.capabilities.includes(operations[operation])) throw new Error('Captured action authority unavailable or revoked');
   }
   function runnable(binding) { const run = runFor(binding, true); if (run.control !== 'running') throw new Error('Run paused, stopped or recovery-required'); return run; }
   function uncertain(run) { return db.prepare(`SELECT id FROM runtime_actions WHERE run_id=? AND state IN ('dispatched','uncertain') LIMIT 1`).get(run.id); }
@@ -120,7 +143,6 @@ export function createRuntime(db, { transaction: commit, policy, clock: wallCloc
         if (previous) { if (previous.fingerprint !== fingerprint) throw new Error('Reservation command identity conflict'); return immutable({ created: false, run: visible(db.prepare('SELECT * FROM runtime_runs WHERE id=?').get(previous.run_id)) }); }
         const captured = policy.read(workspace.repository), grant = policy.authority(workspace.repository, captured.revision);
         if (request.policyHash !== undefined && request.policyHash !== captured.hash) throw new Error('Development configuration changed during reservation');
-        if (!grant.dev || captured.values['agents.dev'].value !== grant.dev) throw new Error('Configured Dev unavailable');
         const existingRepository = db.prepare('SELECT * FROM runtime_repositories WHERE id=? OR (host=? AND slug=?)').all(workspace.repository, workspace.host, workspace.slug);
         if (existingRepository.some(r => r.id !== workspace.repository || r.host !== workspace.host || r.slug !== workspace.slug)) throw new Error('Canonical remote identity conflict');
         const aliases = db.prepare('SELECT * FROM runtime_workspaces WHERE local_key=? OR common_path=?').all(workspace.localKey, workspace.commonPath);
@@ -130,6 +152,7 @@ export function createRuntime(db, { transaction: commit, policy, clock: wallCloc
         let run = db.prepare('SELECT * FROM runtime_runs WHERE repository=? AND released_at IS NULL').get(workspace.repository), created = false;
         if (run && (run.issue !== request.issue || run.pipeline !== request.pipeline)) throw new Error('Repository already reserved by another Issue or pipeline');
         if (!run) {
+          if (!grant.dev || captured.values['agents.dev'].value !== grant.dev) throw new Error('Configured Dev unavailable');
           const epoch = db.prepare('UPDATE runtime_repositories SET epoch=epoch+1 WHERE id=? RETURNING epoch').get(workspace.repository).epoch;
           const limits = Object.fromEntries(Object.entries(captured.values).filter(([key]) => key.startsWith('limits.')).map(([key, value]) => [key, value.value]));
           const id = randomUUID(), pipeline = captured.values[`pipelines.${request.pipeline}`].value;
@@ -141,6 +164,30 @@ export function createRuntime(db, { transaction: commit, policy, clock: wallCloc
       });
     },
     status(repository) { if (!identifier(repository)) throw new Error('Invalid repository identity'); const run = db.prepare('SELECT * FROM runtime_runs WHERE repository=? AND released_at IS NULL').get(repository); return run ? visible(run) : null; },
+    async takeover(binding, request) {
+      canonicalJSON(request); record(request, ['dev', 'candidate']); record(request.candidate, ['sourceCommit', 'gitTree']);
+      if (!identifier(request.dev) || !Object.values(request.candidate).every(value => typeof value === 'string' && /^[a-f0-9]{40}$/.test(value))) throw new Error('Invalid takeover request');
+      const run = runFor(binding), selected = assignment(run), grant = policy.authority(run.repository, run.policy_revision);
+      const order = policy.read(run.repository, run.policy_revision).values['agents.fallbacks'].value;
+      const eligible = order.filter(dev => order.indexOf(dev) > order.indexOf(selected.dev) && grant.fallbacks.includes(dev));
+      if (run.pipeline !== 'development' || !grant.takeover || request.dev !== eligible[0]) throw new Error('Configured ordered takeover unavailable or revoked');
+      if (!['paused', 'stopped'].includes(run.control) || db.prepare(`SELECT 1 FROM runtime_actions WHERE run_id=? AND state IN ${pending} LIMIT 1`).get(run.id)) throw new Error('Stopped worker and resolved effects required before takeover');
+      await stopped(run); const observation = await repositoryRead(run.repository, run.issue); activeRead(observation);
+      if (typeof inspectors.continuity !== 'function') throw new Error('Takeover continuity readback unavailable');
+      const expected = { runId: run.id, epoch: run.epoch, repository: run.repository, issue: run.issue, dev: request.dev, candidate: request.candidate };
+      const proof = await inspectors.continuity(immutable(expected)); canonicalJSON(proof); record(proof, [...Object.keys(expected), 'verified', 'observedAt']); fresh(proof.observedAt);
+      if (proof.verified !== true || Object.keys(expected).some(key => canonicalJSON(proof[key]) !== canonicalJSON(expected[key]))) throw new Error('Takeover continuity could not be verified');
+      return transaction(() => {
+        const current = runFor(binding), authority = policy.authority(run.repository, run.policy_revision); fresh(observation.observedAt); fresh(proof.observedAt);
+        if (current.control !== run.control || !authority.takeover || !authority.fallbacks.includes(request.dev) || assignment(current).dev !== selected.dev
+          || db.prepare(`SELECT 1 FROM runtime_actions WHERE run_id=? AND state IN ${pending} LIMIT 1`).get(run.id)) throw new Error('Takeover authority or pending effects changed');
+        const epoch = db.prepare('UPDATE runtime_repositories SET epoch=epoch+1 WHERE id=? RETURNING epoch').get(run.repository).epoch;
+        const value = { ...expected, epoch, from: selected.dev, continuityHash: digest(proof) };
+        db.prepare('UPDATE runtime_runs SET epoch=?,owner=? WHERE id=?').run(epoch, session, run.id);
+        db.prepare('INSERT INTO runtime_assignments VALUES(?,?,?,?)').run(run.id, epoch, canonicalJSON(value), digest(value));
+        return visible(db.prepare('SELECT * FROM runtime_runs WHERE id=?').get(run.id));
+      });
+    },
     intent(binding, request) {
       canonicalJSON(request); record(request, ['commandId', 'step', 'operation', 'candidate', 'requestHash', 'preconditionsHash', 'expectedHash']); record(request.candidate, ['sourceCommit', 'gitTree']);
       if (!identifier(request.commandId) || !identifier(request.step) || !Object.hasOwn(operations, request.operation) || !['requestHash', 'preconditionsHash', 'expectedHash'].every(k => sha(request[k]))
@@ -153,7 +200,7 @@ export function createRuntime(db, { transaction: commit, policy, clock: wallCloc
         const step = policy.read(run.repository, run.policy_revision).values[`pipelines.${run.pipeline}`].value.steps.find(s => s.id === request.step);
         if (!step || request.operation === 'github.pr.merge' && step.kind !== 'pr-integration') throw new Error('Action does not match captured pipeline step');
         authority(run, request.operation);
-        const limits = JSON.parse(run.limits), deadline = clock() + limits[`limits.${['build', 'artifact-verify'].includes(step.kind) ? 'build' : request.operation.startsWith('github.') || request.operation === 'git.push' ? 'control' : 'agent'}Seconds`] * 1000, id = randomUUID();
+        const limits = JSON.parse(run.limits), deadline = clock() + (step.timeoutSeconds ?? limits[`limits.${['build', 'artifact-verify'].includes(step.kind) ? 'build' : request.operation.startsWith('github.') || request.operation === 'git.push' ? 'control' : 'agent'}Seconds`]) * 1000, id = randomUUID();
         db.prepare("INSERT INTO runtime_actions VALUES(?,?,?,?,?,'prepared',0,?,?,NULL,NULL,?)").run(id, run.id, request.commandId, fingerprint, canonicalJSON({ ...bound, epoch: run.epoch }), run.epoch, deadline, clock());
         return actionData(id, run).value;
       });
@@ -214,7 +261,7 @@ export function createRuntime(db, { transaction: commit, policy, clock: wallCloc
       const run = runFor(binding); if (run.owner === session && run.control === 'running') throw new Error('Run already running'); if (uncertain(run)) throw new Error('Uncertain mutation requires reconciliation before resume');
       const observation = await repositoryRead(run.repository, run.issue); activeRead(observation); await stopped(run);
       return transaction(() => { const current = runFor(binding); fresh(observation.observedAt); if (uncertain(current)) throw new Error('Uncertain mutation');
-        if (policy.authority(current.repository, current.policy_revision).dev !== current.dev) throw new Error('Captured Dev unavailable');
+        if (!runtimeDeveloperAllowed(policy.authority(current.repository, current.policy_revision), assignment(current).dev)) throw new Error('Captured Dev unavailable');
         const epoch = db.prepare('UPDATE runtime_repositories SET epoch=epoch+1 WHERE id=? RETURNING epoch').get(run.repository).epoch;
         db.prepare("UPDATE runtime_actions SET state='cancelled',updated_at=? WHERE run_id=? AND state='prepared'").run(clock(), run.id);
         db.prepare("UPDATE runtime_runs SET epoch=?,owner=?,control='running',status=? WHERE id=?").run(epoch, session, observation.status, run.id); return visible(db.prepare('SELECT * FROM runtime_runs WHERE id=?').get(run.id)); });

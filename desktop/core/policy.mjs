@@ -49,7 +49,7 @@ export function openPolicyStore(directory, { catalog, clock = Date.now, inspecto
   const close = () => { if (!closed) { db.close(); closed = true; } };
   try {
     const version = db.prepare('PRAGMA user_version').get().user_version;
-    if (![0, 1, 2].includes(version)) throw new Error('Unsupported policy database schema');
+    if (![0, 1, 2, 3].includes(version)) throw new Error('Unsupported policy database schema');
     db.exec('PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;');
     if (!version) transaction(() => {
       if (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().length) throw new Error('Unrecognized policy database');
@@ -222,6 +222,7 @@ export function openPolicyStore(directory, { catalog, clock = Date.now, inspecto
             for (const extension of after['skills.disabled']) if (!before['skills.disabled'].includes(extension)) revoke.run(repository, 'extension', extension, revision);
             if (before['skills.bundledEnabled'] && !after['skills.bundledEnabled']) revoke.run(repository, 'bundled', 'bundled', revision);
             if (before['agents.takeover'] && !after['agents.takeover']) revoke.run(repository, 'takeover', 'automatic', revision);
+            for (const dev of before['agents.fallbacks']) if (!after['agents.fallbacks'].includes(dev)) revoke.run(repository, 'fallback', dev, revision);
             if (before['intake.agentCreation'] && !after['intake.agentCreation']) revoke.run(repository, 'intake', 'agentCreation', revision);
             if (before['intake.mode'] !== after['intake.mode']) revoke.run(repository, 'intake', before['intake.mode'], revision);
           }
@@ -250,7 +251,7 @@ export function openPolicyStore(directory, { catalog, clock = Date.now, inspecto
         return immutable({ capabilities: old['permissions.grants'].filter(c => !revoked('capability', c) && old['permissions.ceiling'].includes(c) && active['permissions.grants'].includes(c) && active['permissions.ceiling'].includes(c) && current.capabilities.includes(c)),
           resources: old['permissions.resources'].filter(ref => !revoked('resource', ref) && active['permissions.resources'].includes(ref) && (current.resources ?? []).includes(ref)),
           connections, dev: dev && devAllowed(dev) ? dev : null,
-          fallbacks: old['agents.fallbacks'].filter(devAllowed), takeover: old['agents.takeover'] && active['agents.takeover'] && !revoked('takeover', 'automatic'),
+          fallbacks: old['agents.fallbacks'].filter(dev => !revoked('fallback', dev) && devAllowed(dev)), takeover: old['agents.takeover'] && active['agents.takeover'] && !revoked('takeover', 'automatic'),
           extensions: old['skills.extensions'].filter(ref => !revoked('extension', ref) && !old['skills.disabled'].includes(ref) && !active['skills.disabled'].includes(ref) && stillBound('extensions', ref)),
           bundledSkills: old['skills.bundledEnabled'] && active['skills.bundledEnabled'] && !revoked('bundled', 'bundled'),
           intake: { mode: old['intake.mode'] === active['intake.mode'] && !revoked('intake', old['intake.mode']) ? old['intake.mode'] : 'pm',

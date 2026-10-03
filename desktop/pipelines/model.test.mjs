@@ -50,3 +50,11 @@ test('step timeout chat edits inherit on reset and reject out-of-range values', 
   validatePipeline(reset, true); assert.equal(Object.hasOwn(reset.steps[0], 'timeoutSeconds'), false);
   for (const value of [0, 604801, 1.5]) assert.throws(() => editDefinition(changed, { operation: 'set', step: 1, field: 'timeoutSeconds', value }));
 });
+test('typed extension pins are metadata while other secrets remain rejected; changing type clears the old binding', () => {
+  const extension = { kind: 'command', pin: 'tool-' + 'a'.repeat(40), bindings: [{ path: ['title'], source: 'issue.title' }], constants: {} };
+  const graph = editDefinition(developmentTemplate, { operation: 'set', step: 2, field: 'extension', value: extension });
+  assert.equal(graph.steps[1].kind, 'extension'); assert.equal(graph.steps[1].extension.pin, extension.pin);
+  assert.throws(() => editDefinition(graph, { operation: 'set', step: 2, field: 'extension', value: { ...extension, constants: { credential: 'ghu_syntheticSecretOnly123' } } }), /Sensitive/);
+  assert.throws(() => editDefinition(graph, { operation: 'set', step: 2, field: 'extension', value: { ...extension, pin: 'ghu_syntheticSecretOnly123' } }));
+  const reset = editDefinition(graph, { operation: 'set', step: 2, field: 'kind', value: 'agent' }); assert.equal(reset.steps[1].extension, undefined);
+});

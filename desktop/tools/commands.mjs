@@ -1,5 +1,7 @@
 import { containsSecret } from '../connections/commands.mjs';
-export const toolShapes = Object.freeze({ view: [[], ['scope']], discover: [['endpoint'], ['authentication']], select: [['tool'], []],
+export const toolDataNames = Object.freeze({ 'issue.title': 'Issue title', 'issue.body': 'Issue body', 'candidate.sourceCommit': 'Candidate source commit',
+  'candidate.gitTree': 'Candidate Git tree', 'previous.structuredContent': 'Verified prior result', 'pm.supplied': 'PM supplied values' });
+export const toolShapes = Object.freeze({ view: [[], ['scope']], discover: [['endpoint'], ['authentication']], select: [['tool'], []], data: [['name', 'categories'], []],
   define: [['definition'], []], rename: [['name'], []], prepare: [['action', 'name'], []], permission: [['scope', 'enabled'], []],
   credential: [['name', 'action'], []], apply: [[], ['hash']], cancel: [[], []], reset: [[], []], chat: [['text'], []] });
 
@@ -16,6 +18,10 @@ export function toolCommand(text) {
   if ((match = /^choose tool ([A-Za-z0-9_.-]{1,128})$/i.exec(value))) return { operation: 'select', tool: match[1] };
   if ((match = /^choose tool name ([a-z0-9]+(?:-[a-z0-9]+)*)$/i.exec(value))) return { operation: 'rename', name: match[1] };
   if ((match = /^(enable|disable|remove) (?:tool|mcp) ([a-z0-9]+(?:-[a-z0-9]+)*)$/i.exec(value))) return { operation: 'prepare', action: match[1].toLowerCase(), name: match[2] };
+  if ((match = /^set tool ([a-z0-9]+(?:-[a-z0-9]+)*) data to (.{1,500})$/i.exec(value))) {
+    const categories = match[2].toLowerCase() === 'none' ? [] : match[2].split(',').map(value => Object.entries(toolDataNames).find(([key, label]) => [key.toLowerCase(), label.toLowerCase()].includes(value.trim().toLowerCase()))?.[0]);
+    return categories.every(Boolean) ? { operation: 'data', name: match[1], categories } : null;
+  }
   if ((match = /^(allow|deny) (host|repository) tool calls$/i.exec(value))) return { operation: 'permission', scope: match[2].toLowerCase(), enabled: match[1].toLowerCase() === 'allow' };
   if ((match = /^(connect|disconnect|replace) (?:tool|mcp) ([a-z0-9]+(?:-[a-z0-9]+)*) (?:credential|credentials)$/i.exec(value))) return { operation: 'credential', name: match[2], action: match[1].toLowerCase() === 'disconnect' ? 'disconnect' : 'connect' };
   if (/^authorize this tool source$/i.test(value)) return { operation: 'prepare', action: 'authorize', name: 'selected' };

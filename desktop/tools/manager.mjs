@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { canonicalJSON, record } from '../core/settings.mjs';
 import { skillName, collisionChoices } from '../skills/package.mjs';
 import { toolPackage, qualifyToolPackage, toolManifestHash } from './package.mjs';
-import { toolCommand, toolShapes } from './commands.mjs';
+import { toolCommand, toolShapes, toolDataNames } from './commands.mjs';
 import { endpointURL } from './transport.mjs';
 
 const keys = ['tools.extensions', 'tools.disabled'];
@@ -42,7 +42,7 @@ export function createToolManager({ store, policy, tools, connections, occupiedN
     sync(); const view = policy?.worker.read(target()), refs = view?.values['tools.extensions'].value ?? [], inventory = tools ? [...tools.list()] : [];
     for (const id of refs) if (!inventory.some(item => item.id === id)) inventory.push(tools.get(id));
     return lastSnapshot = { revision, workspaceId, scope, repositoryLabel: store?.workspaces().find(item => item.id === workspaceId)?.name ?? null,
-      storageAvailable: Boolean(store && policy && tools), busy, preview, catalog, collision, message, error,
+      storageAvailable: Boolean(store && policy && tools), busy, preview, catalog, collision, message, error, dataOptions: toolDataNames,
       values: view ? Object.fromEntries(keys.map(key => [key, view.values[key]])) : null,
       permissions: view ? { host: view.values['permissions.ceiling'].value.includes('extension.invoke'),
         repository: workspaceId ? policy.worker.read(workspaceId).values['permissions.grants'].value.includes('extension.invoke') : false } : null,
@@ -60,13 +60,15 @@ export function createToolManager({ store, policy, tools, connections, occupiedN
     finally { busy = false; task = null; finish(); publish(); }
   }
   function preparePolicy(action, name, pack = null) {
-    invalidate(); const view = policy.worker.read(target()), changes = {}, reset = [], item = pack ?? tools.list().find(item => item.name === name);
+    invalidate(); const view = policy.worker.read(target()), changes = {}, reset = [], item = pack ?? tools.list().find(item => item.name === name); let tightened = [];
     if (action === 'reset') { if (scope !== 'repository') throw new Error('Tool inheritance requires repository scope.'); reset.push(...keys); }
     else if (!item) throw new Error('Tool name unavailable in this inventory.');
     else if (action === 'remove') { /* Removal visibly blocks every repository; immutable evidence remains. */ }
     else if (action === 'disable') changes['tools.disabled'] = [...new Set([...view.values['tools.disabled'].value, ...tools.pins(name)])];
     else if (['enable', 'install', 'authorize'].includes(action)) {
-      changes['tools.disabled'] = view.values['tools.disabled'].value.filter(id => !tools.pins(name).includes(id));
+      const pins = tools.pins(name);
+      tightened = pins.filter(id => id !== item.id && tools.get(id).definition.dataCategories.some(category => !item.definition.dataCategories.includes(category)));
+      changes['tools.disabled'] = [...new Set([...view.values['tools.disabled'].value.filter(id => !pins.includes(id)), ...tightened])];
       changes['tools.extensions'] = [...view.values['tools.extensions'].value.filter(id => tools.get(id).name !== name), item.id];
     } else throw new Error('Tool action unavailable.');
     let proposal = null;
@@ -78,7 +80,8 @@ export function createToolManager({ store, policy, tools, connections, occupiedN
     const value = { action, name, item: item ? metadata(item) : null, proposal, scope, target: target(), inventoryRevision: tools.revision(), policyRevision: view.revision,
       affectedRepositories: action === 'remove' ? store.workspaces().map(item => item.name) : proposal?.affectedRepositories.map(id => store.workspaces().find(item => item.id === id)?.name ?? id) ?? (target() ? [store.workspaces().find(item => item.id === target()).name] : store.workspaces().map(item => item.name)),
       timing: action === 'remove' ? 'Immediately blocks this name across every repository. Pins stay for recovery; reinstall never revives an old run.'
-        : action === 'disable' ? 'Immediately blocks captured use. Re-enabling applies to new runs.' : 'Future runs use the exact selected definition. Active runs keep their pins. No permissions or pipeline steps are added.' };
+        : action === 'disable' ? 'Immediately blocks captured use. Re-enabling applies to new runs.' : tightened.length ? 'Removed data categories immediately revoke ' + tightened.length + ' older pins in this scope. Future runs use the new pin; pipeline steps need explicit rebinding. No permissions or steps are added.'
+          : 'Future runs use the exact selected definition. Active runs keep their pins. No permissions or pipeline steps are added.' };
     preview = { ...value, hash: toolManifestHash(value) }; message = 'Review tool, destination, data categories, permissions and affected scope before applying.'; publish();
   }
   function stage() {
@@ -130,6 +133,11 @@ export function createToolManager({ store, policy, tools, connections, occupiedN
       } else if (payload.operation === 'define') await operate(async (signal, check) => {
         invalidate(); catalog = null; pendingPackage = toolPackage(payload.definition); await qualifyToolPackage(pendingPackage, { signal }); check(); stage();
       });
+      else if (payload.operation === 'data') {
+        const item = preview?.item?.name === payload.name ? tools.get(preview.item.id) : tools.list().find(item => item.name === payload.name);
+        if (!item) throw new Error('Tool data selection needs an installed or inspected tool.');
+        pendingPackage = toolPackage({ ...item.definition, dataCategories: payload.categories }, { name: item.name }); stage();
+      }
       else if (payload.operation === 'rename') {
         if (!pendingPackage || !collision || !skillName(payload.name) || occupiedNames().includes(payload.name)) throw new Error('Tool name is unavailable. Choose one displayed alternative.');
         pendingPackage = toolPackage(pendingPackage.definition, { name: payload.name }); stage();

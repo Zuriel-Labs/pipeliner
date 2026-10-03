@@ -57,9 +57,9 @@ exports.workspaceOptions = async ({ directory, helper, nativeFolderEntry }) => {
         project.fields = [...project.fields.filter(item => item.id !== changed.id), changed]; return copy(changed); } } };
 };
 
-exports.run = async ({ window, directory, vault, manager, workspaces, issues, pipelines, policy, development, developmentChannel, workspaceChannel, issueChannel, pipelineChannel, channel, windowReadyMs }) => {
+exports.run = async ({ window, directory, vault, manager, workspaces, issues, pipelines, policy, development, scheduler, scheduling, schedulingChannel, developmentChannel, workspaceChannel, issueChannel, pipelineChannel, channel, windowReadyMs }) => {
   const started = performance.now(), checks = [], measurements = [];
-  const developmentScope = process.argv.includes('--qualify-development'), pipelineScope = process.argv.includes('--qualify-pipelines'), issueScope = developmentScope || pipelineScope || process.argv.includes('--qualify-issues');
+  const schedulingScope = process.argv.includes('--qualify-scheduling'), developmentScope = process.argv.includes('--qualify-development'), pipelineScope = process.argv.includes('--qualify-pipelines'), issueScope = schedulingScope || developmentScope || pipelineScope || process.argv.includes('--qualify-issues');
   const js = code => window.webContents.executeJavaScript(code);
   const wait = async predicate => { const until = Date.now() + 10000; while (!await predicate()) { if (Date.now() >= until) throw new Error('qualification-wait-timeout'); await new Promise(resolve => setTimeout(resolve, 50)); } };
   let pipelineControl;
@@ -406,6 +406,57 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
         for (let i = 0; i < 110; i++) development.sync(); await wait(() => js("!document.getElementById('chat-development-qa-approve')"));
       });
     }
+    if (schedulingScope) {
+      const scheduleChat = async text => { await chat(text); await new Promise(resolve => setTimeout(resolve, 30)); };
+      await check('scheduling-registered-frame-context-and-worker-authority-fences', async () => {
+        const frame = window.webContents.mainFrame, payload = { operation: 'run-now', contextRevision: scheduling.status().revision };
+        assert.throws(() => schedulingChannel.dispatch({ sender: {}, senderFrame: frame }, payload));
+        assert.throws(() => schedulingChannel.dispatch({ sender: window.webContents, senderFrame: frame }, { ...payload, contextRevision: payload.contextRevision - 1 }));
+        assert.throws(() => schedulingChannel.dispatch({ sender: window.webContents, senderFrame: frame }, { ...payload, permissions: ['host.admin'] }));
+        await scheduleChat('"Enable scheduled checks"'); assert.equal(scheduling.status().preview, null);
+      });
+      await check('scheduling-chat-and-keyboard-apply-use-one-protected-policy', async () => {
+        await scheduleChat('Check every 45 minutes'); await wait(() => Boolean(scheduling.status().preview));
+        assert.equal(scheduling.status().preview.after['scheduling.intervalMinutes'].value, 45);
+        assert.equal(scheduling.status().values['scheduling.intervalMinutes'].value, 30);
+        await js("document.getElementById('settings-nav').click();document.getElementById('settings-schedule').click();document.getElementById('schedule-apply').focus()");
+        window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+        await wait(() => scheduling.status().values['scheduling.intervalMinutes'].value === 45);
+        assert.equal(policy.worker.read(workspaces.status().selected).values['background.enabled'].value, false);
+      });
+      await check('scheduling-Settings-calendar-and-chat-parity-with-named-timezone', async () => {
+        await js("document.getElementById('schedule-mode').value='calendar';document.getElementById('schedule-day-1').checked=true;document.getElementById('schedule-time').value='09:30';document.getElementById('schedule-timezone').value='America/Chicago';document.getElementById('schedule-form').requestSubmit()");
+        await wait(() => Boolean(scheduling.status().preview)); await scheduleChat('Apply this schedule');
+        assert.deepEqual(scheduling.status().values['scheduling.calendar'].value, { days: [1], time: '09:30' });
+        await scheduleChat('Enable scheduled checks'); await scheduleChat('Apply this schedule'); await scheduler.sync();
+        assert.equal(scheduling.status().values['scheduling.timezone'].value, 'America/Chicago');
+        assert.equal(scheduling.status().checks[0].nextAt > Date.now(), true);
+        assert.equal(scheduling.status().trigger, 'pm'); assert.equal(development.status().run, null);
+      });
+      await check('scheduling-inheritance-stale-preview-and-idle-Run-Now', async () => {
+        await scheduleChat('Check every 60 minutes for all repositories'); await wait(() => scheduling.status().preview?.after['scheduling.intervalMinutes'].value === 60); await scheduleChat('Apply this schedule'); await wait(() => scheduling.status().values['scheduling.intervalMinutes'].value === 60);
+        await scheduleChat('Show scheduling for this repository'); await scheduleChat('Inherit global schedule'); await scheduleChat('Apply this schedule'); await scheduler.sync();
+        assert.equal(scheduling.status().values['scheduling.intervalMinutes'].value, 60); assert.equal(scheduling.status().values['scheduling.intervalMinutes'].source, 'global');
+        assert.equal(scheduling.status().values['scheduling.enabled'].value, false);
+        await scheduleChat('Check every 40 minutes'); const old = scheduling.status(), first = workspaces.status().selected;
+        workspaces.dispatch({ operation: 'select', workspace: 'repo_qualification_second' }); await wait(() => scheduling.status().workspaceId !== first);
+        const frame = window.webContents.mainFrame; assert.throws(() => schedulingChannel.dispatch({ sender: window.webContents, senderFrame: frame }, { operation: 'apply', hash: old.preview.hash, contextRevision: old.revision }));
+        workspaces.dispatch({ operation: 'select', workspace: first }); await wait(() => scheduling.status().workspaceId === first);
+        const fixture = issueFixtures.get(first), writes = fixture.writes.length;
+        const at = performance.now(), receipt = await js(`window.pipeliner.schedulingRequest({operation:'run-now',contextRevision:${scheduling.status().revision}})`); assert.equal(receipt.accepted, true);
+        measurements.push({ ipcAction: 'run-now-receipt', milliseconds: performance.now() - at });
+        await wait(() => !scheduler.busy()); assert.equal(development.status().run, null); assert.equal(fixture.writes.length, writes);
+        assert.equal(scheduling.status().checks[0].reason, 'no-ready-work');
+      });
+      await check('scheduling-labeled-native-fields-and-narrow-zoom', async () => {
+        await js("document.getElementById('settings-nav').click();document.getElementById('settings-schedule').click()");
+        await js("document.getElementById('schedule-interval').focus();document.getElementById('schedule-interval').value='75'"); scheduling.sync(); await new Promise(resolve => setTimeout(resolve, 30));
+        assert.equal(await js("document.getElementById('schedule-interval').value"), '75'); assert.equal(scheduling.status().values['scheduling.intervalMinutes'].value, 60);
+        assert.equal(await js("Array.from(document.querySelectorAll('#schedule-settings input,#schedule-settings select')).every(input=>Array.from(document.querySelectorAll('#schedule-settings label')).some(label=>label.htmlFor===input.id)||input.closest('label'))"), true);
+        for (const zoom of [1, 2]) { window.setSize(420, 760); window.webContents.setZoomFactor(zoom); await new Promise(resolve => setTimeout(resolve, 100)); assert.equal(await js('document.documentElement.scrollWidth<=innerWidth'), true); }
+        window.webContents.setZoomFactor(1); window.setSize(1180, 840);
+      });
+    }
     await check('themes-narrow-zoom-high-contrast-reduced-motion', async () => {
       if (developmentScope) await js("document.getElementById('settings-nav').click();document.getElementById('settings-agents').click()");
       for (const theme of ['light', 'dark']) for (const view of ['repositories', 'issues', 'settings']) { nativeTheme.themeSource = theme; await js(`document.getElementById('${view}-nav').click()`); assert.equal(await js('document.documentElement.scrollWidth<=innerWidth'), true); }
@@ -422,6 +473,7 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
       window.setSize(1180, 840); nativeTheme.themeSource = 'dark'; await js('window.scrollTo(0,0)'); await new Promise(resolve => setTimeout(resolve, 100));
       if (pipelineScope) await js("document.getElementById('settings-nav').click();document.getElementById('settings-pipelines').click();document.getElementById('pipeline-step-1').open=true;window.scrollTo(0,document.getElementById('pipeline-draft').offsetTop-100)");
       if (developmentScope) await js("document.getElementById('settings-nav').click();document.getElementById('settings-agents').click();document.getElementById('dev-starter-skills').open=true");
+      if (schedulingScope) await js("document.getElementById('settings-nav').click();document.getElementById('settings-schedule').click();window.scrollTo(0,0)");
       await js('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))'); await new Promise(resolve => setTimeout(resolve, 100));
       if (developmentScope) assert.equal(await js("!document.getElementById('settings-view').hidden && !document.getElementById('agent-settings').hidden && document.getElementById('settings-nav').getAttribute('aria-current')==='page'"), true);
       assert.equal(await js("getComputedStyle(document.body).backgroundColor==='rgb(16, 23, 34)'"), true);
@@ -440,7 +492,7 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
       assert.equal(folderCancelled, true);
     });
   } catch { const snapshot = workspaces.status(); workspaceEvidence = { checkpoint: workspaceStage, busy: snapshot.busy, state: snapshot.draft?.state, error: snapshot.draft?.error, folderSelected: Boolean(snapshot.draft?.folder), projectCount: snapshot.draft?.projects?.length ?? 0 }; process.exitCode = 1; }
-  const report = { desktopQualification: developmentScope ? 'development-controls' : pipelineScope ? 'versioned-pipeline-editing' : 'protected-issue-intake', checks, passed: checks.length === (developmentScope ? 22 + (pipelineScope ? 6 : 0) : pipelineScope ? 24 : issueScope ? 18 : 21) && checks.every(c => c.passed), milliseconds: Math.round(performance.now() - started), windowReadyFromMainEntryMs: windowReadyMs, measurements,
+  const report = { desktopQualification: schedulingScope ? 'deterministic-scheduling' : developmentScope ? 'development-controls' : pipelineScope ? 'versioned-pipeline-editing' : 'protected-issue-intake', checks, passed: checks.length === (schedulingScope ? 23 : developmentScope ? 22 + (pipelineScope ? 6 : 0) : pipelineScope ? 24 : issueScope ? 18 : 21) && checks.every(c => c.passed), milliseconds: Math.round(performance.now() - started), windowReadyFromMainEntryMs: windowReadyMs, measurements,
     versions: { electron: process.versions.electron, chromium: process.versions.chrome, node: process.versions.node, sqlite: process.versions.sqlite, os: process.platform, architecture: process.arch },
     nativeEvidence, workspaceEvidence, folderFailure, folderCancelled, synthetic: 'Synthetic GitHub/model replies and first folder selection; actual native secure field, folder-panel cancellation, protected storage, local Git and own window',
     notRun: issueScope ? ['Unchanged Codex unauthenticated discovery', 'Unchanged public GitHub App qualification', 'Unchanged invalid Cloud key probe'] : [],

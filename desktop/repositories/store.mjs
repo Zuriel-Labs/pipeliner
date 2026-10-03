@@ -15,9 +15,9 @@ export function openWorkspaceStore(directory) {
   const db = new DatabaseSync(protectedFile(directory, 'workspaces.sqlite'), { allowExtension: false, timeout: 1000 });
   try {
     const version = db.prepare('PRAGMA user_version').get().user_version;
-    if (![0, 1, 2, 3].includes(version)) throw new Error('setup-schema-unsupported');
+    if (![0, 1, 2, 3, 4].includes(version)) throw new Error('setup-schema-unsupported');
     db.exec('PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;');
-    if (version && version < 3) backupDatabase(db, directory, 'workspaces', version);
+    if (version && version < 4) backupDatabase(db, directory, 'workspaces', version);
     if (!version) transact(db, () => {
       if (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().length) throw new Error('setup-schema-unsupported');
       db.exec("CREATE TABLE setup_draft(id INTEGER PRIMARY KEY CHECK(id=1),data TEXT NOT NULL,hash TEXT NOT NULL); CREATE TABLE workspaces(id TEXT PRIMARY KEY,repository_id TEXT NOT NULL UNIQUE,slug TEXT NOT NULL UNIQUE,local_key TEXT NOT NULL UNIQUE,data TEXT NOT NULL,hash TEXT NOT NULL); CREATE TABLE setup_effects(id TEXT PRIMARY KEY,job TEXT NOT NULL,step TEXT NOT NULL,fingerprint TEXT NOT NULL,data TEXT NOT NULL,state TEXT NOT NULL,result TEXT,UNIQUE(job,step)); CREATE TABLE workspace_selection(id INTEGER PRIMARY KEY CHECK(id=1),workspace TEXT REFERENCES workspaces(id)); PRAGMA user_version=1;");
@@ -27,6 +27,9 @@ export function openWorkspaceStore(directory) {
     });
     if (version < 3) transact(db, () => {
       db.exec('CREATE TABLE pipeline_drafts(context TEXT PRIMARY KEY,data TEXT NOT NULL,hash TEXT NOT NULL); PRAGMA user_version=3;');
+    });
+    if (version < 4) transact(db, () => {
+      db.exec('CREATE TABLE schedule_states(repository TEXT PRIMARY KEY REFERENCES workspaces(id),data TEXT NOT NULL,hash TEXT NOT NULL); PRAGMA user_version=4;');
     });
   } catch (error) { db.close(); throw error; }
   function effect(row) {
@@ -40,6 +43,11 @@ export function openWorkspaceStore(directory) {
     return encode({ repository, kind });
   }
   return Object.freeze({
+    schedule: repository => decode(db.prepare('SELECT data,hash FROM schedule_states WHERE repository=?').get(repository)),
+    saveSchedule(repository, state) {
+      if (!identifier(repository) || !db.prepare('SELECT id FROM workspaces WHERE id=?').get(repository)) throw new Error('workspace-unavailable');
+      db.prepare('INSERT INTO schedule_states VALUES(?,?,?) ON CONFLICT(repository) DO UPDATE SET data=excluded.data,hash=excluded.hash').run(repository, encode(state), digest(state));
+    },
     pipelineDraft: (repository, kind) => decode(db.prepare('SELECT data,hash FROM pipeline_drafts WHERE context=?').get(pipelineContext(repository, kind))),
     savePipelineDraft(repository, kind, draft) { db.prepare('INSERT INTO pipeline_drafts VALUES(?,?,?) ON CONFLICT(context) DO UPDATE SET data=excluded.data,hash=excluded.hash').run(pipelineContext(repository, kind), encode(draft), digest(draft)); },
     clearPipelineDraft(repository, kind) { db.prepare('DELETE FROM pipeline_drafts WHERE context=?').run(pipelineContext(repository, kind)); },

@@ -7,7 +7,7 @@ import { protectedFile } from './storage.mjs';
 const digest = value => createHash('sha256').update(canonicalJSON(value)).digest('hex');
 const id = value => typeof value === 'string' && /^[A-Za-z][A-Za-z0-9_-]{0,95}$/.test(value) && !['constructor', 'prototype'].includes(value);
 const checkedId = value => { if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(value)) throw new Error('Invalid command identity'); };
-const empty = () => ({ schemaVersion: 1, defaults, host: {}, global: {}, repositories: {} });
+const empty = () => ({ schemaVersion: 2, defaults, host: {}, global: {}, repositories: {} });
 function catalogData(value) {
   canonicalJSON(value);
   record(value, ['repositories', 'capabilities', 'maxConcurrency', 'background', 'connections', 'developers', 'extensions'], ['resources', 'checks', 'updateSources', 'notifications']);
@@ -89,7 +89,7 @@ export function openPolicyStore(directory, { catalog, clock = Date.now, inspecto
       resolved['agents.dev'].binding = current.developers.find(d => d.id === values['agents.dev']) ?? null;
       const connection = current.connections.find(c => c.id === resolved['agents.dev'].binding?.connection);
       resolved['agents.dev'].available = values['agents.dev'] === null || Boolean(connection && connection.healthy !== false && (!target || connection.repositories.includes(target)));
-      return { revision: version.revision, hash: version.hash, schemaVersion: 1, target, values: resolved, bindings: version.bindings };
+      return { revision: version.revision, hash: version.hash, schemaVersion: s.schemaVersion, target, values: resolved, bindings: version.bindings };
     }
     function previewEdit(request, currentVersion, current) {
       record(request, ['scope', 'target', 'changes', 'reset'], ['restoreRevision']); canonicalJSON(request);
@@ -97,6 +97,7 @@ export function openPolicyStore(directory, { catalog, clock = Date.now, inspecto
       if (!['host', 'global', 'repository'].includes(scope) || (scope === 'repository') !== (target !== null)) throw new Error('Invalid policy scope or target');
       if (!request.changes || Array.isArray(request.changes) || !Array.isArray(request.reset) || new Set(request.reset).size !== request.reset.length) throw new Error('Invalid policy changes');
       const document = JSON.parse(canonicalJSON(currentVersion.document));
+      document.schemaVersion = 2; document.defaults = defaults;
       if (scope === 'repository') document.repositories[target] ??= {};
       const values = scope === 'repository' ? document.repositories[target] : document[scope];
       let changes = request.changes, reset = request.reset;

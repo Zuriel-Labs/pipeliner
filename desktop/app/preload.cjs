@@ -11,4 +11,6 @@ contextBridge.exposeInMainWorld('pipeliner', Object.freeze({
   onPipelines: callback => { ipcRenderer.on('pipelines:status', (_event, value) => callback(value)); },
   developmentRequest: payload => ipcRenderer.invoke('development:control', payload),
   onDevelopment: callback => { ipcRenderer.on('development:status', (_event, value) => callback(value)); },
+  schedulingRequest: payload => ipcRenderer.invoke('scheduling:control', payload),
+  onScheduling: callback => { ipcRenderer.on('scheduling:status', (_event, value) => callback(value)); },
 }));

@@ -13,7 +13,7 @@ test('workspace migration preserves setup evidence and separates repository Issu
     store = openWorkspaceStore(root); store.register(workspace('first')); store.register(workspace('second')); store.select('first');
     store.saveDraft({ id: 'setup', state: 'choosing' }); store.close(); store = null;
     const legacy = new DatabaseSync(join(root, 'workspaces.sqlite'));
-    legacy.exec('DROP TABLE issue_contexts; DROP TABLE issue_ready; DROP TABLE pipeline_drafts; PRAGMA user_version=1;'); legacy.close();
+    legacy.exec('DROP TABLE schedule_states; DROP TABLE issue_contexts; DROP TABLE issue_ready; DROP TABLE pipeline_drafts; PRAGMA user_version=1;'); legacy.close();
     store = openWorkspaceStore(root);
     assert.equal(store.selected(), 'first'); assert.equal(store.workspaces().length, 2); assert.equal(store.draft().id, 'setup');
     store.saveIssueContext('first', { selected: 7, draft: { title: 'First repository' } });

@@ -153,6 +153,7 @@ export function createRuntime(db, { transaction: commit, policy, clock: wallCloc
         if (run && (run.issue !== request.issue || run.pipeline !== request.pipeline)) throw new Error('Repository already reserved by another Issue or pipeline');
         if (!run) {
           if (!grant.dev || captured.values['agents.dev'].value !== grant.dev) throw new Error('Configured Dev unavailable');
+          if (db.prepare("SELECT COUNT(*) AS count FROM runtime_runs WHERE released_at IS NULL AND control NOT IN ('paused','stopped')").get().count >= captured.values['limits.concurrency'].value) throw new Error('Host worker capacity exhausted');
           const epoch = db.prepare('UPDATE runtime_repositories SET epoch=epoch+1 WHERE id=? RETURNING epoch').get(workspace.repository).epoch;
           const limits = Object.fromEntries(Object.entries(captured.values).filter(([key]) => key.startsWith('limits.')).map(([key, value]) => [key, value.value]));
           const id = randomUUID(), pipeline = captured.values[`pipelines.${request.pipeline}`].value;
@@ -262,6 +263,7 @@ export function createRuntime(db, { transaction: commit, policy, clock: wallCloc
       const observation = await repositoryRead(run.repository, run.issue); activeRead(observation); await stopped(run);
       return transaction(() => { const current = runFor(binding); fresh(observation.observedAt); if (uncertain(current)) throw new Error('Uncertain mutation');
         if (!runtimeDeveloperAllowed(policy.authority(current.repository, current.policy_revision), assignment(current).dev)) throw new Error('Captured Dev unavailable');
+        if (db.prepare("SELECT COUNT(*) AS count FROM runtime_runs WHERE released_at IS NULL AND id<>? AND control NOT IN ('paused','stopped')").get(current.id).count >= policy.read(current.repository).values['limits.concurrency'].value) throw new Error('Host worker capacity exhausted');
         const epoch = db.prepare('UPDATE runtime_repositories SET epoch=epoch+1 WHERE id=? RETURNING epoch').get(run.repository).epoch;
         db.prepare("UPDATE runtime_actions SET state='cancelled',updated_at=? WHERE run_id=? AND state='prepared'").run(clock(), run.id);
         db.prepare("UPDATE runtime_runs SET epoch=?,owner=?,control='running',status=? WHERE id=?").run(epoch, session, observation.status, run.id); return visible(db.prepare('SELECT * FROM runtime_runs WHERE id=?').get(run.id)); });

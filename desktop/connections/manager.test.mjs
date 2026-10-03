@@ -71,13 +71,18 @@ test('managed login cancellation retains a cleanup fence until verified logout',
 test('host lease is fresh, stays private and is fenced on disconnect or caller cancellation', async () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-lease-test-'))); chmodSync(root, 0o700);
   const vault = await openVault(root, wrap);
-  const adapter = { connect: async () => connected, refresh: async ({ value }) => value, disconnect: async () => {} };
+  let refreshes = 0;
+  const adapter = { connect: async () => connected, refresh: async ({ value }) => { refreshes++; return value; }, disconnect: async () => {} };
   const manager = createConnectionManager({ vault, adapters: { github: adapter } });
   try {
     manager.start('github', 'connect'); await manager.idle('github');
+    const epoch = manager.epoch('github'), read = manager.acquireRead('github'); read.check(); read.close();
+    assert.equal(manager.epoch('github'), epoch); assert.equal(refreshes, 0); assert.throws(() => manager.acquireRead('ollama'), /denied/);
     const lease = await manager.acquire('github'); lease.check(); assert.equal(lease.value.credential.accessToken, connected.credential.accessToken);
+    assert.equal(refreshes, 1);
+    const held = manager.acquireRead('github'); held.check();
     assert.equal(JSON.stringify(manager.status()).includes(connected.credential.accessToken), false);
-    manager.disconnect('github'); assert.throws(() => lease.check()); await manager.idle('github'); lease.close();
+    manager.disconnect('github'); assert.throws(() => lease.check()); assert.throws(() => held.check()); await manager.idle('github'); lease.close(); held.close();
     manager.start('github', 'connect'); await manager.idle('github');
     adapter.refresh = async ({ signal }) => new Promise((resolve, reject) => { signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }); if (signal.aborted) reject(new Error('cancelled')); });
     const cancellation = new AbortController(), waiting = manager.acquire('github', cancellation.signal); cancellation.abort();

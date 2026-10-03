@@ -84,9 +84,12 @@ export function createConnectionManager({ vault, adapters, onChange = () => {}, 
     signal?.addEventListener('abort', abort, { once: true }); if (signal?.aborted) abort();
     try { while (tasks.has(id)) await tasks.get(id).done; }
     finally { signal?.removeEventListener('abort', abort); }
+    return borrow(id, signal);
+  }
+  function borrow(id, signal) {
     requireReady(id); signal?.throwIfAborted();
     const stored = vault.get(id);
-    if (errors.has(id) || !stored.value || stored.value.cleanupPending || !['connected', 'limited'].includes(stored.value.view?.health)
+    if (tasks.has(id) || errors.has(id) || !stored.value || stored.value.cleanupPending || !['connected', 'limited'].includes(stored.value.view?.health)
       || id !== 'codex' && !stored.value.credential) throw new Error('connection-unavailable');
     const controller = new AbortController(), group = leases.get(id) ?? new Set(); leases.set(id, group); group.add(controller);
     const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
@@ -106,6 +109,8 @@ export function createConnectionManager({ vault, adapters, onChange = () => {}, 
       if (!['github', 'github-setup'].includes(id)) throw new Error('connection-denied');
       return acquire(id, signal);
     },
+    // Eligibility still makes authenticated live API reads. Writes retain the full refresh/preflight path.
+    acquireRead(id, signal) { if (!['github', 'github-setup'].includes(id)) throw new Error('connection-denied'); return borrow(id, signal); },
     async acquireProvider(id, model, signal) {
       requireReady(id);
       if (!['ollama', 'codex'].includes(id) || typeof adapters[id].turn !== 'function') throw new Error('capability-unverified');

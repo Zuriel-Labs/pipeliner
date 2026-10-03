@@ -24,7 +24,11 @@ export function makeRequest(accessToken, send, signal, retry) {
         body: body ? upload ? body : JSON.stringify(body) : undefined });
       if (!response.ok) {
         await response.body?.cancel().catch(() => {});
-        const error = new Error(`http-${response.status}`); error.retryAfterMs = retryAfter(response); throw error;
+        const error = new Error(`http-${response.status}`); error.retryAfterMs = retryAfter(response);
+        const reset = response.headers.get('x-ratelimit-reset');
+        if ([403, 429].includes(response.status) && response.headers.get('x-ratelimit-remaining') === '0' && /^\d{1,12}$/.test(reset ?? '')) error.retryAfterMs = Math.max(error.retryAfterMs ?? 0, Number(reset) * 1000 - Date.now(), 0);
+        else if (response.status === 429 && error.retryAfterMs === null) error.retryAfterMs = 60000;
+        throw error;
       }
       reader = response.body?.getReader();
       if (!reader) throw new Error('response-invalid');
@@ -66,7 +70,7 @@ export function makeRequest(accessToken, send, signal, retry) {
     for (let attempt = 1; ; attempt++) {
       try { return await execute(); }
       catch (error) {
-        if (mutation || signal?.aborted || !isTransient(error) || attempt >= (retry?.attempts ?? 1)) throw error;
+        if (mutation || signal?.aborted || !(isTransient(error) || error.message === 'http-403' && Number.isSafeInteger(error.retryAfterMs) && error.retryAfterMs >= 0) || attempt >= (retry?.attempts ?? 1)) throw error;
         const delay = retryDelay(attempt, error.retryAfterMs);
         if (Date.now() + delay >= retry.deadlineAt) throw new Error('Transport retry cannot fit remaining deadline');
         await sleep(delay, undefined, { signal });

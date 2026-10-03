@@ -1,0 +1,37 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { openWorkspaceStore } from '../repositories/store.mjs';
+import { openPolicyStore } from '../core/policy.mjs';
+import { createSchedulingManager } from './manager.mjs';
+import { createSchedulingControlChannel } from '../core/control.mjs';
+
+test('PM schedule scope, inheritance, preview and control binding use the same durable policy', t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-schedule-pm-'))), store = openWorkspaceStore(root);
+  for (const [index, id] of ['R1', 'R2'].entries()) store.register({ id, name: id, repositoryId: 'REPO' + id, slug: 'fixture/' + id.toLowerCase(), localKey: '1:' + index, path: root, project: { id: 'P1' } });
+  store.select('R1');
+  const policy = openPolicyStore(root, { catalog: () => ({ repositories: ['R1', 'R2'], capabilities: [], maxConcurrency: 1, background: false, connections: [], developers: [], extensions: [] }) });
+  let runs = 0;
+  const scheduler = { busy: () => false, status: () => null, sync: async () => {}, check: async () => { runs++; } };
+  const manager = createSchedulingManager({ store, policy, scheduler });
+  t.after(() => { manager.close(); policy.close(); store.close(); rmSync(root, { recursive: true }); });
+  const chat = text => manager.dispatch({ operation: 'chat', text });
+  chat('Check every 45 minutes'); chat('Apply this schedule');
+  chat('Schedule daily at 09:00'); assert.equal(manager.status().preview.after['scheduling.timezone'].value, Intl.DateTimeFormat().resolvedOptions().timeZone); chat('Cancel this schedule');
+  chat('Schedule weekdays at 09:30 in America/Chicago'); chat('Apply this schedule'); chat('Enable scheduled checks'); chat('Apply this schedule');
+  chat('Check every 60 minutes for all repositories'); assert.equal(manager.status().scope, 'global'); chat('Apply this schedule');
+  chat('Show scheduling for this repository'); chat('Inherit global schedule'); chat('Apply this schedule');
+  assert.equal(manager.status().values['scheduling.intervalMinutes'].value, 60); assert.equal(manager.status().values['scheduling.intervalMinutes'].source, 'global');
+  assert.equal(manager.status().values['scheduling.enabled'].value, false);
+  chat('Check every 40 minutes'); const before = manager.status();
+  const frame = { parent: null, url: 'pipeliner://app/index.html' }, contents = { mainFrame: frame, isDestroyed: () => false };
+  const channel = createSchedulingControlChannel(manager, { contents, url: frame.url, context: () => ({ revision: manager.status().revision }) });
+  store.select('R2'); manager.sync(); assert.equal(manager.status().preview, null);
+  assert.throws(() => channel.dispatch({ sender: contents, senderFrame: frame }, { operation: 'apply', contextRevision: before.revision, hash: before.preview.hash }), /context/);
+  assert.throws(() => channel.dispatch({ sender: {}, senderFrame: frame }, { operation: 'run-now', contextRevision: manager.status().revision }), /sender/);
+  assert.throws(() => manager.dispatch({ operation: 'prepare', changes: { 'background.enabled': true } }), /scheduling fields/);
+  chat('"Enable scheduled checks"'); assert.equal(manager.status().preview, null);
+  chat('Run Now'); assert.equal(runs, 1);
+});

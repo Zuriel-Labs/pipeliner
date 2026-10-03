@@ -104,8 +104,10 @@ const entries = [
   ['permissions.grants', 'S-05', 'Repository permissions', 'repository', ['workspace.read', 'workspace.write', 'worker.exec'], capabilities, 'tightening-now-expansion-new-run'],
   ['permissions.resources', 'S-05', 'Additional resource scopes', 'repository', [], list, 'tightening-now-expansion-new-run'],
   ['scheduling.enabled', 'S-06', 'Scheduled checks', 'repository', false, boolean, 'next-check'],
+  ['scheduling.mode', 'S-06', 'Schedule mode', 'repository', 'interval', choice(['interval', 'calendar']), 'next-check'],
+  ['scheduling.calendar', 'S-06', 'Calendar days and time', 'repository', null, v => v === null || (() => { record(v, ['days', 'time']); return list(v.days, number(0, 6)) && v.days.length > 0 && typeof v.time === 'string' && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(v.time); })(), 'next-check'],
   ['scheduling.intervalMinutes', 'S-06', 'Check interval in minutes', 'repository', 30, number(1, 525600), 'next-check'],
-  ['scheduling.timezone', 'S-06', 'Calendar timezone', 'repository', null, v => v === null || (typeof v === 'string' && v.length <= 80 && (() => { try { new Intl.DateTimeFormat('en', { timeZone: v }); return true; } catch { return false; } })()), 'next-check'],
+  ['scheduling.timezone', 'S-06', 'Calendar timezone', 'repository', null, v => v === null || (typeof v === 'string' && /^[A-Za-z][A-Za-z0-9_+./-]{0,79}$/.test(v) && (() => { try { new Intl.DateTimeFormat('en', { timeZone: v }); return true; } catch { return false; } })()), 'next-check'],
   ['scheduling.afterCompletion', 'S-06', 'Next work after completion', 'repository', 'next-check', choice(['next-check', 'immediate']), 'next-check'],
   ['background.enabled', 'S-07', 'Background operation', 'host', false, boolean, 'verified-host-action'],
   ['background.startAtLogin', 'S-07', 'Start at login', 'host', false, boolean, 'verified-host-action'],
@@ -159,10 +161,12 @@ export function validateValue(id, value) {
   const f = fields.get(id); if (!f) throw new Error('Unknown policy field');
   if (!f.validate(value)) throw new Error(`Invalid ${f.label}`);
 }
-export function rawValues(state, target) { return { ...state.defaults, ...state.host, ...state.global, ...(target ? state.repositories[target] : {}) }; }
+// Additive safe defaults do not rewrite or rehash captured schema-1 policy versions.
+export const legacyDefaults = immutable(Object.fromEntries(Object.entries(defaults).filter(([id]) => !['scheduling.mode', 'scheduling.calendar'].includes(id))));
+export function rawValues(state, target) { return { ...defaults, ...state.defaults, ...state.host, ...state.global, ...(target ? state.repositories[target] : {}) }; }
 export function validateState(state) {
   canonicalJSON(state); record(state, ['schemaVersion', 'defaults', 'host', 'global', 'repositories']);
-  if (state.schemaVersion !== 1 || canonicalJSON(state.defaults) !== canonicalJSON(defaults)) throw new Error('Unsupported policy schema or defaults');
+  if (![1, 2].includes(state.schemaVersion) || canonicalJSON(state.defaults) !== canonicalJSON(state.schemaVersion === 1 ? legacyDefaults : defaults)) throw new Error('Unsupported policy schema or defaults');
   for (const [scope, values] of [['host', state.host], ['global', state.global], ...Object.entries(state.repositories).map(([id, v]) => {
     if (!identifier(id)) throw new Error('Invalid repository identity'); return ['repository', v];
   })]) {
@@ -174,6 +178,7 @@ export function validateState(state) {
   }
   for (const target of [null, ...Object.keys(state.repositories)]) {
     const v = rawValues(state, target);
+    if (v['scheduling.enabled'] && v['scheduling.mode'] === 'calendar' && (!v['scheduling.calendar'] || !v['scheduling.timezone'])) throw new Error('Calendar scheduling needs selected days, time and a named timezone');
     if (['supervised', 'pm-autonomous'].includes(v['autonomy.scenario']) && v['intake.trigger'] !== 'pm'
       || v['autonomy.scenario'] === 'scheduled-autonomous' && v['intake.trigger'] !== 'schedule') throw new Error('Scenario and start trigger conflict');
     if (v['autonomy.scenario'] === 'supervised' && (v['pipelines.development'].steps.filter(s => s.kind === 'pm-qa').length !== 1

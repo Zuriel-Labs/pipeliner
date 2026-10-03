@@ -6,21 +6,23 @@ const { pathToFileURL } = require('node:url');
 const origin = 'pipeliner://app', url = `${origin}/index.html`;
 const argument = name => process.argv.find(value => value.startsWith(`${name}=`))?.slice(name.length + 1);
 const qualifying = process.argv.includes('--qualify');
+const backgroundLaunch = process.argv.includes('--background-helper');
 const entryStarted = performance.now(); let windowReadyMs;
 const dataDirectory = argument('--data-directory') ?? path.join(app.getPath('appData'), 'Pipeliner');
-const helper = argument('--key-helper');
-const calendarHelper = argument('--calendar-helper');
+const helper = argument('--key-helper') ?? (app.isPackaged ? path.join(process.resourcesPath, 'helpers/secure-entry') : undefined);
+const calendarHelper = argument('--calendar-helper') ?? (app.isPackaged ? path.join(process.resourcesPath, 'helpers/calendar') : undefined);
 app.setName('Pipeliner'); app.setPath('userData', dataDirectory); app.setPath('crashDumps', path.join(dataDirectory, 'crashes'));
 protocol.registerSchemesAsPrivileged([{ scheme: 'pipeliner', privileges: { standard: true, secure: true } }]);
 if (!app.requestSingleInstanceLock()) app.exit(0);
-let window, manager, vault, workspaces, workspaceStore, issues, pipelines, policy, development, developmentStore, supervisor, scheduling, scheduler, closing = false, verifiedClose = false;
+let window, manager, vault, workspaces, workspaceStore, issues, pipelines, policy, development, developmentStore, supervisor, scheduling, scheduler, background, backgroundHost, backgroundNative, attachWindow, attachment, requestShutdown, authorizationMonitor, shutdownPaused = false, closing = false, verifiedClose = false;
 const moduleAt = file => import(pathToFileURL(path.join(__dirname, file)).href);
-const assets = new Map(['index.html', 'app.css', 'app.mjs', 'workspaces.mjs', 'issues.mjs', 'pipelines.mjs', 'development.mjs', 'scheduling.mjs'].map(file => [file, path.join(__dirname, file)]));
+const assets = new Map(['index.html', 'app.css', 'app.mjs', 'workspaces.mjs', 'issues.mjs', 'pipelines.mjs', 'development.mjs', 'scheduling.mjs', 'background.mjs'].map(file => [file, path.join(__dirname, file)]));
 assets.set('commands.mjs', path.join(__dirname, '../connections/commands.mjs')); assets.set('tokens.css', path.join(__dirname, '../prototype/style.css'));
 assets.set('issue-commands.mjs', path.join(__dirname, '../issues/commands.mjs')); assets.set('connections/commands.mjs', path.join(__dirname, '../connections/commands.mjs'));
 assets.set('pipeline-commands.mjs', path.join(__dirname, '../pipelines/commands.mjs'));
 assets.set('development-commands.mjs', path.join(__dirname, '../development/commands.mjs'));
 assets.set('scheduling-commands.mjs', path.join(__dirname, '../scheduling/commands.mjs'));
+assets.set('background-commands.mjs', path.join(__dirname, '../background/commands.mjs'));
 function asset(value) {
   try { const parsed = new URL(value); return parsed.protocol === 'pipeliner:' && parsed.host === 'app' && !parsed.username && !parsed.password && !parsed.port && !parsed.search && !parsed.hash && assets.has(parsed.pathname.slice(1)) ? parsed.pathname.slice(1) : null; }
   catch { return null; }
@@ -31,6 +33,16 @@ app.whenReady().then(async () => {
   mkdirSync(dataDirectory, { mode: 0o700, recursive: true });
   const directory = realpathSync(dataDirectory), info = lstatSync(dataDirectory);
   if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o777) !== 0o700 || info.uid !== process.getuid() || directory !== path.resolve(dataDirectory)) throw new Error('storage-directory-invalid');
+  const { openMacBackgroundService } = await moduleAt('../background/native.mjs');
+  backgroundNative = qualifying && process.argv.includes('--qualify-background') ? require('./qualify.cjs').backgroundNative() : await openMacBackgroundService(app);
+  if (backgroundLaunch) {
+    // Read protected host intent before opening credentials, connections, workers or a UI.
+    if (!app.isPackaged || !backgroundNative.inspect().qualified || backgroundNative.inspect().status !== 'enabled') { app.exit(0); return; }
+    const { openPolicyStore } = await moduleAt('../core/policy.mjs');
+    const startup = openPolicyStore(directory, { catalog: () => ({ repositories: [], capabilities: [], maxConcurrency: 1, background: false, connections: [], developers: [], extensions: [] }) });
+    let allowed; try { const v = startup.worker.read(null).values; allowed = v['background.enabled'].value && v['background.startAtLogin'].value; } finally { startup.close(); }
+    if (!allowed) { app.exit(0); return; } app.setActivationPolicy('accessory');
+  }
   const { createConnectionManager } = await moduleAt('../connections/manager.mjs');
   const { createConnectionControlChannel } = await moduleAt('../core/control.mjs');
   const { createWorkspaceControlChannel } = await moduleAt('../core/control.mjs');
@@ -38,6 +50,9 @@ app.whenReady().then(async () => {
   const { createPipelineControlChannel } = await moduleAt('../core/control.mjs');
   const { createDevelopmentControlChannel } = await moduleAt('../core/control.mjs');
   const { createSchedulingControlChannel } = await moduleAt('../core/control.mjs');
+  const { createBackgroundControlChannel } = await moduleAt('../core/control.mjs');
+  const { createBackgroundHost } = await moduleAt('../background/host.mjs');
+  const { createBackgroundManager } = await moduleAt('../background/manager.mjs');
   const { createSchedulingManager } = await moduleAt('../scheduling/manager.mjs');
   const { createScheduler } = await moduleAt('../scheduling/scheduler.mjs');
   const { nextCalendar } = await moduleAt('../scheduling/calendar.mjs');
@@ -51,7 +66,7 @@ app.whenReady().then(async () => {
   const { nativeKeyEntry, nativeFolderEntry } = await moduleAt('../connections/native-entry.mjs');
   const activeConnections = new Set();
   const publish = snapshot => {
-    development?.sync(); scheduling?.sync();
+    development?.sync(); scheduling?.sync(); background?.sync();
     let returned = false;
     for (const connection of snapshot.connections) { if (activeConnections.has(connection.id) && !connection.busy) returned = true; if (connection.busy) activeConnections.add(connection.id); else activeConnections.delete(connection.id); }
     if (window && !window.isDestroyed()) { window.webContents.send('connections:status', snapshot); if (returned && !closing) { window.show(); window.focus(); window.webContents.focus(); } }
@@ -90,12 +105,16 @@ app.whenReady().then(async () => {
   };
   const makeDevelopment = initialRevision => createDevelopmentManager({ store: workspaceStore, policy, ledger: developmentStore, supervisor, initialRevision,
     connections: { developers: () => manager.developers(), status: () => manager.status(), acquire: (...args) => manager.acquire(...args), acquireProvider: (...args) => manager.acquireProvider(...args) }, onChange: publishDevelopment,
-    openCandidate: value => shell.openExternal(value),
+    openCandidate: value => shell.openExternal(value), hostAuthority: () => !closing && (backgroundHost?.executionAllowed() ?? !backgroundLaunch),
     ...(qualifying ? { api: require('./qualify.cjs').issueApi } : {}) });
   development = makeDevelopment(1);
-  const publishScheduling = snapshot => { if (window && !window.isDestroyed()) window.webContents.send('scheduling:status', snapshot); };
+  const publishScheduling = snapshot => { background?.sync(); if (window && !window.isDestroyed()) window.webContents.send('scheduling:status', snapshot); };
   const makeScheduling = initialRevision => createSchedulingManager({ store: workspaceStore, policy, scheduler, initialRevision, onChange: publishScheduling });
   scheduling = makeScheduling(1);
+  const publishBackground = snapshot => { if (window && !window.isDestroyed()) window.webContents.send('background:status', snapshot); };
+  const makeBackground = initialRevision => createBackgroundManager({ policy, host: backgroundHost, initialRevision, onChange: publishBackground,
+    scheduler: () => workspaceStore && scheduler ? workspaceStore.workspaces().map(workspace => ({ repository: workspace.name, ...scheduler.status(workspace.id) })) : [] });
+  background = makeBackground(1);
   protocol.handle('pipeliner', request => {
     const name = request.method === 'GET' ? asset(request.url) : null;
     if (!name) return new Response('Unavailable', { status: 404 });
@@ -104,10 +123,26 @@ app.whenReady().then(async () => {
   });
   session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false)); session.defaultSession.setPermissionCheckHandler(() => false);
   session.defaultSession.webRequest.onBeforeRequest((details, callback) => callback({ cancel: !asset(details.url) }));
-  window = new BrowserWindow({ width: 1180, height: 840, minWidth: 420, minHeight: 580, show: false, title: 'Pipeliner', backgroundColor: '#101722',
-    webPreferences: { preload: path.join(__dirname, 'preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false, nodeIntegrationInWorker: false, webviewTag: false, webSecurity: true, allowRunningInsecureContent: false } });
-  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  for (const event of ['will-navigate', 'will-frame-navigate', 'will-attach-webview']) window.webContents.on(event, e => e.preventDefault());
+  attachWindow = async () => {
+    if (closing) return; if (window && !window.isDestroyed()) { window.show(); window.focus(); return window; }
+    if (attachment) return attachment;
+    attachment = (async () => {
+    app.setActivationPolicy('regular'); backgroundHost?.setVisible(true);
+    await backgroundHost?.refresh(); if (backgroundHost?.executionAllowed()) await scheduler?.resume();
+    window = new BrowserWindow({ width: 1180, height: 840, minWidth: 420, minHeight: 580, show: false, title: 'Pipeliner', backgroundColor: '#101722',
+      webPreferences: { preload: path.join(__dirname, 'preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false, nodeIntegrationInWorker: false, webviewTag: false, webSecurity: true, allowRunningInsecureContent: false } });
+    const attached = window;
+    attached.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    for (const event of ['will-navigate', 'will-frame-navigate', 'will-attach-webview']) attached.webContents.on(event, e => e.preventDefault());
+    attached.on('close', event => {
+      if (verifiedClose) return;
+      if (!closing && backgroundHost?.status().effective) return;
+      event.preventDefault(); void requestShutdown?.();
+    });
+    attached.on('closed', () => { if (window === attached) window = null; backgroundHost?.setVisible(false); if (!closing && backgroundHost?.status().effective) app.setActivationPolicy('accessory'); });
+    attached.once('ready-to-show', () => { windowReadyMs ??= performance.now() - entryStarted; if (!closing) attached.show(); }); await attached.loadURL(url); return attached;
+    })().finally(() => { attachment = null; }); return attachment;
+  };
   const channel = () => createConnectionControlChannel(manager, { contents: window.webContents, url, context: () => ({ revision: manager.status().revision }) });
   ipcMain.handle('connections:control', (event, payload) => { if (closing) throw new Error('App closing'); return channel().dispatch(event, payload); });
   const workspaceChannel = () => createWorkspaceControlChannel(workspaces, { contents: window.webContents, url, context: () => ({ revision: workspaces.status().revision }) });
@@ -120,16 +155,26 @@ app.whenReady().then(async () => {
   ipcMain.handle('development:control', (event, payload) => { if (closing) throw new Error('App closing'); return developmentChannel().dispatch(event, payload); });
   const schedulingChannel = () => createSchedulingControlChannel(scheduling, { contents: window.webContents, url, context: () => ({ revision: scheduling.status().revision }) });
   ipcMain.handle('scheduling:control', (event, payload) => { if (closing) throw new Error('App closing'); return schedulingChannel().dispatch(event, payload); });
-  const suspendScheduling = () => scheduler?.suspend(), wakeScheduling = () => { if (!closing) void scheduler?.wake().catch(() => {}); };
-  powerMonitor.on('suspend', suspendScheduling); powerMonitor.on('resume', wakeScheduling);
-  window.on('close', async event => {
-    if (verifiedClose) return; event.preventDefault(); if (closing) return; closing = true;
-    try { powerMonitor.removeListener('suspend', suspendScheduling); powerMonitor.removeListener('resume', wakeScheduling); await scheduler?.close(); scheduling.close(); await development.close(); pipelines.close(); await issues.close(); await workspaces.close(); await manager.close(); developmentStore?.close(); policy?.close(); workspaceStore?.close(); vault?.close(); verifiedClose = true; window.close(); }
-    catch { closing = false; publish(manager.status()); }
-  });
+  const backgroundChannel = () => createBackgroundControlChannel(background, { contents: window.webContents, url, context: () => ({ revision: background.status().revision }) });
+  ipcMain.handle('background:control', (event, payload) => { if (closing) throw new Error('App closing'); return backgroundChannel().dispatch(event, payload); });
+  const suspendHost = () => { scheduler?.suspend(); void backgroundHost?.suspend().catch(() => {}); };
+  const wakeHost = () => { if (!closing) void (async () => { await backgroundHost?.wake(); if (backgroundHost?.executionAllowed()) await scheduler?.wake(); })().catch(() => {}); };
+  const endSession = event => { event.preventDefault(); void requestShutdown?.(); };
+  powerMonitor.on('suspend', suspendHost); powerMonitor.on('resume', wakeHost); powerMonitor.on('shutdown', endSession);
+  requestShutdown = async () => {
+    if (closing || verifiedClose) return; closing = true; clearInterval(authorizationMonitor);
+    try {
+      if (!shutdownPaused) { scheduler?.suspend(); await backgroundHost?.suspend(); shutdownPaused = true; }
+      // Keep recovery controls alive until worker termination has been verified.
+      await development.close(); await issues.close(); await workspaces.close(); await manager.close(); await scheduler?.close();
+      powerMonitor.removeListener('suspend', suspendHost); powerMonitor.removeListener('resume', wakeHost); powerMonitor.removeListener('shutdown', endSession);
+      backgroundHost?.close(); background.close(); scheduling.close(); pipelines.close();
+      developmentStore?.close(); policy?.close(); workspaceStore?.close(); vault?.close(); verifiedClose = true; app.quit();
+    } catch { closing = false; console.error('Pipeliner shutdown needs verified recovery. Work remains preserved.'); await attachWindow(); publish(manager.status()); }
+  };
   Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Pipeliner', submenu: [{ role: 'about' }, { type: 'separator' }, { role: 'quit' }] }, { role: 'editMenu' },
-    { label: 'View', submenu: [{ label: 'Settings', accelerator: 'CmdOrCtrl+,', click: () => window.webContents.executeJavaScript("document.getElementById('settings-nav').click()") }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' } ] }, { role: 'windowMenu' }]));
-  window.once('ready-to-show', () => { windowReadyMs = performance.now() - entryStarted; window.show(); }); await window.loadURL(url);
+    { label: 'View', submenu: [{ label: 'Settings', accelerator: 'CmdOrCtrl+,', click: async () => { const view = await attachWindow(); await view?.webContents.executeJavaScript("document.getElementById('settings-nav').click()"); } }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' } ] }, { role: 'windowMenu' }]));
+  if (!backgroundLaunch) await attachWindow();
   try {
     const { openVault } = await moduleAt('../connections/vault.mjs');
     vault = await openVault(directory, { available: () => safeStorage.isAsyncEncryptionAvailable(), encrypt: text => safeStorage.encryptStringAsync(text), decrypt: bytes => safeStorage.decryptStringAsync(bytes) });
@@ -139,7 +184,7 @@ app.whenReady().then(async () => {
     const { openWorkspaceStore } = await moduleAt('../repositories/store.mjs');
     workspaceStore = openWorkspaceStore(directory);
     policy = openPolicyStore(directory, { catalog: () => ({ repositories: workspaceStore.workspaces().map(workspace => workspace.id), capabilities: ['workspace.read', 'workspace.write', 'worker.exec', 'provider.turn', 'git.push', 'github.read', 'github.issue.write', 'github.pr.write', 'github.project.write'],
-      maxConcurrency: 1, background: false, connections: manager.status().connections.map(connection => ({ id: connection.id, provider: connection.id.startsWith('github') ? 'github' : connection.id,
+      maxConcurrency: 1, background: backgroundNative.inspect().qualified, connections: manager.status().connections.map(connection => ({ id: connection.id, provider: connection.id.startsWith('github') ? 'github' : connection.id,
         repositories: workspaceStore.workspaces().filter(workspace => !connection.id.startsWith('github') || connection.repositories.some(repo => repo.id === workspace.repositoryId)).map(workspace => workspace.id),
         healthy: ['connected', 'limited'].includes(connection.health) })), developers: manager.developers(), extensions: [] }),
       inspectors: { repository: input => development.observe(input), worker: binding => supervisor.inspectWorker(binding),
@@ -154,12 +199,18 @@ app.whenReady().then(async () => {
     issues = makeIssues(issues.status().revision + 1); publishIssues(issues.status());
     workspaces = makeWorkspaces(workspaces.status().revision + 1); publishWorkspaces(workspaces.status());
     scheduler = createScheduler({ store: workspaceStore, policy, development,
+      hostAuthority: () => !closing && (backgroundHost?.executionAllowed() ?? !backgroundLaunch),
       connections: { acquire: (...args) => manager.acquireRead(...args), epoch: id => manager.epoch(id) }, nextCalendar: (config, after, signal) => nextCalendar(calendarHelper, config, after, signal),
       onChange: () => scheduling?.sync(), ...(qualifying ? { api: require('./qualify.cjs').issueApi } : {}) });
     const schedulingRevision = scheduling.status().revision + 1; scheduling.close(); scheduling = makeScheduling(schedulingRevision); publishScheduling(scheduling.status());
+    backgroundHost = createBackgroundHost({ policy, native: backgroundNative, pause: async () => { scheduler.suspend(); await development.pauseAll(); }, resumeChecks: () => scheduler.resume(), onChange: () => background?.sync() });
+    backgroundHost.setVisible(Boolean(window && !window.isDestroyed()));
+    const backgroundRevision = background.status().revision + 1; background.close(); background = makeBackground(backgroundRevision); publishBackground(background.status());
+    await backgroundHost.refresh();
+    authorizationMonitor = setInterval(() => { if (!closing) void backgroundHost.refresh().catch(() => {}); }, 1000); authorizationMonitor.unref();
     await scheduler.check('startup');
   } catch { publish(manager.status()); }
-  if (qualifying) await require('./qualify.cjs').run({ window, directory, helper, vault, manager, workspaces, issues, pipelines, policy, development, scheduler, scheduling, schedulingChannel: schedulingChannel(), developmentChannel: developmentChannel(), workspaceChannel: workspaceChannel(), issueChannel: issueChannel(), pipelineChannel: pipelineChannel(), channel: channel(), windowReadyMs });
+  if (qualifying) await require('./qualify.cjs').run({ window, directory, helper, vault, manager, workspaces, issues, pipelines, policy, development, scheduler, scheduling, background, backgroundHost, backgroundNative, attachWindow, backgroundChannel: backgroundChannel(), schedulingChannel: schedulingChannel(), developmentChannel: developmentChannel(), workspaceChannel: workspaceChannel(), issueChannel: issueChannel(), pipelineChannel: pipelineChannel(), channel: channel(), windowReadyMs });
 }).catch(() => { console.error('Pipeliner could not start safely.'); app.exit(1); });
 
 async function githubPrompt({ connection, verificationUri, userCode, signal, cancel }) {
@@ -178,5 +229,8 @@ async function githubPrompt({ connection, verificationUri, userCode, signal, can
   const waiting = display().catch(() => cancel());
   return { async close() { completed.abort(); await waiting; } };
 }
-app.on('window-all-closed', () => { if (!qualifying) app.quit(); });
+app.on('second-instance', (_event, argv) => { if (!argv.includes('--background-helper')) void attachWindow?.(); });
+app.on('activate', () => { if (!backgroundLaunch || window) void attachWindow?.(); });
+app.on('window-all-closed', () => { if (!qualifying && !closing && !backgroundHost?.status().effective) void requestShutdown?.(); });
+app.on('before-quit', event => { if (!verifiedClose && requestShutdown) { event.preventDefault(); void requestShutdown(); } });
 process.on('SIGTERM', () => app.quit());

@@ -32,7 +32,7 @@ export function executionProfile(source, workspace) {
 }
 
 // The registered PM frame gets dispatch. Execution agents never receive this manager.
-export function createDevelopmentManager({ store, policy, ledger, connections, supervisor, onChange = () => {}, initialRevision = 1, api = github, openCandidate }) {
+export function createDevelopmentManager({ store, policy, ledger, connections, supervisor, onChange = () => {}, initialRevision = 1, api = github, openCandidate, hostAuthority = () => true }) {
   let selected = store?.selected() ?? null, revision = initialRevision, conversation = randomUUID(), preview = null, closed = false, closing = false, lastSnapshot;
   const tasks = new Map(), controls = new Map(), messages = new Map(), errors = new Map();
   const observations = new Map();
@@ -102,6 +102,7 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     } finally { if (!borrowed) release(held); }
   }
   function operate(target, fn) {
+    if (!hostAuthority()) throw new Error('Development host execution is unavailable.');
     if (closed || closing || tasks.has(target.id) || controls.has(target.id)) throw new Error('Development operation already pending.');
     const task = { controller: new AbortController() }; tasks.set(target.id, task); errors.delete(target.id); publish();
     task.done = Promise.resolve().then(() => fn(task.controller.signal)).catch(async error => {
@@ -115,6 +116,7 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     return { accepted: true, snapshot: status() };
   }
   function authority(target, run, signal, closeout = false) {
+    if (!hostAuthority()) throw new Error('Development host execution is unavailable.');
     signal?.throwIfAborted(); if (closed || closing) throw new Error('Development app is closing.');
     const current = policy.runtime.status(target.id), grant = policy.worker.authority(target.id, run.policyRevision);
     if (!current || current.id !== run.id || current.epoch !== run.epoch || !(closeout ? ['running', 'paused', 'stopped'] : ['running']).includes(current.control) || current.dev !== run.dev || !runtimeDeveloperAllowed(grant, run.dev)
@@ -140,7 +142,7 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     let binding = { runId: run.id, epoch: run.epoch };
     const identity = inspectWorkspace(target.path, { repository: target.id, owner: target.slug.split('/')[0], name: target.slug.split('/')[1] });
     if (workspaceData(identity).localKey !== target.localKey) throw new Error('Development local workspace changed.');
-    const engine = createDevelopmentEngine({ ledger, policy, supervisor, connections, onChange: publish });
+    const engine = createDevelopmentEngine({ ledger, policy, supervisor, connections, onChange: publish, hostAuthority });
     let state;
     for (;;) {
       await supervisor.start(identity, binding, { candidate: snapshot.candidate, program: developmentWorkerProgram, allowedPath: 'development-result' });
@@ -182,6 +184,7 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     }
   }
   async function start(target, number, signal, scheduled) {
+    if (!hostAuthority()) throw new Error('Development host execution is unavailable.');
     if (!supervisor) throw new Error('Development worker unavailable.');
     if (!Number.isSafeInteger(number) || number < 1) throw new Error('Development needs a specific selected Issue.');
     if (policy.runtime.status(target.id)) throw new Error('Development already holds this repository; use its local controls.');
@@ -194,7 +197,7 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     const identity = inspectWorkspace(target.path, { repository: target.id, owner: target.slug.split('/')[0], name: target.slug.split('/')[1] });
     if (workspaceData(identity).localKey !== target.localKey) throw new Error('Development local workspace changed.');
     const snapshot = snapshotWorkspace(identity), profile = executionProfile(snapshot.files, target), held = await acquire(target, signal); let issue, integrationMethod;
-    const unchangedPolicy = () => { signal.throwIfAborted(); scheduleAuthority(); if (policy.worker.read(target.id).hash !== view.hash) throw new Error('Development configuration changed during preflight.'); };
+    const unchangedPolicy = () => { signal.throwIfAborted(); if (!hostAuthority()) throw new Error('Development host execution is unavailable.'); scheduleAuthority(); if (policy.worker.read(target.id).hash !== view.hash) throw new Error('Development configuration changed during preflight.'); };
     try {
       const pipeline = view.values['pipelines.development'].value, ungated = !pipeline.steps.some(step => step.kind === 'pm-qa');
       if (profile.release.strategy !== 'none' || profile.release.cycle || pipeline.steps.some(step => !['agent', 'check', 'pm-qa', 'pr-integration'].includes(step.kind)
@@ -305,6 +308,7 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     const work = (async () => {
       await old?.done; const binding = { runId: run.id, epoch: run.epoch };
       if (operation === 'resume') {
+        if (!hostAuthority()) throw new Error('Development host execution is unavailable.');
         if (closed || closing) throw new Error('Development app is closing.');
         const recorded = ledger.status(run.id);
         if (ledger.evidence({ runId: run.id, epoch: recorded.epoch }).some(value => ['prepared', 'dispatched', 'uncertain'].includes(value.state))) throw new Error('Development pending tool outcome needs recovery before resume.');
@@ -503,6 +507,18 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
       });
     },
     sync() { sync(); publish(); }, async idle() { await Promise.allSettled([...tasks.values()].map(task => task.done)); await Promise.allSettled([...controls.values()]); },
+    async pauseAll() {
+      if (closed || closing) throw new Error('Development pause already pending.'); closing = true;
+      for (const task of tasks.values()) task.controller.abort();
+      try { await this.idle(); await supervisor?.pauseForeground();
+        for (const target of store?.workspaces() ?? []) {
+          const run = policy?.runtime.status(target.id); if (!run) continue;
+          if (!['paused', 'stopped'].includes(run.control)) throw new Error('Development pause remains unverified.');
+          let state; try { state = ledger.status(run.id); } catch (error) { if (error.message !== 'Unknown Development run') throw error; }
+          if (state) ledger.suspend({ runId: run.id, epoch: state.epoch });
+        }
+      } finally { closing = false; publish(); }
+    },
     async close() { closing = true; invalidate(); for (const task of tasks.values()) task.controller.abort(); try { await this.idle(); const snapshot = status(); await supervisor?.shutdown();
       for (const workspace of store?.workspaces() ?? []) { const run = policy?.runtime.status(workspace.id); if (run && ['paused', 'stopped'].includes(run.control)) {
         let state; try { state = ledger.status(run.id); } catch (error) { if (error.message !== 'Unknown Development run') throw error; }

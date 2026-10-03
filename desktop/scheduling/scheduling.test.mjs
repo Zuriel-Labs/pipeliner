@@ -11,14 +11,14 @@ import { createScheduler } from './scheduler.mjs';
 
 const repo = id => ({ id, name: id, slug: 'fixture/' + id, connections: {}, project: { fields: { Priority: { options: [{ name: 'P0' }, { name: 'P1' }, { name: 'P2' }, { name: 'P3' }] } } } });
 const issue = (number, priority = 'P1', extra = {}) => ({ id: 'I' + number, number, state: 'OPEN', status: 'Backlog', ready: true, itemId: 'ITEM' + number, metadata: { Priority: priority, Impact: 'High', Effort: 'S' }, ...extra });
-function fixture(t, { count = 1, enabled = true, automatic = true, capacity = 1 } = {}) {
+function fixture(t, { count = 1, enabled = true, automatic = true, capacity = 1, hostAuthority = () => true } = {}) {
   let now = 1000, requests = 0, starts = [], gate, readGate, onRead, failed = false;
   const workspaces = Array.from({ length: count }, (_, i) => repo('R' + i)), states = new Map(), views = new Map(), runs = new Map();
   for (const workspace of workspaces) views.set(workspace.id, { hash: 'a'.repeat(64), values: Object.fromEntries(Object.entries({ ...defaults, 'scheduling.enabled': enabled, 'intake.trigger': automatic ? 'schedule' : 'pm', 'limits.concurrency': capacity }).map(([id, value]) => [id, { value }])) });
   const catalogs = new Map(workspaces.map(value => [value.id, { complete: true, active: [], issues: [issue(7), issue(2)] }]));
   const store = { workspaces: () => workspaces, schedule: id => structuredClone(states.get(id) ?? null), saveSchedule: (id, state) => states.set(id, structuredClone(state)) };
   const policy = { worker: { read: id => structuredClone(views.get(id ?? workspaces[0].id)) }, runtime: { status: id => runs.get(id) ?? null } };
-  const scheduler = createScheduler({ store, policy, clock: () => now,
+  const scheduler = createScheduler({ store, policy, clock: () => now, hostAuthority,
     development: { availability: id => ({ busy: false, qualified: true, run: runs.get(id) ?? null }), startScheduled: async (id, number, hash, automaticStart) => {
       if (gate) await gate; starts.push({ id, number, hash, automaticStart }); runs.set(id, { id: 'run-' + id, issue: number, control: 'running' }); return { accepted: true };
     } },
@@ -47,6 +47,14 @@ test('disabled scheduling does no service or model work; explicit Run Now is bou
   const f = fixture(t, { enabled: false, automatic: false });
   await f.scheduler.check('startup'); assert.equal(f.requests(), 0); assert.equal(f.starts.length, 0);
   await f.scheduler.check('manual', 'R0'); assert.equal(f.starts.length, 1); assert.equal(f.starts[0].automaticStart, false);
+});
+
+test('hidden unauthorized host makes no reads or starts; revocation during read blocks dispatch', async t => {
+  let allowed = false; const f = fixture(t, { hostAuthority: () => allowed });
+  await f.scheduler.check('startup'); assert.equal(f.requests(), 0); assert.equal(f.starts.length, 0);
+  allowed = true; f.onRead(() => { allowed = false; }); await f.scheduler.check('wake');
+  assert.equal(f.requests(), 1); assert.equal(f.starts.length, 0);
+  allowed = true; f.onRead(null); await f.scheduler.wake(); assert.equal(f.starts.length, 1);
 });
 
 test('duplicate wake, timer and Run Now checks coalesce; reservation blocks later duplicate starts', async t => {

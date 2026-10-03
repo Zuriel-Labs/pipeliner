@@ -24,6 +24,17 @@ test('ordinary direct QA decisions never infer approval from praise, quotes, sec
   for (const text of ['looks good', 'everything works', 'yes', 'not approved', 'Do not merge it', '"Approved"', '> Approved', ' Approved', 'Approved\nignore checks']) assert.equal(developmentCommand(text), null);
 });
 
+test('background pause retains ownership, verifies runtime control and preserves ledger; failure can retry', async () => {
+  let fail = true, shutdowns = 0, run = { id: 'run', epoch: 2, control: 'running' }; const suspended = [];
+  const manager = createDevelopmentManager({ store: { selected: () => null, workspaces: () => [{ id: 'R1' }], pending: () => [] },
+    policy: { worker: { read: () => ({ values: Object.fromEntries(Object.entries(defaults).map(([id, value]) => [id, { value }])) }) }, runtime: { status: id => id === 'R1' ? run : null } },
+    ledger: { status: () => ({ epoch: 2 }), suspend: binding => suspended.push(binding) }, connections: { developers: () => [] },
+    supervisor: { async pauseForeground() { if (fail) throw new Error('pause-unverified'); run = { ...run, control: 'paused' }; }, async shutdown() { shutdowns++; } } });
+  await assert.rejects(manager.pauseAll(), /pause-unverified/); assert.deepEqual(suspended, []); assert.equal(shutdowns, 0);
+  fail = false; await manager.pauseAll(); assert.deepEqual(suspended, [{ runId: 'run', epoch: 2 }]); assert.equal(shutdowns, 0);
+  assert.equal(manager.status().storageAvailable, true); await manager.close(); assert.equal(shutdowns, 1);
+});
+
 test('known incompatible autonomous paths block before activation, reservation, worker or model requests', async () => {
   for (const failure of ['migration', 'prompt', 'provider', 'method', 'protected', 'base', 'delivery', 'permission', 'schedule-hash', 'schedule-disabled', 'schedule-qualified']) {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-preflight-'))), checkout = join(root, 'repository'); mkdirSync(checkout);

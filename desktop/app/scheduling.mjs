@@ -21,7 +21,7 @@ export async function initScheduling({ el, message }) {
       'scheduling.calendar': { time: $('schedule-time').value, days: Array.from({ length: 7 }, (_, day) => day).filter(day => $('schedule-day-' + day).checked) },
       'scheduling.timezone': $('schedule-timezone').value, 'scheduling.afterCompletion': $('schedule-completion').value } : null;
     state = snapshot; const focused = document.activeElement?.id, nodes = [];
-    const scope = el('article', undefined, 'connection-card'); scope.append(el('h2', 'Scheduling'), el('p', 'Checks use deterministic eligibility. Idle checks do not ask a model. The app must remain open; background operation is off.', 'small'));
+    const scope = el('article', undefined, 'connection-card'); scope.append(el('h2', 'Scheduling'), el('p', 'Checks use deterministic eligibility. Idle checks do not ask a model.', 'small'));
     const scopeField = field('Schedule scope', 'schedule-scope', state.scope, [['global', 'All repositories · global defaults'], ...(state.workspaceId ? [['repository', state.repositoryLabel]] : [])]);
     scopeField.querySelector('select').addEventListener('change', event => request({ operation: 'view', scope: event.target.value })); scope.append(scopeField); nodes.push(scope);
     if (state.values) {

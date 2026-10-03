@@ -7,3 +7,4 @@
 #agent-settings>.connection-card{margin:20px 0}#agent-settings summary{cursor:pointer;min-height:44px;padding:10px 0;font-weight:700;overflow-wrap:anywhere}.development-card{margin:18px 0}.development-card h2{font-size:1.15rem}.development-card .connection-actions{margin-top:12px}
 #schedule-settings>.connection-card{margin:20px 0}
 #background-settings>.connection-card{margin:20px 0}
+#skill-settings>.connection-card{margin:20px 0}#skill-settings .setup-preview button{margin:6px 8px 0 0}#skill-settings .connection-heading h3{margin:0}#skill-settings .connection-card:focus-within{border-color:var(--work)}

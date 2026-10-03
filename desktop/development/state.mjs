@@ -130,7 +130,9 @@ export function openDevelopmentStore(directory, { clock = Date.now } = {}) {
   }
   return Object.freeze({
     create(run, settings) {
-      canonicalJSON(run); canonicalJSON(settings); record(settings, ['pipeline', 'source', 'developer', 'skillsHash', 'issueHash', 'checks', 'logBytes'], ['executionProfile', 'integrationMethod', 'fallbacks']);
+      canonicalJSON(run); canonicalJSON(settings); record(settings, ['pipeline', 'source', 'developer', 'skillsHash', 'issueHash', 'checks', 'logBytes'], ['executionProfile', 'integrationMethod', 'fallbacks', 'skillManifest']);
+      if (settings.skillManifest !== undefined && (!Array.isArray(settings.skillManifest) || !settings.skillManifest.length || settings.skillManifest.length > 64
+        || hash(settings.skillManifest) !== settings.skillsHash)) throw new Error('Invalid captured skill manifest');
       if (settings.integrationMethod !== undefined && !['merge', 'squash'].includes(settings.integrationMethod)) throw new Error('Invalid captured integration method');
       if (settings.executionProfile) { record(settings.executionProfile, ['kind', 'version']);
         if (settings.executionProfile.kind !== 'pipeliner-desktop' || settings.executionProfile.version !== 1) throw new Error('Invalid Desktop execution profile'); }

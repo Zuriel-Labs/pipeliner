@@ -57,7 +57,7 @@ export async function initScheduling({ el, message }) {
   }
   async function request(payload, text) {
     if (!state || pending) return; pending = true;
-    try { const result = await window.pipeliner.schedulingRequest({ ...payload, contextRevision: state.revision }); if (text) { message(text, true); $('prompt').value = ''; } pending = false; if (result.snapshot && result.snapshot.revision >= state.revision) render(result.snapshot); else render(state); if (result.message) message(result.message); }
+    try { const result = await window.pipeliner.schedulingRequest({ ...payload, contextRevision: state.revision }); if (text) message(text, true); pending = false; if (result.snapshot && result.snapshot.revision >= state.revision) render(result.snapshot); else render(state); if (result.message) message(result.message); }
     catch { pending = false; message('Schedule change blocked. Check selected scope, calendar inputs and current preview.'); render(await window.pipeliner.schedulingRequest({ operation: 'status' })); }
   }
   window.pipeliner.onScheduling(render); render(await window.pipeliner.schedulingRequest({ operation: 'status' }));

@@ -133,7 +133,7 @@ export async function initPipelines({ el, message }) {
     try {
       const result = await window.pipeliner.pipelineRequest({ ...payload, contextRevision: state.revision }); pending = false;
       if (state.workspaceId !== target) return;
-      if (text) { message(text, true, target); $('prompt').value = ''; }
+      if (text) message(text, true, target);
       if (result.snapshot) render(result.snapshot); if (result.message) message(result.message, false, target);
     } catch {
       pending = false; const latest = await window.pipeliner.pipelineRequest({ operation: 'status' }); render(latest);

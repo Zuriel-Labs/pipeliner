@@ -9,16 +9,18 @@ import { openDevelopmentStore, developmentIssueHash } from './state.mjs';
 import { sourceTree } from './source.mjs';
 import { starterHash, starterSkills } from './starter.mjs';
 import { createDevelopmentEngine } from './engine.mjs';
+import { openSkillStore } from '../skills/store.mjs';
 
 const hash = value => createHash('sha256').update(typeof value === 'string' ? value : canonicalJSON(value)).digest('hex');
 const file = content => ({ path: 'app.mjs', mode: '100644', content: Buffer.from(content).toString('base64') });
-function fixture(extraLimits = {}, fallbackIds = [], hostAuthority = () => true) {
+function fixture(extraLimits = {}, fallbackIds = [], hostAuthority = () => true, selectedSkills = false) {
   const issue = { number: 1, title: 'Change fixture value to two', body: 'A bounded fixture.' };
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-development-engine-'))), source = [file('export const value = 1;\n')], candidate = { sourceCommit: 'a'.repeat(40), gitTree: sourceTree(source) };
   const run = { id: 'run-one', repository: 'repo-one', issue: 1, dev: 'dev-one', epoch: 1, policyRevision: 1, policyHash: 'b'.repeat(64), createdAt: Date.now(),
     pipelineHash: hash(developmentTemplate), control: 'running', limits: { 'limits.stepTurns': 8, 'limits.issueTurns': 16, 'limits.agentSeconds': 1800, ...extraLimits } };
+  const skills = selectedSkills ? openSkillStore(root) : null, selected = skills?.capture({ values: { 'skills.bundledEnabled': { value: true }, 'skills.extensions': { value: [] }, 'skills.disabled': { value: [starterSkills[1].id] } } });
   const ledger = openDevelopmentStore(root); ledger.create(run, { pipeline: developmentTemplate, source: candidate, developer: { id: run.dev, connection: 'ollama', model: 'test-model' },
-    fallbacks: fallbackIds.map(id => ({ id, connection: 'ollama', model: 'test-model' })), skillsHash: starterHash, issueHash: developmentIssueHash(issue), checks: [{ name: 'Fixture check', command: 'node --test' }], logBytes: 1048576 });
+    fallbacks: fallbackIds.map(id => ({ id, connection: 'ollama', model: 'test-model' })), skillsHash: selected?.hash ?? starterHash, ...(selected ? { skillManifest: selected.manifest } : {}), issueHash: developmentIssueHash(issue), checks: [{ name: 'Fixture check', command: 'node --test' }], logBytes: 1048576 });
   let files = [], turns = 0, lease; const operations = [], binding = { runId: run.id, epoch: run.epoch }, permissions = ['provider.turn', 'workspace.read', 'workspace.write', 'worker.exec'];
   const makeLease = () => { let closed = false; return { check: () => { if (closed) throw new Error('connection-changed'); }, close: () => { closed = true; }, turn: async input => { turns++; return await next(input, turns); } }; };
   let next = async () => { throw new Error('provider unavailable'); };
@@ -34,18 +36,30 @@ function fixture(extraLimits = {}, fallbackIds = [], hostAuthority = () => true)
     throw new Error('tool denied');
   };
   const supervisor = { tool: async (...args) => args[1].operation === 'read' && args[1].path === 'missing.mjs' ? { ok: false, error: 'tool-denied-or-incomplete' } : ({ ok: true, result: await perform(...args) }) };
-  const grant = { dev: run.dev, connections: ['ollama'], capabilities: permissions, bundledSkills: true, takeover: fallbackIds.length > 0, fallbacks: fallbackIds };
+  const grant = { dev: run.dev, connections: ['ollama'], capabilities: permissions, bundledSkills: true, extensions: [], deniedExtensions: selected ? [starterSkills[1].id] : [], takeover: fallbackIds.length > 0, fallbacks: fallbackIds };
   const policy = { runtime: { status: () => run }, worker: { authority: () => grant } };
   const connections = { acquireProvider: async (id, model) => { assert.equal(id, 'ollama'); assert.equal(model, 'test-model'); lease = makeLease(); return lease; } };
   return { ledger, source, binding, run, grant, permissions, operations, get lease() { return lease; }, set next(value) { next = value; }, get turns() { return turns; },
-    engine: createDevelopmentEngine({ ledger, policy, supervisor, connections, hostAuthority }), context: { issue, source },
-    cleanup() { ledger.close(); rmSync(root, { recursive: true }); } };
+    engine: createDevelopmentEngine({ ledger, policy, supervisor, connections, hostAuthority, skills }), context: { issue, source },
+    cleanup() { ledger.close(); skills?.close(); rmSync(root, { recursive: true }); } };
 }
 const output = (evidence, documents = []) => ({ outcome: 'success', summary: 'Scoped fixture evidence.', evidence, documents, findings: [] });
 const call = (f, operation, payload, epoch = f.binding.epoch) => ({ content: '', thinking: '', usage: { input: 10, output: 5 }, tool_calls: [{ function: {
   name: 'pipeliner_tool', arguments: { ...f.binding, epoch, operation, payload } } }] });
 const latestEvidence = input => JSON.parse(input.messages.filter(message => message.role === 'tool').at(-1).content).evidenceId;
 const documents = ['research', 'specification', 'design'].map(kind => ({ kind, title: kind, paragraphs: ['Inspect the fixture; change one value; verify its check.'] }));
+
+test('captured skill selection excludes disabled instructions and tightening fences the returned tool before dispatch', async () => {
+  const f = fixture({}, [], () => true, true);
+  try {
+    f.next = async input => {
+      assert.match(input.messages[0].content, /pipeliner-forge/); assert.doesNotMatch(input.messages[0].content, /pipeliner-motif/);
+      f.grant.deniedExtensions.push(starterSkills[0].id); return call(f, 'list', {});
+    };
+    await assert.rejects(f.engine.run(f.binding, f.context), /skill authority revoked/);
+    assert.equal(f.turns, 1); assert.deepEqual(f.operations, ['seed', 'export']); assert.equal(f.ledger.status(f.run.id).turns, 1);
+  } finally { f.cleanup(); }
+});
 
 test('host revocation fences the next provider or workspace effect without resetting captured usage', async () => {
   for (const before of [true, false]) {

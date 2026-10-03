@@ -12,5 +12,6 @@
     "test": "node --test",
     "check": "npm run validate && npm test && git diff --check"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": { "yaml": "2.9.1" }
 }

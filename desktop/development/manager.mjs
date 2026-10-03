@@ -14,10 +14,11 @@ import { buildDevelopmentShowcase, readAutonomousBranch, readIntegrationMethod, 
 import { containsSecret } from '../connections/commands.mjs';
 import { developmentShapes, developmentCommand } from './commands.mjs';
 import { developmentIssueHash } from './state.mjs';
+import { installAuthorizedSkills } from '../skills/manager.mjs';
 export { developmentShapes, developmentCommand } from './commands.mjs';
 
 export const developmentPermissions = Object.freeze(['workspace.read', 'workspace.write', 'worker.exec', 'provider.turn', 'github.read', 'github.issue.write', 'github.project.write', 'git.push', 'github.pr.write']);
-const safeError = error => typeof error?.message === 'string' && error.message.length < 240 && /^(Development |Captured Development |Current candidate |Research specification |Hard provider metric |Repository checks |http-\d{3}$|connection-(changed|unavailable)$|capability-unverified$)/.test(error.message)
+const safeError = error => typeof error?.message === 'string' && error.message.length < 240 && /^(Development |Captured Development |Captured skill |Skill |Selected skill |Current candidate |Research specification |Hard provider metric |Repository checks |http-\d{3}$|connection-(changed|unavailable)$|capability-unverified$)/.test(error.message)
   ? error.message : 'Development could not continue safely. Work and recorded results remain preserved.';
 
 export function executionProfile(source, workspace) {
@@ -32,7 +33,7 @@ export function executionProfile(source, workspace) {
 }
 
 // The registered PM frame gets dispatch. Execution agents never receive this manager.
-export function createDevelopmentManager({ store, policy, ledger, connections, supervisor, onChange = () => {}, initialRevision = 1, api = github, openCandidate, hostAuthority = () => true }) {
+export function createDevelopmentManager({ store, policy, ledger, connections, supervisor, skills, onChange = () => {}, initialRevision = 1, api = github, openCandidate, hostAuthority = () => true }) {
   let selected = store?.selected() ?? null, revision = initialRevision, conversation = randomUUID(), preview = null, closed = false, closing = false, lastSnapshot;
   const tasks = new Map(), controls = new Map(), messages = new Map(), errors = new Map();
   const observations = new Map();
@@ -57,7 +58,10 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     return lastSnapshot = { revision, workspaceId: selected, repositoryLabel: target?.name ?? null, storageAvailable: available,
       configuredDev: view?.values['agents.dev'] ?? null, developers: connections.developers(),
       permissions: view ? { host: view.values['permissions.ceiling'], repository: view.values['permissions.grants'], required: developmentPermissions } : null,
-      skills: starterSkills.map(({ instructions: _instructions, ...skill }) => ({ ...skill, scope: selected, enabled: view?.values['skills.bundledEnabled'].value ?? false })),
+      skills: (skills?.list() ?? starterSkills).map(({ instructions: _instructions, files: _files, ...skill }) => ({ ...skill, scope: selected,
+        source: typeof skill.source === 'string' ? skill.source : skill.source.repository + ' @ ' + skill.source.commit,
+        enabled: Boolean(selected && view && !view.values['skills.disabled'].value.includes(skill.id)
+          && (skill.kind === 'external' ? view.values['skills.extensions'].value.includes(skill.id) : view.values['skills.bundledEnabled'].value)) })),
       busy: tasks.has(selected) || controls.has(selected), run, runDeveloper, stepLabel, development, execution: execution ? { worker: execution.worker, pending: execution.pending, error: execution.error } : null,
       preview, publication, qa: development?.qa ?? null, integrationReady, message: messages.get(selected) ?? null, error: errors.get(selected) ?? null,
       pending: store?.pending('development').filter(effect => effect.binding.repository === selected).map(({ step, state }) => ({ step, state })) ?? [],
@@ -142,7 +146,7 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     let binding = { runId: run.id, epoch: run.epoch };
     const identity = inspectWorkspace(target.path, { repository: target.id, owner: target.slug.split('/')[0], name: target.slug.split('/')[1] });
     if (workspaceData(identity).localKey !== target.localKey) throw new Error('Development local workspace changed.');
-    const engine = createDevelopmentEngine({ ledger, policy, supervisor, connections, onChange: publish, hostAuthority });
+    const engine = createDevelopmentEngine({ ledger, policy, supervisor, connections, skills, onChange: publish, hostAuthority });
     let state;
     for (;;) {
       await supervisor.start(identity, binding, { candidate: snapshot.candidate, program: developmentWorkerProgram, allowedPath: 'development-result' });
@@ -193,11 +197,14 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     const scheduleAuthority = () => { if (scheduled && (view.hash !== scheduled.hash || scheduled.automatic && (!view.values['scheduling.enabled'].value || view.values['intake.trigger'].value !== 'schedule'))) throw new Error('Development scheduled start authority changed.'); };
     scheduleAuthority();
     const fallbacks = grant.takeover ? view.values['agents.fallbacks'].value.map(id => connections.developers().find(dev => dev.id === id && grant.fallbacks.includes(id))) : [];
-    if (!dev || developmentPermissions.some(permission => !grant.capabilities.includes(permission)) || !grant.connections.includes('github') || !grant.connections.includes(dev.connection) || !grant.bundledSkills) throw new Error('Development needs a qualified assigned Dev and both host and repository permissions.');
+    if (!dev || developmentPermissions.some(permission => !grant.capabilities.includes(permission)) || !grant.connections.includes('github') || !grant.connections.includes(dev.connection) || !skills && !grant.bundledSkills) throw new Error('Development needs a qualified assigned Dev and both host and repository permissions.');
+    if (skills) installAuthorizedSkills(skills, view, grant, () => { signal.throwIfAborted(); if (!hostAuthority() || policy.worker.read(target.id).hash !== view.hash) throw new Error('Skill installation authority changed.'); });
+    const selectedSkills = skills?.capture(view), skillsRevision = skills?.revision();
+    if (selectedSkills) skills.prompt(selectedSkills.manifest, selectedSkills.hash, grant);
     const identity = inspectWorkspace(target.path, { repository: target.id, owner: target.slug.split('/')[0], name: target.slug.split('/')[1] });
     if (workspaceData(identity).localKey !== target.localKey) throw new Error('Development local workspace changed.');
     const snapshot = snapshotWorkspace(identity), profile = executionProfile(snapshot.files, target), held = await acquire(target, signal); let issue, integrationMethod;
-    const unchangedPolicy = () => { signal.throwIfAborted(); if (!hostAuthority()) throw new Error('Development host execution is unavailable.'); scheduleAuthority(); if (policy.worker.read(target.id).hash !== view.hash) throw new Error('Development configuration changed during preflight.'); };
+    const unchangedPolicy = () => { signal.throwIfAborted(); if (!hostAuthority()) throw new Error('Development host execution is unavailable.'); scheduleAuthority(); if (policy.worker.read(target.id).hash !== view.hash || skills && skills.revision() !== skillsRevision) throw new Error('Development configuration changed during preflight.'); };
     try {
       const pipeline = view.values['pipelines.development'].value, ungated = !pipeline.steps.some(step => step.kind === 'pm-qa');
       if (profile.release.strategy !== 'none' || profile.release.cycle || pipeline.steps.some(step => !['agent', 'check', 'pm-qa', 'pr-integration'].includes(step.kind)
@@ -241,7 +248,8 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     } finally { release(held); }
     unchangedPolicy();
     const reservation = await policy.runtime.reserve(identity, { commandId: randomUUID(), issue: number, pipeline: 'development', policyHash: view.hash }), run = reservation.run;
-    ledger.create(run, { pipeline: view.values['pipelines.development'].value, source: snapshot.candidate, developer: { id: dev.id, connection: dev.connection, model: dev.model }, skillsHash: starterHash, issueHash: developmentIssueHash({ number: issue.number, title: issue.title, body: issue.body }),
+    ledger.create(run, { pipeline: view.values['pipelines.development'].value, source: snapshot.candidate, developer: { id: dev.id, connection: dev.connection, model: dev.model }, skillsHash: selectedSkills?.hash ?? starterHash,
+      ...(selectedSkills ? { skillManifest: selectedSkills.manifest } : {}), issueHash: developmentIssueHash({ number: issue.number, title: issue.title, body: issue.body }),
       executionProfile: { kind: 'pipeliner-desktop', version: 1 }, integrationMethod, fallbacks: fallbacks.map(({ id, connection, model }) => ({ id, connection, model })),
       checks: profile.quality.commands.map((command, index) => ({ name: 'Repository check ' + (index + 1), command })), logBytes: Math.min(50, view.values['privacy.runLogMiB'].value) * 1024 * 1024 });
     scheduled?.reserved(run);

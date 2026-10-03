@@ -3,7 +3,7 @@ import { randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
 import { protectedFile } from '../core/storage.mjs';
 
 export const connectionIds = Object.freeze(['github', 'github-setup', 'codex', 'ollama']);
-const validId = id => { if (!connectionIds.includes(id)) throw new Error('connection-denied'); };
+const validId = id => { if (!connectionIds.includes(id) && !(typeof id === 'string' && /^mcp-[a-f0-9]{64}$/.test(id))) throw new Error('connection-denied'); };
 const limit = 2 * 1024 * 1024;
 
 export async function openVault(directory, protection) {
@@ -59,7 +59,7 @@ export async function openVault(directory, protection) {
       return epoch;
     }
     return Object.freeze({ get, begin,
-      current(id, epoch) { ready(); validId(id); return db.prepare('SELECT epoch FROM connections WHERE id=?').get(id)?.epoch === epoch; },
+      current(id, epoch) { ready(); validId(id); return (db.prepare('SELECT epoch FROM connections WHERE id=?').get(id)?.epoch ?? 0) === epoch; },
       save(id, epoch, value) { ready(); validId(id); return db.prepare('UPDATE connections SET payload=? WHERE id=? AND epoch=?').run(seal(id, epoch, value), id, epoch).changes === 1; },
       erase: id => begin(id, true),
       close() { if (!closed) { closed = true; db.close(); key.fill(0); } },

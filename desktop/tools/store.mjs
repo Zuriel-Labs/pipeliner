@@ -61,23 +61,33 @@ export function openToolStore(directory, { occupiedNames = () => [] } = {}) {
     }
     return { id, added: !previous };
   }
-  function capture(view) {
+  function capture(view, { epoch } = {}) {
     ready(); const selected = view.values['tools.extensions']?.value ?? [], disabled = view.values['tools.disabled']?.value ?? [];
     if (!Array.isArray(selected) || selected.length > 64 || new Set(selected).size !== selected.length || !Array.isArray(disabled)) throw new Error('Tool selection unavailable.');
-    const manifest = selected.filter(id => !disabled.includes(id)).map(id => { const item = get(id); if (!available(item)) throw new Error('Selected tool unavailable.'); return { ...entry(item), generation: generation(item) }; });
+    const manifest = selected.filter(id => !disabled.includes(id)).map(id => {
+      const item = get(id); if (!available(item)) throw new Error('Selected tool unavailable.');
+      const binding = item.kind === 'mcp' && epoch ? { connectionEpoch: epoch(item.definition.mcp.endpoint) } : {};
+      if (Object.hasOwn(binding, 'connectionEpoch') && (!Number.isSafeInteger(binding.connectionEpoch) || binding.connectionEpoch < 0)) throw new Error('Tool connection epoch unavailable.');
+      return { ...entry(item), generation: generation(item), ...binding };
+    });
     return immutable({ manifest, hash: toolManifestHash(manifest) });
   }
-  function assertCaptured(manifest, hash, authority) {
+  function assertCaptured(manifest, hash, authority, { epoch } = {}) {
     ready(); if (!Array.isArray(manifest) || manifest.length > 64 || new Set(manifest.map(value => value.id)).size !== manifest.length || toolManifestHash(manifest) !== hash) throw new Error('Captured tool manifest integrity failed.');
     return immutable(manifest.map(value => {
-      record(value, ['id', 'name', 'kind', 'version', 'digest', 'generation']); const item = get(value.id);
-      if (canonicalJSON({ ...entry(item), generation: value.generation }) !== canonicalJSON(value)) throw new Error('Captured tool content integrity failed.');
+      record(value, ['id', 'name', 'kind', 'version', 'digest', 'generation'], ['connectionEpoch']); const item = get(value.id);
+      const connection = Object.hasOwn(value, 'connectionEpoch') ? { connectionEpoch: value.connectionEpoch } : {};
+      if (canonicalJSON({ ...entry(item), generation: value.generation, ...connection }) !== canonicalJSON(value)) throw new Error('Captured tool content integrity failed.');
+      if (Object.hasOwn(connection, 'connectionEpoch') && (item.kind !== 'mcp' || !Number.isSafeInteger(value.connectionEpoch) || value.connectionEpoch < 0
+        || typeof epoch !== 'function' || epoch(item.definition.mcp.endpoint) !== value.connectionEpoch)) throw new Error('Captured tool connection changed. Start a new run with the current connection.');
       if (!Number.isSafeInteger(value.generation) || generation(item) !== value.generation || !available(item)
         || !authority.tools?.includes(item.id) || authority.deniedTools?.includes(item.id) || item.permissions.some(permission => !authority.capabilities?.includes(permission))) throw new Error('Captured tool authority revoked. Start a new run with the current selection.');
       return item;
     }));
   }
   return Object.freeze({ revision, get, names, capture, assertCaptured,
+    pins(name) { ready(); if (!skillName(name)) throw new Error('Tool name unavailable.'); return db.prepare('SELECT id FROM tool_versions ORDER BY id').all().map(row => get(row.id)).filter(item => item.name === name).map(item => item.id); },
+    removed(id) { ready(); const item = get(id); return db.prepare('SELECT installed FROM tool_names WHERE name=?').get(item.name)?.installed === 0; },
     available(id) { ready(); return available(get(id)); },
     list() { ready(); return immutable(db.prepare('SELECT current_id FROM tool_names WHERE installed=1 ORDER BY name').all().map(row => get(row.current_id))); },
     catalog() { ready(); return db.prepare('SELECT id,digest FROM tool_versions ORDER BY id').all().map(({ id, digest }) => ({ id, digest })); },

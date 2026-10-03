@@ -22,7 +22,7 @@ async function fixture(handler, run) {
   const local = ownedLoopback(server), client = createMCPClient({ endpoint: local.endpoint, local, credential: token, authorize() {} });
   try { await run({ client, calls, server, local }); }
   finally {
-    client.close(); const closed = once(server, 'close'), socketClosures = [...sockets].map(socket => once(socket, 'close'));
+    await client.close(); const closed = once(server, 'close'), socketClosures = [...sockets].map(socket => once(socket, 'close'));
     server.close(); for (const socket of sockets) socket.destroy(); await Promise.all([closed, ...socketClosures]);
     assert.equal(server.listening, false); assert.equal(sockets.size, 0); assert.deepEqual(failures, []);
   }
@@ -92,7 +92,8 @@ test('deadline/cancel/revocation terminate owned sockets; stale or forged local 
     while (calls.length < 2) await new Promise(resolve => setTimeout(resolve, 5)); controller.abort(); await assert.rejects(work, /MCP cancelled/);
     assert.throws(() => createMCPClient({ endpoint: local.endpoint, local: { ...local }, authorize() {} }), /MCP destination/);
     const closing = client.call(tool, { title: 'Queue' }); while (calls.length < 3) await new Promise(resolve => setTimeout(resolve, 5));
-    client.close(); await assert.rejects(closing, error => /MCP connection closed/.test(error.message) && error.dispatched);
+    let settled = false; const result = closing.catch(error => { settled = true; assert.match(error.message, /MCP connection closed/); assert.equal(error.dispatched, true); });
+    await client.close(); assert.equal(settled, true); await result;
   });
   await fixture(({ response, body }) => json(response, body, { resultType: 'complete', content: [] }), async ({ local, calls }) => {
     let granted = true; const client = createMCPClient({ endpoint: local.endpoint, local, authorize() { if (!granted) throw new Error('private-detail'); } });

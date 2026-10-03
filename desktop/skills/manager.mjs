@@ -20,7 +20,7 @@ export function installAuthorizedSkills(skills, view, grant, check = () => {}) {
   }
 }
 
-export function createSkillManager({ store, policy, skills, discover = discoverSkill, discoverLink = discoverSkillLink, initialRevision = 1, onChange = () => {}, onApplied = () => {} }) {
+export function createSkillManager({ store, policy, skills, occupiedNames = () => skills?.names() ?? [], discover = discoverSkill, discoverLink = discoverSkillLink, initialRevision = 1, onChange = () => {}, onApplied = () => {} }) {
   let workspaceId = store?.selected() ?? null, scope = workspaceId ? 'repository' : 'global', revision = initialRevision;
   let conversation = randomUUID(), observedPolicy = policy?.worker.read(null).revision, observedSkills = skills?.revision(), preview = null, pendingPackage = null;
   let collision = null, busy = false, controller = null, closed = false, message = null, error = null, lastSnapshot;
@@ -88,8 +88,8 @@ export function createSkillManager({ store, policy, skills, discover = discoverS
       const pack = await (payload.link ? discoverLink(payload.link, { signal: controller.signal, ...(payload.name ? { name: payload.name } : {}) })
         : discover(payload.source, { signal: controller.signal, ...(payload.name ? { name: payload.name } : {}) }));
       controller.signal.throwIfAborted(); sync(); if (conversation !== context || target() !== scopeTarget) throw new Error('Skill discovery context changed.');
-      pendingPackage = pack; const occupied = skills.list().map(item => item.name), existing = skills.list().find(item => item.name === pack.name);
-      if (existing && (typeof existing.source === 'string' || existing.source.repository !== pack.source.repository || existing.source.path !== pack.source.path)) {
+      pendingPackage = pack; const occupied = occupiedNames(), existing = skills.list().find(item => item.name === pack.name) ?? skills.pins(pack.name).map(id => skills.get(id)).at(-1);
+      if (occupied.includes(pack.name) && (!existing || typeof existing.source === 'string' || existing.source.repository !== pack.source.repository || existing.source.path !== pack.source.path)) {
         collision = { name: pack.name, choices: collisionChoices(pack.name, occupied) }; message = 'Skill name already exists. Choose an available single-word name; existing skill stays intact.'; publish();
       } else stage();
     } finally { busy = false; controller = null; publish(); }
@@ -119,8 +119,8 @@ export function createSkillManager({ store, policy, skills, discover = discoverS
       if (payload.operation === 'view') { if (payload.scope !== undefined) { if (!['global', 'repository'].includes(payload.scope) || payload.scope === 'repository' && !workspaceId) throw new Error('Choose repository or global skill scope.'); if (scope !== payload.scope) { invalidate(); pendingPackage = null; collision = null; scope = payload.scope; conversation = randomUUID(); } } publish(); }
       else if (payload.operation === 'discover') await discoverPackage(payload);
       else if (payload.operation === 'choose') {
-        if (!pendingPackage || !collision || !skillName(payload.name) || skills.list().some(item => item.name === payload.name)) throw new Error('Choose an available skill name.');
-        pendingPackage = skillPackage({ source: pendingPackage.source, files: pendingPackage.files }, { name: payload.name, occupied: skills.list().map(item => item.name) }); stage();
+        if (!pendingPackage || !collision || !skillName(payload.name) || occupiedNames().includes(payload.name)) throw new Error('Choose an available skill name.');
+        pendingPackage = skillPackage({ source: pendingPackage.source, files: pendingPackage.files }, { name: payload.name, occupied: occupiedNames() }); stage();
       } else if (payload.operation === 'prepare') {
         const selected = payload.action === 'authorize' && preview?.action === 'install' ? skills.get(preview.item.id) : null;
         if (payload.action === 'authorize' && !selected) throw new Error('Skill source needs an exact install preview before authorization.');

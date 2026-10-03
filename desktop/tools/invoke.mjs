@@ -9,14 +9,24 @@ const safeErrors = new Set(['Tool authority unavailable.', 'Tool run binding una
   'Tool restricted worker unavailable.', 'Tool restricted command denied or incomplete.', 'Tool command result withheld.',
   'Tool command result incomplete; worker and candidate need readback.']);
 
+function authority(authorize, signal) {
+  signal?.throwIfAborted(); if (typeof authorize !== 'function') throw new Error('Tool authority unavailable.');
+  const result = authorize(); if (result instanceof Promise) { result.catch(() => {}); throw new Error('Tool authority unavailable.'); }
+  if (result === false) throw new Error('Tool authority unavailable.');
+}
+
+export async function verifyMCPCatalog(pack, client, { signal, authorize }) {
+  authority(authorize, signal);
+  if (client.endpoint !== pack.definition.mcp.endpoint || client.protocolVersion !== pack.definition.mcp.protocolVersion) throw new Error('Tool destination changed.');
+  const catalog = await client.list({ signal }); authority(authorize, signal);
+  const current = catalog.tools.find(value => value.name === pack.definition.mcp.tool.name);
+  if (!current || toolManifestHash(current) !== pack.sourceIdentity.catalogDigest) throw new Error('Tool catalog changed. Review a new exact definition before execution.');
+}
+
 // Host-only execution. The caller records durable intent before this function and fences the captured run/owner/epoch.
 export async function invokePinnedTool({ pack, binding, input, supervisor, connectMCP, authorize, signal }) {
   let client, dispatched = false;
-  const fence = () => {
-    signal?.throwIfAborted(); if (typeof authorize !== 'function') throw new Error('Tool authority unavailable.');
-    const result = authorize(); if (result instanceof Promise) { result.catch(() => {}); throw new Error('Tool authority unavailable.'); }
-    if (result === false) throw new Error('Tool authority unavailable.');
-  };
+  const fence = () => authority(authorize, signal);
   try {
     fence(); record(binding, ['runId', 'epoch']);
     if (typeof binding.runId !== 'string' || !/^[A-Za-z0-9_-]{1,96}$/.test(binding.runId) || !Number.isSafeInteger(binding.epoch) || binding.epoch < 1) throw new Error('Tool run binding unavailable.');
@@ -30,10 +40,7 @@ export async function invokePinnedTool({ pack, binding, input, supervisor, conne
     if (pack.kind === 'mcp') {
       if (!connectMCP) throw new Error('Tool connection needs qualification.');
       client = await connectMCP(pack, { binding, signal, authorize: fence }); fence();
-      if (client.endpoint !== pack.definition.mcp.endpoint || client.protocolVersion !== pack.definition.mcp.protocolVersion) throw new Error('Tool destination changed.');
-      const catalog = await client.list({ signal }); fence();
-      const current = catalog.tools.find(value => value.name === definition.name);
-      if (!current || toolManifestHash(current) !== pack.sourceIdentity.catalogDigest) throw new Error('Tool catalog changed. Review a new exact definition before execution.');
+      await verifyMCPCatalog(pack, client, { signal, authorize: fence });
       // No annotations, read-only hints or result text establish replay authority.
       dispatched = true;
       try { result = await client.call(definition, input, { signal }); }

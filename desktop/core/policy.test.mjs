@@ -4,12 +4,35 @@ import { mkdtempSync, realpathSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
 import { openPolicyStore } from './policy.mjs';
-import { settingsSchema, developmentTemplate, releaseTemplate } from './settings.mjs';
+import { settingsSchema, developmentTemplate, releaseTemplate, legacyDefaults, canonicalJSON } from './settings.mjs';
 import { createControlChannel } from './control.mjs';
 
 const repository = 'R_example_one';
 const other = 'R_example_two';
+
+test('additive scheduling schema reads immutable legacy policy hashes and upgrades only on a reviewed edit', t => {
+  const f = fixture(t); f.store.close();
+  const database = new DatabaseSync(join(f.directory, 'policy.sqlite'));
+  const document = { schemaVersion: 1, defaults: legacyDefaults, host: {}, global: {}, repositories: {} }, hash = createHash('sha256').update(canonicalJSON({ document, catalog: facts() })).digest('hex');
+  database.exec('DROP TRIGGER immutable_policy_update'); database.prepare('UPDATE policy_versions SET document=?,hash=? WHERE revision=0').run(canonicalJSON(document), hash); database.close();
+  const old = f.open(); assert.equal(old.worker.read(repository).hash, hash); assert.equal(old.worker.read(repository).values['scheduling.mode'].value, 'interval');
+  const input = old.control.capture({ commandId: 'legacy-edit', conversationId: 'legacy-chat', target: repository, text: 'Use a 45 minute interval.' });
+  const p = old.control.prepare({ inputId: input.id, requestId: 'legacy-preview', target: repository, scope: 'repository', changes: { 'scheduling.intervalMinutes': 45 }, reset: [] });
+  old.control.apply({ commandId: 'legacy-apply', proposalId: p.id, inputId: p.inputId, hash: p.hash, conversationId: 'legacy-chat', target: repository });
+  assert.equal(old.worker.read(repository).schemaVersion, 2); assert.equal(old.worker.read(repository, 0).hash, hash); assert.equal(old.worker.read(repository, 0).values['scheduling.enabled'].value, false);
+  assert.equal(old.worker.read(repository).values['scheduling.intervalMinutes'].value, 45);
+});
+
+test('calendar policy requires explicit complete named-zone configuration before enabling', t => {
+  const f = fixture(t);
+  assert.throws(() => f.proposal({ 'scheduling.enabled': true, 'scheduling.mode': 'calendar' }), /Calendar/);
+  assert.throws(() => f.proposal({ 'scheduling.calendar': { days: [0, 0], time: '09:00' } }));
+  f.apply(f.proposal({ 'scheduling.enabled': true, 'scheduling.mode': 'calendar', 'scheduling.calendar': { days: [1, 2, 3, 4, 5], time: '09:00' }, 'scheduling.timezone': 'America/Chicago' }));
+  assert.equal(f.store.worker.read(repository).values['background.enabled'].value, false);
+  assert.equal(f.store.worker.read(repository).values['intake.trigger'].value, 'pm');
+});
 const facts = () => ({ repositories: [repository, other], capabilities: ['workspace.read', 'workspace.write', 'worker.exec', 'github.read'],
   maxConcurrency: 1, background: false, connections: [{ id: 'github-one', provider: 'github', repositories: [repository, other] }, { id: 'codex-one', provider: 'codex', repositories: [repository, other] }],
   developers: [{ id: 'dev-one', connection: 'codex-one', metrics: ['tokens'] }, { id: 'dev-two', connection: 'codex-one', metrics: [] }], extensions: [] });

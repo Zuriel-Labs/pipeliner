@@ -13,7 +13,7 @@ test('pipeline draft migration retains a readable private v2 backup and scopes d
   store.register({ id: 'repo_one', repositoryId: 'R1', slug: 'fixture/one', localKey: '1:2', path: root, project: { id: 'P1' } });
   store.saveIssueContext('repo_one', { selected: 7 }); store.observeReady('repo_one', 'I7', true, 1000); store.close(); store = null;
   const legacy = new DatabaseSync(join(root, 'workspaces.sqlite'));
-  legacy.exec('DROP TABLE IF EXISTS pipeline_drafts; PRAGMA user_version=2;'); legacy.close();
+  legacy.exec('DROP TABLE schedule_states; DROP TABLE pipeline_drafts; PRAGMA user_version=2;'); legacy.close();
   store = openWorkspaceStore(root);
   const backupPath = readdirSync(root).find(name => /^workspaces-v2-[a-f0-9-]+\.sqlite$/.test(name)); assert(backupPath);
   const backup = new DatabaseSync(join(root, backupPath), { readOnly: true });

@@ -6,15 +6,17 @@ import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const exec = promisify(execFile), root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const qualifying = process.argv.includes('--qualify') || process.argv.includes('--qualify-issues') || process.argv.includes('--qualify-pipelines') || process.argv.includes('--qualify-development');
-if (process.argv.slice(2).some(arg => !['--qualify', '--qualify-issues', '--qualify-pipelines', '--qualify-development', '--retain-owned-capture'].includes(arg))) throw new Error('argument-denied');
+const qualifying = process.argv.includes('--qualify') || process.argv.includes('--qualify-issues') || process.argv.includes('--qualify-pipelines') || process.argv.includes('--qualify-development') || process.argv.includes('--qualify-scheduling');
+if (process.argv.slice(2).some(arg => !['--qualify', '--qualify-issues', '--qualify-pipelines', '--qualify-development', '--qualify-scheduling', '--retain-owned-capture'].includes(arg))) throw new Error('argument-denied');
 if (process.platform !== 'darwin' || process.arch !== 'arm64') throw new Error('host-unqualified');
 const temporary = await realpath(await mkdtemp(join(tmpdir(), 'pipeliner-app-'))), helper = join(temporary, 'secure-entry');
+const calendar = join(temporary, 'calendar');
 let child, timer, code = 1, report = '', errors = 0;
 try {
   await exec('/usr/bin/clang', ['-fobjc-arc', '-framework', 'AppKit', '-mmacosx-version-min=13.0', ...(qualifying ? ['-DPIPELINER_QUALIFY'] : []), join(root, 'desktop/connections/secure-entry.m'), '-o', helper], { timeout: 30000 });
+  await exec('/usr/bin/clang', ['-fobjc-arc', '-framework', 'Foundation', '-mmacosx-version-min=13.0', join(root, 'desktop/scheduling/calendar.m'), '-o', calendar], { timeout: 30000 });
   const electron = join(root, 'desktop/prototype/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron'); await access(electron);
-  child = spawn(electron, [join(root, 'desktop/app/main.cjs'), `--key-helper=${helper}`, ...(qualifying ? ['--qualify', ...process.argv.filter(arg => ['--qualify-issues', '--qualify-pipelines', '--qualify-development'].includes(arg)), `--data-directory=${temporary}`] : [])], {
+  child = spawn(electron, [join(root, 'desktop/app/main.cjs'), `--key-helper=${helper}`, `--calendar-helper=${calendar}`, ...(qualifying ? ['--qualify', ...process.argv.filter(arg => ['--qualify-issues', '--qualify-pipelines', '--qualify-development', '--qualify-scheduling'].includes(arg)), `--data-directory=${temporary}`] : [])], {
     env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: homedir(), TMPDIR: temporary, LANG: 'en_US.UTF-8' }, stdio: ['ignore', 'pipe', 'pipe'],
   });
   if (qualifying) timer = setTimeout(() => child.kill('SIGTERM'), 180000);
@@ -29,7 +31,7 @@ try {
       if (!process.argv.includes('--retain-owned-capture') || !result[available]) continue;
       const source = join(temporary, file), info = await lstat(source);
       if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.uid !== process.getuid() || info.size > 10 * 1024 * 1024) throw new Error('capture-ownership-invalid');
-      const capture = join('/tmp', `pipeliner-${process.argv.includes('--qualify-development') ? 42 : process.argv.includes('--qualify-pipelines') ? 40 : 36}-${child.pid}${suffix}.png`);
+      const capture = join('/tmp', `pipeliner-${process.argv.includes('--qualify-scheduling') ? 50 : process.argv.includes('--qualify-development') ? 42 : process.argv.includes('--qualify-pipelines') ? 40 : 36}-${child.pid}${suffix}.png`);
       await writeFile(capture, await readFile(source), { flag: 'wx', mode: 0o600 }); result[key] = capture;
     }
     console.log(JSON.stringify(result));

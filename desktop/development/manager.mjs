@@ -181,17 +181,20 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
       await integrate(target, { issue }, signal);
     }
   }
-  async function start(target, number, signal) {
+  async function start(target, number, signal, scheduled) {
     if (!supervisor) throw new Error('Development worker unavailable.');
     if (!Number.isSafeInteger(number) || number < 1) throw new Error('Development needs a specific selected Issue.');
     if (policy.runtime.status(target.id)) throw new Error('Development already holds this repository; use its local controls.');
     const view = policy.worker.read(target.id), grant = policy.worker.authority(target.id, view.revision), dev = connections.developers().find(dev => dev.id === grant.dev);
+    if (store.workspaces().filter(value => value.id !== target.id && (tasks.has(value.id) || policy.runtime.status(value.id)?.control === 'running')).length >= view.values['limits.concurrency'].value) throw new Error('Development host worker capacity is occupied.');
+    const scheduleAuthority = () => { if (scheduled && (view.hash !== scheduled.hash || scheduled.automatic && (!view.values['scheduling.enabled'].value || view.values['intake.trigger'].value !== 'schedule'))) throw new Error('Development scheduled start authority changed.'); };
+    scheduleAuthority();
     const fallbacks = grant.takeover ? view.values['agents.fallbacks'].value.map(id => connections.developers().find(dev => dev.id === id && grant.fallbacks.includes(id))) : [];
     if (!dev || developmentPermissions.some(permission => !grant.capabilities.includes(permission)) || !grant.connections.includes('github') || !grant.connections.includes(dev.connection) || !grant.bundledSkills) throw new Error('Development needs a qualified assigned Dev and both host and repository permissions.');
     const identity = inspectWorkspace(target.path, { repository: target.id, owner: target.slug.split('/')[0], name: target.slug.split('/')[1] });
     if (workspaceData(identity).localKey !== target.localKey) throw new Error('Development local workspace changed.');
     const snapshot = snapshotWorkspace(identity), profile = executionProfile(snapshot.files, target), held = await acquire(target, signal); let issue, integrationMethod;
-    const unchangedPolicy = () => { signal.throwIfAborted(); if (policy.worker.read(target.id).hash !== view.hash) throw new Error('Development configuration changed during preflight.'); };
+    const unchangedPolicy = () => { signal.throwIfAborted(); scheduleAuthority(); if (policy.worker.read(target.id).hash !== view.hash) throw new Error('Development configuration changed during preflight.'); };
     try {
       const pipeline = view.values['pipelines.development'].value, ungated = !pipeline.steps.some(step => step.kind === 'pm-qa');
       if (profile.release.strategy !== 'none' || profile.release.cycle || pipeline.steps.some(step => !['agent', 'check', 'pm-qa', 'pr-integration'].includes(step.kind)
@@ -238,6 +241,7 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     ledger.create(run, { pipeline: view.values['pipelines.development'].value, source: snapshot.candidate, developer: { id: dev.id, connection: dev.connection, model: dev.model }, skillsHash: starterHash, issueHash: developmentIssueHash({ number: issue.number, title: issue.title, body: issue.body }),
       executionProfile: { kind: 'pipeliner-desktop', version: 1 }, integrationMethod, fallbacks: fallbacks.map(({ id, connection, model }) => ({ id, connection, model })),
       checks: profile.quality.commands.map((command, index) => ({ name: 'Repository check ' + (index + 1), command })), logBytes: Math.min(50, view.values['privacy.runLogMiB'].value) * 1024 * 1024 });
+    scheduled?.reserved(run);
     await execute(target, run, snapshot, profile, issue, signal);
   }
   function takeoverEligible(run, dev) {
@@ -483,7 +487,22 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     }
     return control(target, payload.operation);
   }
-  return Object.freeze({ status, dispatch, observe, inspectIntegration, inspectContinuity, sync() { sync(); publish(); }, async idle() { await Promise.allSettled([...tasks.values()].map(task => task.done)); await Promise.allSettled([...controls.values()]); },
+  return Object.freeze({ status, dispatch, observe, inspectIntegration, inspectContinuity,
+    availability(repository) {
+      const target = workspace(repository), view = policy.worker.read(target.id), grant = policy.worker.authority(target.id, view.revision), dev = connections.developers().find(value => value.id === grant.dev);
+      return { run: policy.runtime.status(target.id), busy: tasks.has(target.id) || controls.has(target.id), qualified: Boolean(supervisor && dev && grant.bundledSkills && grant.connections.includes('github') && grant.connections.includes(dev.connection)
+        && developmentPermissions.every(permission => grant.capabilities.includes(permission)) && (!view.values['pipelines.development'].value.steps.some(step => step.kind === 'pm-qa') ? dev.noPrompts : true)) };
+    },
+    startScheduled(repository, number, hash, automatic, signal) {
+      const target = workspace(repository);
+      return new Promise((resolve, reject) => {
+        try { operate(target, async localSignal => { try { await start(target, number, signal ? AbortSignal.any([localSignal, signal]) : localSignal, { hash, automatic, reserved: run => resolve({ accepted: true, runId: run.id }) }); } catch (error) {
+          error.safeToRecheck = !policy.runtime.status(target.id) && !store.pending('development').some(effect => effect.binding.repository === target.id); reject(error); throw error;
+        } }); }
+        catch (error) { reject(error); }
+      });
+    },
+    sync() { sync(); publish(); }, async idle() { await Promise.allSettled([...tasks.values()].map(task => task.done)); await Promise.allSettled([...controls.values()]); },
     async close() { closing = true; invalidate(); for (const task of tasks.values()) task.controller.abort(); try { await this.idle(); const snapshot = status(); await supervisor?.shutdown();
       for (const workspace of store?.workspaces() ?? []) { const run = policy?.runtime.status(workspace.id); if (run && ['paused', 'stopped'].includes(run.control)) {
         let state; try { state = ledger.status(run.id); } catch (error) { if (error.message !== 'Unknown Development run') throw error; }

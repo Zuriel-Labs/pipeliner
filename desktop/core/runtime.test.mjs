@@ -47,6 +47,22 @@ function fixture(t, extraCatalog = {}) {
 }
 const binding = run => ({ runId: run.id, epoch: run.epoch });
 
+test('host capacity is atomic across repository claims; paused workers keep only their repository reservation', async t => {
+  const second = 'R_second', current = catalog();
+  const f = fixture(t, { repositories: [repository, second], connections: [{ ...current.connections[0], repositories: [repository, second] }] });
+  f.configure({ 'agents.dev': 'dev-fixture' }, 'repository', second);
+  const checkout = join(f.root, 'second'); f.git(['clone', '--no-hardlinks', f.checkout, checkout]);
+  f.git(['-C', checkout, 'remote', 'set-url', 'origin', 'https://github.com/PipelinerFixtures/second.git']);
+  const identity = inspectWorkspace(checkout, { repository: second, owner: 'PipelinerFixtures', name: 'second' });
+  const run = (await f.reserve()).run;
+  await assert.rejects(f.reserve(f.store, 'second-claim', 1, identity), /capacity/);
+  assert.equal(f.store.runtime.status(second), null);
+  f.store.runtime.requestControl(binding(run), 'pause'); await assert.rejects(f.reserve(f.store, 'second-claim', 1, identity), /capacity/); await f.store.runtime.verifyControl(binding(run));
+  const other = await f.reserve(f.store, 'second-claim', 1, identity); assert.equal(other.created, true);
+  await assert.rejects(f.store.runtime.resume(binding(run)), /capacity/);
+  assert.equal(f.store.runtime.status(repository).id, run.id);
+});
+
 test('ordered takeover requires stopped continuity, keeps one reservation and fences the old Dev', async t => {
   const f = fixture(t, { developers: [...catalog().developers, { id: 'dev-two', connection: 'codex-fixture', metrics: [] }] });
   f.configure({ 'agents.fallbacks': ['dev-two'], 'agents.takeover': true });

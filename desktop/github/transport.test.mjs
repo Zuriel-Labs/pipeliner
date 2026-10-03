@@ -20,3 +20,12 @@ test('bounded transient reads retry; uncertain writes, malformed replies and unf
     assert.equal(calls, 1, scenario);
   }
 });
+
+test('GitHub rate-limit timing is bounded; permission denial and writes are never retried', async () => {
+  for (const [status, headers, method, expected] of [[403, { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(Math.ceil(Date.now() / 1000) + 60) }, 'GET', /remaining deadline/],
+    [429, {}, 'GET', /remaining deadline/], [403, {}, 'GET', /http-403/], [403, { 'Retry-After': '60' }, 'PATCH', /http-403/]]) {
+    let calls = 0;
+    const request = makeRequest('synthetic', async () => { calls++; return new Response(null, { status, headers }); }, undefined, { attempts: 3, deadlineAt: Date.now() + 10000 });
+    await assert.rejects(request(method, '/fixture', method === 'PATCH' ? {} : undefined), expected); assert.equal(calls, 1);
+  }
+});

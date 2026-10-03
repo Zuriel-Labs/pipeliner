@@ -254,6 +254,7 @@ export function openPolicyStore(directory, { catalog, clock = Date.now, inspecto
           connections, dev: dev && devAllowed(dev) ? dev : null,
           fallbacks: old['agents.fallbacks'].filter(dev => !revoked('fallback', dev) && devAllowed(dev)), takeover: old['agents.takeover'] && active['agents.takeover'] && !revoked('takeover', 'automatic'),
           extensions: old['skills.extensions'].filter(ref => !revoked('extension', ref) && !old['skills.disabled'].includes(ref) && !active['skills.disabled'].includes(ref) && stillBound('extensions', ref)),
+          deniedExtensions: current.extensions.filter(item => old['skills.disabled'].includes(item.id) || active['skills.disabled'].includes(item.id) || revoked('extension', item.id)).map(item => item.id),
           bundledSkills: old['skills.bundledEnabled'] && active['skills.bundledEnabled'] && !revoked('bundled', 'bundled'),
           intake: { mode: old['intake.mode'] === active['intake.mode'] && !revoked('intake', old['intake.mode']) ? old['intake.mode'] : 'pm',
             agentCreation: old['intake.agentCreation'] && active['intake.agentCreation'] && !revoked('intake', 'agentCreation') } });

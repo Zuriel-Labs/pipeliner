@@ -5,6 +5,7 @@ import { initPipelines } from './pipelines.mjs';
 import { initDevelopment } from './development.mjs';
 import { initScheduling } from './scheduling.mjs';
 import { initBackground } from './background.mjs';
+import { initSkills } from './skills.mjs';
 
 let state = null, returnFocus = null; const drafts = new Map(), previousBusy = new Set();
 const $ = id => document.getElementById(id);
@@ -85,7 +86,7 @@ async function request(payload, text) {
   returnFocus = document.activeElement?.id || 'prompt';
   try {
     const result = await window.pipeliner.request({ ...payload, contextRevision: state.revision });
-    if (text && !containsSecret(text)) { message(text, true, target); if (target === currentContext) $('prompt').value = ''; }
+    if (text && !containsSecret(text)) message(text, true, target);
     if (result.snapshot) render(result.snapshot);
     if (result.message) message(result.message, false, target);
     else if (result.accepted) message('Working on the selected connection. Continue in its protected surface, or use Cancel in Settings.', false, target);
@@ -110,9 +111,13 @@ const pipelines = await initPipelines({ el, message });
 const development = await initDevelopment({ el, message });
 const scheduling = await initScheduling({ el, message });
 const background = await initBackground({ el, message });
+const skills = await initSkills({ el, message });
 $('composer').addEventListener('submit', event => { event.preventDefault(); const text = $('prompt').value.trim(); if (!text) return;
-  if (containsSecret(text)) { $('prompt').value = ''; message('Use the protected connection surface for keys. Nothing was saved or sent.'); $('prompt').focus(); return; }
-  if (!connectionCommand(text).connection && background.handles(text)) background.chat(text);
+  if (containsSecret(text) && !(skills.handles(text) && skills.safe(text))) { $('prompt').value = ''; message('Use the protected connection surface for keys. Nothing was saved or sent.'); $('prompt').focus(); return; }
+  // Consume only the submitted text before IPC. A later reply must preserve a new draft.
+  $('prompt').value = '';
+  if (!connectionCommand(text).connection && skills.handles(text)) skills.chat(text);
+  else if (!connectionCommand(text).connection && background.handles(text)) background.chat(text);
   else if (!connectionCommand(text).connection && scheduling.handles(text)) scheduling.chat(text);
   else if (!connectionCommand(text).connection && development.handles(text)) development.chat(text);
   else if (!connectionCommand(text).connection && pipelines.handles(text)) pipelines.chat(text);
@@ -121,10 +126,11 @@ $('composer').addEventListener('submit', event => { event.preventDefault(); cons
   else request({ operation: 'chat', text }, text);
 });
 $('chat-nav').addEventListener('click', () => showSettings(false)); $('settings-nav').addEventListener('click', () => showSettings());
-for (const category of ['connections', 'pipelines', 'agents', 'schedule', 'background']) $('settings-' + category).addEventListener('click', () => {
+for (const category of ['connections', 'pipelines', 'agents', 'schedule', 'background', 'skills']) $('settings-' + category).addEventListener('click', () => {
   $('connection-settings').hidden = category !== 'connections'; $('pipeline-settings').hidden = category !== 'pipelines'; $('agent-settings').hidden = category !== 'agents'; $('schedule-settings').hidden = category !== 'schedule';
   $('background-settings').hidden = category !== 'background';
-  for (const name of ['connections', 'pipelines', 'agents', 'schedule', 'background']) $('settings-' + name).setAttribute('aria-pressed', String(name === category));
+  $('skill-settings').hidden = category !== 'skills';
+  for (const name of ['connections', 'pipelines', 'agents', 'schedule', 'background', 'skills']) $('settings-' + name).setAttribute('aria-pressed', String(name === category));
 });
 for (const button of document.querySelectorAll('[data-settings]')) button.addEventListener('click', () => showSettings());
 for (const button of document.querySelectorAll('[data-chat]')) button.addEventListener('click', () => request({ operation: 'chat', text: button.dataset.chat }, button.dataset.chat));

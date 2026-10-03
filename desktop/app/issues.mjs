@@ -136,7 +136,7 @@ export async function initIssues({ el, message, setContext, show }) {
     try {
       const result = await window.pipeliner.issueRequest({ ...payload, contextRevision: state.revision });
       if (state.workspaceId !== target) return;
-      if (text) { message(text, true, target); $('prompt').value = ''; }
+      if (text) message(text, true, target);
       if (result.snapshot) render(result.snapshot); if (result.message) message(result.message, false, target);
     } catch { if (state.workspaceId !== target) return; message('This Issue or repository context changed. Check Issues and review the exact target again.', false, target); render(await window.pipeliner.issueRequest({ operation: 'status' })); }
     if (!$('chat-view').hidden) $('prompt').focus();

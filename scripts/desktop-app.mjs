@@ -6,7 +6,7 @@ import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const exec = promisify(execFile), root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const qualificationFlags = ['--qualify', '--qualify-issues', '--qualify-pipelines', '--qualify-development', '--qualify-scheduling', '--qualify-background'];
+const qualificationFlags = ['--qualify', '--qualify-issues', '--qualify-pipelines', '--qualify-development', '--qualify-scheduling', '--qualify-background', '--qualify-skills', '--qualify-tools'];
 const qualifying = process.argv.some(arg => qualificationFlags.includes(arg));
 if (process.argv.slice(2).some(arg => ![...qualificationFlags, '--retain-owned-capture'].includes(arg))) throw new Error('argument-denied');
 if (process.platform !== 'darwin' || process.arch !== 'arm64') throw new Error('host-unqualified');
@@ -32,7 +32,7 @@ try {
       if (!process.argv.includes('--retain-owned-capture') || !result[available]) continue;
       const source = join(temporary, file), info = await lstat(source);
       if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.uid !== process.getuid() || info.size > 10 * 1024 * 1024) throw new Error('capture-ownership-invalid');
-      const capture = join('/tmp', `pipeliner-${process.argv.includes('--qualify-background') ? 52 : process.argv.includes('--qualify-scheduling') ? 50 : process.argv.includes('--qualify-development') ? 42 : process.argv.includes('--qualify-pipelines') ? 40 : 36}-${child.pid}${suffix}.png`);
+      const capture = join('/tmp', `pipeliner-${process.argv.includes('--qualify-skills') || process.argv.includes('--qualify-tools') ? 54 : process.argv.includes('--qualify-background') ? 52 : process.argv.includes('--qualify-scheduling') ? 50 : process.argv.includes('--qualify-development') ? 42 : process.argv.includes('--qualify-pipelines') ? 40 : 36}-${child.pid}${suffix}.png`);
       await writeFile(capture, await readFile(source), { flag: 'wx', mode: 0o600 }); result[key] = capture;
     }
     console.log(JSON.stringify(result));

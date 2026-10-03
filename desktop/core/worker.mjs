@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { canonicalJSON, record } from './settings.mjs';
 import { workerToolProgram, developmentWorkerProgram } from '../development/worker-tools.mjs';
 import { checkedFiles } from '../development/source.mjs';
+import { checkedJSON } from '../tools/schema.mjs';
 
 export const workerDisk = { url: 'https://cloud-images.ubuntu.com/releases/resolute/release-20260720/ubuntu-26.04-server-cloudimg-arm64.img', digest: 'sha256:7bcf159e29ad0000bfed9c57875908c39268f5ed1257f4958fa6a9f5f60edd54' };
 export const workerVMConfiguration = `vmType: vz
@@ -197,7 +198,8 @@ export function openWorkerEnvironment(directory) {
     async tool(manifest, id, request, { signal, mayRestart = () => true } = {}) {
       const shapes = { seed: ['files'], list: [], read: ['path'], write: ['path', 'content', 'mode', 'beforeHash'], run: ['command', 'timeoutMs'], export: [] };
       if (!Object.hasOwn(shapes, request.operation)) throw new Error('Worker tool unavailable');
-      record(request, ['operation', ...shapes[request.operation]]);
+      record(request, ['operation', ...shapes[request.operation]], request.operation === 'run' ? ['input'] : []);
+      if (Object.hasOwn(request, 'input')) checkedJSON(request.input, 'data');
       if (request.operation === 'seed') checkedFiles(request.files);
       else canonicalJSON(request);
       if (request.operation === 'run' && (!Number.isSafeInteger(request.timeoutMs) || request.timeoutMs < 100 || request.timeoutMs > 300000)) throw new Error('Worker command deadline invalid');

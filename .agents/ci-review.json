@@ -2,10 +2,10 @@
   "version": 1,
   "workflows": {
     ".github/workflows/quality.yml": {
-      "rationale": "Reviewed pinned checkout/setup-node and the read-only Node contract validator with all static imports. New release-cycle, QA and Showcase helpers validate supplied JSON only; no configured commands are executed. crypto hashes scope and cleanup tokens. Home verification and full behavioral tests run locally, not in Actions. Secret scanner action uses prebuilt tooling. No application builds, package lifecycle hooks, composites or nested workflow calls. Issue #12 adds a pure known-question-directive matcher and read-only checks of provider Markdown/YAML; no commands or application builds are introduced.",
+      "rationale": "Reviewed pinned checkout/setup-node and the read-only Node contract validator with all static imports. New release-cycle, QA and Showcase helpers validate supplied JSON only; no configured commands are executed. crypto hashes scope and cleanup tokens. Home verification and full behavioral tests run locally, not in Actions. Secret scanner action uses prebuilt tooling. No application builds, package lifecycle hooks, composites or nested workflow calls. Issue #12 adds a pure known-question-directive matcher and read-only checks of provider Markdown/YAML; no commands or application builds are introduced. Issue #54 adds exact-pinned yaml 2.9.1 (ISC, no runtime dependencies or install hooks) and Ajv 8.20.0 (MIT), fast-uri 3.1.8 (BSD-3-Clause), fast-deep-equal 3.1.3, require-from-string 2.0.2 and json-schema-traverse 1.0.0 (MIT). Registry metadata, runtime imports, package scripts and lock integrity were reviewed; installed locally with lifecycle scripts disabled. Ajv/fast-deep-equal publish-time build scripts were not executed. Root quality scripts are unchanged; Actions does not install dependencies or execute Desktop/model/native tests. No application build enters CI.",
       "files": {
         ".github/workflows/quality.yml": "c89ab05dce1f8a9ee0aa258a2a7da9f67d7241b747d20095015bc949155c2d73",
-        "package.json": "591159744983ea992feb3a9130162509832ee07efac3c2228d1b26ce71892213",
+        "package.json": "037909863933e6ce070cc31d3ec577724c500721a58300667a20a0c2b0418d4e",
         "scripts/validate-repository.mjs": "fb01f8962a59a438f66b985a54babe9ee03008c0f2b6e54307e37952994cacf8",
         "scripts/lib/validation.mjs": "9638335da652807e63e96be6a04647e2fc22d9f0985c2b7b2783c55ddaaf2bcc",
         "scripts/lib/config.mjs": "430a6a4ddfd026d94d85ca13ac4fe4be45d64e8176006c3e8834221cd8c52c67",

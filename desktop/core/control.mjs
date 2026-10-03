@@ -6,6 +6,8 @@ import { pipelineShapes } from '../pipelines/commands.mjs';
 import { developmentShapes } from '../development/commands.mjs';
 import { schedulingShapes } from '../scheduling/commands.mjs';
 import { backgroundShapes } from '../background/commands.mjs';
+import { skillShapes } from '../skills/commands.mjs';
+import { toolShapes } from '../tools/commands.mjs';
 
 function trustedContext(event, { contents, url, context }) {
   if (contents.isDestroyed() || event?.sender !== contents || !event.senderFrame || event.senderFrame !== contents.mainFrame
@@ -170,6 +172,28 @@ export function createBackgroundControlChannel(manager, binding) {
     const current = trustedContext(event, binding); canonicalJSON(payload);
     if (payload?.operation === 'status') { record(payload, ['operation']); return manager.status(); }
     const shape = backgroundShapes[payload?.operation]; if (!shape) throw new Error('Unknown background operation');
+    record(payload, ['operation', 'contextRevision', ...shape[0]], shape[1]);
+    if (payload.contextRevision !== current.revision) throw new Error('Control context changed');
+    const { contextRevision: _revision, ...action } = payload; return manager.dispatch(action);
+  } });
+}
+
+export function createSkillControlChannel(manager, binding) {
+  return Object.freeze({ dispatch(event, payload) {
+    const current = trustedContext(event, binding); canonicalJSON(payload);
+    if (payload?.operation === 'status') { record(payload, ['operation']); return manager.status(); }
+    const shape = skillShapes[payload?.operation]; if (!shape) throw new Error('Unknown skill operation');
+    record(payload, ['operation', 'contextRevision', ...shape[0]], shape[1]);
+    if (payload.contextRevision !== current.revision) throw new Error('Control context changed');
+    const { contextRevision: _revision, ...action } = payload; return manager.dispatch(action);
+  } });
+}
+
+export function createToolControlChannel(manager, binding) {
+  return Object.freeze({ dispatch(event, payload) {
+    const current = trustedContext(event, binding); canonicalJSON(payload);
+    if (payload?.operation === 'status') { record(payload, ['operation']); return manager.status(); }
+    const shape = toolShapes[payload?.operation]; if (!shape) throw new Error('Unknown tool operation');
     record(payload, ['operation', 'contextRevision', ...shape[0]], shape[1]);
     if (payload.contextRevision !== current.revision) throw new Error('Control context changed');
     const { contextRevision: _revision, ...action } = payload; return manager.dispatch(action);

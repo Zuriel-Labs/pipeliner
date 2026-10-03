@@ -102,7 +102,7 @@ export async function initDevelopment({ el, message }) {
     try {
       const result = await window.pipeliner.developmentRequest({ ...payload, contextRevision: state.revision }); pending = false;
       if (target !== state.workspaceId) return;
-      if (text) { message(text, true, target); $('prompt').value = ''; }
+      if (text) message(text, true, target);
       if (result.snapshot) render(result.snapshot); if (result.message) message(result.message, false, target);
     } catch {
       pending = false; const latest = await window.pipeliner.developmentRequest({ operation: 'status' }); render(latest);

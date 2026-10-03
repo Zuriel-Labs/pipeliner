@@ -7,7 +7,7 @@ import { pipelineCommand } from './commands.mjs';
 test('the three preset definitions preserve consent defaults and satisfy their actual canonical gate rules', () => {
   for (const scenario of ['supervised', 'pm-autonomous', 'scheduled-autonomous']) {
     const changes = presetChanges(scenario);
-    validateState({ schemaVersion: 2, defaults, host: {}, global: {}, repositories: { repo_one: changes } });
+    validateState({ schemaVersion: 3, defaults, host: {}, global: {}, repositories: { repo_one: changes } });
     assert.equal(changes['pipelines.development'].steps.filter(step => step.kind === 'pm-qa').length, scenario === 'supervised' ? 1 : 0);
     assert.equal(changes['pipelines.release'].steps.some(step => step.kind === 'pm-qa'), false);
     assert.equal(changes['intake.trigger'], scenario === 'scheduled-autonomous' ? 'schedule' : 'pm');
@@ -49,4 +49,12 @@ test('step timeout chat edits inherit on reset and reject out-of-range values', 
   const reset = editDefinition(changed, pipelineCommand('Reset step 1 timeout to inherit').action);
   validatePipeline(reset, true); assert.equal(Object.hasOwn(reset.steps[0], 'timeoutSeconds'), false);
   for (const value of [0, 604801, 1.5]) assert.throws(() => editDefinition(changed, { operation: 'set', step: 1, field: 'timeoutSeconds', value }));
+});
+test('typed extension pins are metadata while other secrets remain rejected; changing type clears the old binding', () => {
+  const extension = { kind: 'command', pin: 'tool-' + 'a'.repeat(40), bindings: [{ path: ['title'], source: 'issue.title' }], constants: {} };
+  const graph = editDefinition(developmentTemplate, { operation: 'set', step: 2, field: 'extension', value: extension });
+  assert.equal(graph.steps[1].kind, 'extension'); assert.equal(graph.steps[1].extension.pin, extension.pin);
+  assert.throws(() => editDefinition(graph, { operation: 'set', step: 2, field: 'extension', value: { ...extension, constants: { credential: 'ghu_syntheticSecretOnly123' } } }), /Sensitive/);
+  assert.throws(() => editDefinition(graph, { operation: 'set', step: 2, field: 'extension', value: { ...extension, pin: 'ghu_syntheticSecretOnly123' } }));
+  const reset = editDefinition(graph, { operation: 'set', step: 2, field: 'kind', value: 'agent' }); assert.equal(reset.steps[1].extension, undefined);
 });

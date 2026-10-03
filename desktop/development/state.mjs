@@ -130,12 +130,22 @@ export function openDevelopmentStore(directory, { clock = Date.now } = {}) {
   }
   return Object.freeze({
     create(run, settings) {
-      canonicalJSON(run); canonicalJSON(settings); record(settings, ['pipeline', 'source', 'developer', 'skillsHash', 'issueHash', 'checks', 'logBytes'], ['executionProfile', 'integrationMethod', 'fallbacks']);
+      canonicalJSON(run); canonicalJSON(settings); record(settings, ['pipeline', 'source', 'developer', 'skillsHash', 'issueHash', 'checks', 'logBytes'], ['executionProfile', 'integrationMethod', 'fallbacks', 'skillManifest', 'toolManifest', 'toolsHash']);
+      if (settings.skillManifest !== undefined && (!Array.isArray(settings.skillManifest) || !settings.skillManifest.length || settings.skillManifest.length > 64
+        || hash(settings.skillManifest) !== settings.skillsHash)) throw new Error('Invalid captured skill manifest');
+      if (settings.toolManifest !== undefined || settings.toolsHash !== undefined) {
+        if (!Array.isArray(settings.toolManifest) || settings.toolManifest.length > 64 || hash(settings.toolManifest) !== settings.toolsHash) throw new Error('Invalid captured tool manifest');
+      }
       if (settings.integrationMethod !== undefined && !['merge', 'squash'].includes(settings.integrationMethod)) throw new Error('Invalid captured integration method');
       if (settings.executionProfile) { record(settings.executionProfile, ['kind', 'version']);
         if (settings.executionProfile.kind !== 'pipeliner-desktop' || settings.executionProfile.version !== 1) throw new Error('Invalid Desktop execution profile'); }
       if (!settings.pipeline.steps.some(step => step.kind === 'pm-qa') && !settings.executionProfile) throw new Error('Ungated Development needs explicit Desktop profile migration');
       validatePipeline(settings.pipeline, true); candidate(settings.source);
+      for (const step of settings.pipeline.steps.filter(step => step.kind === 'extension')) {
+        const extension = step.extension;
+        if (!extension || !(extension.kind === 'skill' ? settings.skillManifest?.some(value => value.id === extension.pin)
+          : settings.toolManifest?.some(value => value.id === extension.pin && value.kind === extension.kind))) throw new Error('Captured Development extension pin unavailable');
+      }
       record(settings.developer, ['id', 'connection', 'model']);
       if (settings.developer.id !== run.dev || !['codex', 'ollama'].includes(settings.developer.connection) || !text(settings.developer.model, 160)) throw new Error('Invalid captured Development model');
       if (settings.fallbacks !== undefined) {
@@ -174,7 +184,7 @@ export function openDevelopmentStore(directory, { clock = Date.now } = {}) {
         const step = captured.pipeline.steps.find(step => step.id === state.step);
         if (!step) throw new Error('Development reached an unsupported boundary');
         if (['pm-qa', 'pr-integration'].includes(step.kind)) { state.state = 'candidate'; write(state); return immutable(state); }
-        if (!['agent', 'check'].includes(step.kind)) throw new Error('Captured Development step capability unavailable');
+        if (!['agent', 'check', 'extension'].includes(step.kind)) throw new Error('Captured Development step capability unavailable');
         const visits = Object.hasOwn(state.visits, step.id) ? state.visits[step.id] : 0;
         if (visits >= step.visitLimit) throw new Error('Captured Development visit limit exhausted');
         const budget = stepBudget(captured, state);
@@ -213,7 +223,7 @@ export function openDevelopmentStore(directory, { clock = Date.now } = {}) {
       return transact(db, () => { const { state } = bound(binding); for (const key of ['input', 'output']) { if (value[key] === null) state.usage.unavailable = true; else { if (!Number.isSafeInteger(state.usage[key] + value[key])) throw new Error('Provider usage bounds exhausted'); state.usage[key] += value[key]; } } write(state); return immutable(state.usage); });
     },
     prepare(binding, requestId, kind, payload) {
-      if (!id(requestId) || !['provider', 'source', 'implementation', 'command', 'tests', 'review', 'publication'].includes(kind)) throw new Error('Invalid Development request kind');
+      if (!id(requestId) || !['provider', 'source', 'implementation', 'command', 'tests', 'review', 'publication', 'extension'].includes(kind)) throw new Error('Invalid Development request kind');
       canonicalJSON(payload);
       return transact(db, () => {
         const { state } = executing(binding), data = { id: requestId, runId: binding.runId, epoch: binding.epoch, step: state.step, visit: state.visit, kind, candidate: state.candidate, payload };

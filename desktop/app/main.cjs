@@ -14,9 +14,9 @@ const calendarHelper = argument('--calendar-helper') ?? (app.isPackaged ? path.j
 app.setName('Pipeliner'); app.setPath('userData', dataDirectory); app.setPath('crashDumps', path.join(dataDirectory, 'crashes'));
 protocol.registerSchemesAsPrivileged([{ scheme: 'pipeliner', privileges: { standard: true, secure: true } }]);
 if (!app.requestSingleInstanceLock()) app.exit(0);
-let window, manager, vault, workspaces, workspaceStore, issues, pipelines, policy, development, developmentStore, supervisor, scheduling, scheduler, background, backgroundHost, backgroundNative, skills, skillStore, attachWindow, attachment, requestShutdown, authorizationMonitor, shutdownPaused = false, closing = false, verifiedClose = false;
+let window, manager, vault, workspaces, workspaceStore, issues, pipelines, policy, development, developmentStore, supervisor, scheduling, scheduler, background, backgroundHost, backgroundNative, skills, skillStore, tools, toolStore, toolConnections, attachWindow, attachment, requestShutdown, authorizationMonitor, shutdownPaused = false, closing = false, verifiedClose = false;
 const moduleAt = file => import(pathToFileURL(path.join(__dirname, file)).href);
-const assets = new Map(['index.html', 'app.css', 'app.mjs', 'workspaces.mjs', 'issues.mjs', 'pipelines.mjs', 'development.mjs', 'scheduling.mjs', 'background.mjs', 'skills.mjs'].map(file => [file, path.join(__dirname, file)]));
+const assets = new Map(['index.html', 'app.css', 'app.mjs', 'workspaces.mjs', 'issues.mjs', 'pipelines.mjs', 'development.mjs', 'scheduling.mjs', 'background.mjs', 'skills.mjs', 'tools.mjs'].map(file => [file, path.join(__dirname, file)]));
 assets.set('commands.mjs', path.join(__dirname, '../connections/commands.mjs')); assets.set('tokens.css', path.join(__dirname, '../prototype/style.css'));
 assets.set('issue-commands.mjs', path.join(__dirname, '../issues/commands.mjs')); assets.set('connections/commands.mjs', path.join(__dirname, '../connections/commands.mjs'));
 assets.set('pipeline-commands.mjs', path.join(__dirname, '../pipelines/commands.mjs'));
@@ -24,6 +24,8 @@ assets.set('development-commands.mjs', path.join(__dirname, '../development/comm
 assets.set('scheduling-commands.mjs', path.join(__dirname, '../scheduling/commands.mjs'));
 assets.set('background-commands.mjs', path.join(__dirname, '../background/commands.mjs'));
 assets.set('skill-commands.mjs', path.join(__dirname, '../skills/commands.mjs'));
+assets.set('tool-commands.mjs', path.join(__dirname, '../tools/commands.mjs'));
+assets.set('tools/commands.mjs', path.join(__dirname, '../tools/commands.mjs'));
 function asset(value) {
   try { const parsed = new URL(value); return parsed.protocol === 'pipeliner:' && parsed.host === 'app' && !parsed.username && !parsed.password && !parsed.port && !parsed.search && !parsed.hash && assets.has(parsed.pathname.slice(1)) ? parsed.pathname.slice(1) : null; }
   catch { return null; }
@@ -53,8 +55,12 @@ app.whenReady().then(async () => {
   const { createSchedulingControlChannel } = await moduleAt('../core/control.mjs');
   const { createBackgroundControlChannel } = await moduleAt('../core/control.mjs');
   const { createSkillControlChannel } = await moduleAt('../core/control.mjs');
+  const { createToolControlChannel } = await moduleAt('../core/control.mjs');
   const { createSkillManager } = await moduleAt('../skills/manager.mjs');
   const { openSkillStore } = await moduleAt('../skills/store.mjs');
+  const { createToolManager } = await moduleAt('../tools/manager.mjs');
+  const { openToolStore } = await moduleAt('../tools/store.mjs');
+  const { createToolConnections } = await moduleAt('../tools/connections.mjs');
   const { createBackgroundHost } = await moduleAt('../background/host.mjs');
   const { createBackgroundManager } = await moduleAt('../background/manager.mjs');
   const { createSchedulingManager } = await moduleAt('../scheduling/manager.mjs');
@@ -67,7 +73,7 @@ app.whenReady().then(async () => {
   const { createWorkspaceManager } = await moduleAt('../repositories/manager.mjs');
   const { githubAdapter } = await moduleAt('../connections/github.mjs');
   const { codexAdapter, ollamaAdapter } = await moduleAt('../connections/providers.mjs');
-  const { nativeKeyEntry, nativeFolderEntry } = await moduleAt('../connections/native-entry.mjs');
+  const { nativeKeyEntry, nativeFolderEntry, nativeMCPEntry } = await moduleAt('../connections/native-entry.mjs');
   const activeConnections = new Set();
   const publish = snapshot => {
     development?.sync(); scheduling?.sync(); background?.sync();
@@ -84,7 +90,7 @@ app.whenReady().then(async () => {
   manager = createConnectionManager({ vault: null, adapters, onChange: publish });
   const workspaceOptions = qualifying ? await require('./qualify.cjs').workspaceOptions({ directory, helper, nativeFolderEntry }) : {};
   let workspaceBusy = false;
-  const publishWorkspaces = snapshot => { issues?.sync(); pipelines?.sync(); development?.sync(); scheduling?.sync(); skills?.sync(); void scheduler?.sync().catch(() => {}); if (window && !window.isDestroyed()) { window.webContents.send('workspaces:status', snapshot); if (workspaceBusy && !snapshot.busy && !closing) { window.show(); window.focus(); window.webContents.focus(); } } workspaceBusy = snapshot.busy; };
+  const publishWorkspaces = snapshot => { issues?.sync(); pipelines?.sync(); development?.sync(); scheduling?.sync(); skills?.sync(); tools?.sync(); void scheduler?.sync().catch(() => {}); if (window && !window.isDestroyed()) { window.webContents.send('workspaces:status', snapshot); if (workspaceBusy && !snapshot.busy && !closing) { window.show(); window.focus(); window.webContents.focus(); } } workspaceBusy = snapshot.busy; };
   const makeWorkspaces = initialRevision => createWorkspaceManager({ store: workspaceStore, initialRevision, onChange: publishWorkspaces,
     connections: { status: () => manager.status(), acquire: (...args) => manager.acquire(...args), epoch: id => manager.epoch(id) },
     folder: (signal, existing) => nativeFolderEntry(helper, directory, signal, existing),
@@ -96,33 +102,41 @@ app.whenReady().then(async () => {
     connections: { acquire: (...args) => manager.acquire(...args), epoch: id => manager.epoch(id) },
     ...(qualifying ? { api: require('./qualify.cjs').issueApi } : {}) });
   issues = makeIssues(1);
-  const publishPipelines = snapshot => { development?.sync(); scheduling?.sync(); skills?.sync(); void scheduler?.sync().catch(() => {}); if (window && !window.isDestroyed()) window.webContents.send('pipelines:status', snapshot); };
-  const makePipelines = initialRevision => createPipelineManager({ store: workspaceStore, policy, initialRevision, onChange: publishPipelines, onApplied: () => issues.sync() });
+  const publishPipelines = snapshot => { development?.sync(); scheduling?.sync(); skills?.sync(); tools?.sync(); void scheduler?.sync().catch(() => {}); if (window && !window.isDestroyed()) window.webContents.send('pipelines:status', snapshot); };
+  const makePipelines = initialRevision => createPipelineManager({ store: workspaceStore, policy, skills: skillStore, tools: toolStore, initialRevision, onChange: publishPipelines, onApplied: () => issues.sync() });
   pipelines = makePipelines(1);
   const previousRuns = new Map();
   const publishDevelopment = snapshot => {
+    pipelines?.sync(); skills?.sync(); tools?.sync();
     if (scheduler && workspaceStore && !closing) for (const workspace of workspaceStore.workspaces()) {
       const current = policy.runtime.status(workspace.id), previous = previousRuns.get(workspace.id); previousRuns.set(workspace.id, current?.id ?? null);
       if (previous && !current) void scheduler.completed(workspace.id).catch(() => {});
     }
     scheduling?.sync(); if (window && !window.isDestroyed()) window.webContents.send('development:status', snapshot);
   };
-  const makeDevelopment = initialRevision => createDevelopmentManager({ store: workspaceStore, policy, ledger: developmentStore, supervisor, skills: skillStore, initialRevision,
+  const makeDevelopment = initialRevision => createDevelopmentManager({ store: workspaceStore, policy, ledger: developmentStore, supervisor, skills: skillStore, tools: toolStore,
+    connectMCP: toolConnections ? (...args) => toolConnections.lease(...args) : undefined, toolEpoch: toolConnections ? endpoint => toolConnections.epoch(endpoint) : undefined, initialRevision,
     connections: { developers: () => manager.developers(), status: () => manager.status(), acquire: (...args) => manager.acquire(...args), acquireProvider: (...args) => manager.acquireProvider(...args) }, onChange: publishDevelopment,
     openCandidate: value => shell.openExternal(value), hostAuthority: () => !closing && (backgroundHost?.executionAllowed() ?? !backgroundLaunch),
     ...(qualifying ? { api: require('./qualify.cjs').issueApi } : {}) });
   development = makeDevelopment(1);
-  const publishScheduling = snapshot => { background?.sync(); if (window && !window.isDestroyed()) window.webContents.send('scheduling:status', snapshot); };
+  const publishScheduling = snapshot => { background?.sync(); pipelines?.sync(); skills?.sync(); tools?.sync(); if (window && !window.isDestroyed()) window.webContents.send('scheduling:status', snapshot); };
   const makeScheduling = initialRevision => createSchedulingManager({ store: workspaceStore, policy, scheduler, initialRevision, onChange: publishScheduling });
   scheduling = makeScheduling(1);
-  const publishBackground = snapshot => { if (window && !window.isDestroyed()) window.webContents.send('background:status', snapshot); };
+  const publishBackground = snapshot => { pipelines?.sync(); skills?.sync(); tools?.sync(); if (window && !window.isDestroyed()) window.webContents.send('background:status', snapshot); };
   const makeBackground = initialRevision => createBackgroundManager({ policy, host: backgroundHost, initialRevision, onChange: publishBackground,
     scheduler: () => workspaceStore && scheduler ? workspaceStore.workspaces().map(workspace => ({ repository: workspace.name, ...scheduler.status(workspace.id) })) : [] });
   background = makeBackground(1);
   const publishSkills = snapshot => { if (window && !window.isDestroyed()) window.webContents.send('skills:status', snapshot); };
   const makeSkills = initialRevision => createSkillManager({ store: workspaceStore, policy, skills: skillStore, initialRevision, onChange: publishSkills,
-    onApplied: () => { development.sync(); pipelines.sync(); }, ...(qualifying ? require('./qualify.cjs').skillOptions() : {}) });
+    occupiedNames: () => [...(skillStore?.names() ?? []), ...(toolStore?.names() ?? [])],
+    onApplied: () => { development.sync(); pipelines.sync(); tools?.sync(); }, ...(qualifying ? require('./qualify.cjs').skillOptions() : {}) });
   skills = makeSkills(1);
+  const publishTools = snapshot => { if (window && !window.isDestroyed()) window.webContents.send('tools:status', snapshot); };
+  const makeTools = initialRevision => createToolManager({ store: workspaceStore, policy, tools: toolStore, connections: toolConnections, initialRevision, onChange: publishTools,
+    occupiedNames: () => [...(skillStore?.names() ?? []), ...(toolStore?.names() ?? [])],
+    onApplied: () => { development.sync(); pipelines.sync(); skills.sync(); } });
+  tools = makeTools(1);
   protocol.handle('pipeliner', request => {
     const name = request.method === 'GET' ? asset(request.url) : null;
     if (!name) return new Response('Unavailable', { status: 404 });
@@ -167,6 +181,8 @@ app.whenReady().then(async () => {
   ipcMain.handle('background:control', (event, payload) => { if (closing) throw new Error('App closing'); return backgroundChannel().dispatch(event, payload); });
   const skillChannel = () => createSkillControlChannel(skills, { contents: window.webContents, url, context: () => ({ revision: skills.status().revision }) });
   ipcMain.handle('skills:control', (event, payload) => { if (closing) throw new Error('App closing'); return skillChannel().dispatch(event, payload); });
+  const toolChannel = () => createToolControlChannel(tools, { contents: window.webContents, url, context: () => ({ revision: tools.status().revision }) });
+  ipcMain.handle('tools:control', (event, payload) => { if (closing) throw new Error('App closing'); return toolChannel().dispatch(event, payload); });
   const suspendHost = () => { scheduler?.suspend(); void backgroundHost?.suspend().catch(() => {}); };
   const wakeHost = () => { if (!closing) void (async () => { await backgroundHost?.wake(); if (backgroundHost?.executionAllowed()) await scheduler?.wake(); })().catch(() => {}); };
   const endSession = event => { event.preventDefault(); void requestShutdown?.(); };
@@ -178,8 +194,9 @@ app.whenReady().then(async () => {
       // Keep recovery controls alive until worker termination has been verified.
       await development.close(); await issues.close(); await workspaces.close(); await manager.close(); await scheduler?.close();
       powerMonitor.removeListener('suspend', suspendHost); powerMonitor.removeListener('resume', wakeHost); powerMonitor.removeListener('shutdown', endSession);
+      await tools.close(); await toolConnections?.close();
       backgroundHost?.close(); background.close(); scheduling.close(); pipelines.close(); skills.close();
-      developmentStore?.close(); policy?.close(); skillStore?.close(); workspaceStore?.close(); vault?.close(); verifiedClose = true; app.quit();
+      developmentStore?.close(); policy?.close(); skillStore?.close(); toolStore?.close(); workspaceStore?.close(); vault?.close(); verifiedClose = true; app.quit();
     } catch { closing = false; console.error('Pipeliner shutdown needs verified recovery. Work remains preserved.'); await attachWindow(); publish(manager.status()); }
   };
   Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Pipeliner', submenu: [{ role: 'about' }, { type: 'separator' }, { role: 'quit' }] }, { role: 'editMenu' },
@@ -193,11 +210,14 @@ app.whenReady().then(async () => {
     manager = createConnectionManager({ vault, adapters, onChange: publish, initialRevision }); publish(manager.status());
     const { openWorkspaceStore } = await moduleAt('../repositories/store.mjs');
     workspaceStore = openWorkspaceStore(directory);
-    skillStore = openSkillStore(directory);
-    policy = openPolicyStore(directory, { catalog: () => ({ repositories: workspaceStore.workspaces().map(workspace => workspace.id), capabilities: ['workspace.read', 'workspace.write', 'worker.exec', 'provider.turn', 'git.push', 'github.read', 'github.issue.write', 'github.pr.write', 'github.project.write', 'extension.install'],
+    skillStore = openSkillStore(directory, { occupiedNames: () => toolStore?.names() ?? [] });
+    toolStore = openToolStore(directory, { occupiedNames: () => skillStore.names() });
+    toolConnections = createToolConnections({ vault, entry: (endpoint, signal) => nativeMCPEntry(helper, directory, endpoint, signal, qualifying && process.argv.includes('--qualify-tools')),
+      ...(qualifying && process.argv.includes('--qualify-tools') ? require('./qualify.cjs').toolConnectionOptions() : {}), onChange: () => { tools?.sync(); development?.sync(); } });
+    policy = openPolicyStore(directory, { catalog: () => ({ repositories: workspaceStore.workspaces().map(workspace => workspace.id), capabilities: ['workspace.read', 'workspace.write', 'worker.exec', 'provider.turn', 'git.push', 'github.read', 'github.issue.write', 'github.pr.write', 'github.project.write', 'extension.install', 'extension.invoke'],
       maxConcurrency: 1, background: backgroundNative.inspect().qualified, connections: manager.status().connections.map(connection => ({ id: connection.id, provider: connection.id.startsWith('github') ? 'github' : connection.id,
         repositories: workspaceStore.workspaces().filter(workspace => !connection.id.startsWith('github') || connection.repositories.some(repo => repo.id === workspace.repositoryId)).map(workspace => workspace.id),
-        healthy: ['connected', 'limited'].includes(connection.health) })), developers: manager.developers(), extensions: skillStore.catalog() }),
+        healthy: ['connected', 'limited'].includes(connection.health) })), developers: manager.developers(), extensions: skillStore.catalog(), tools: toolStore.catalog() }),
       inspectors: { repository: input => development.observe(input), worker: binding => supervisor.inspectWorker(binding),
         continuity: input => development.inspectContinuity(input),
         effect: action => action.operation === 'github.pr.merge' ? development.inspectIntegration(action) : supervisor.inspectEffect(action) } });
@@ -210,6 +230,7 @@ app.whenReady().then(async () => {
     issues = makeIssues(issues.status().revision + 1); publishIssues(issues.status());
     workspaces = makeWorkspaces(workspaces.status().revision + 1); publishWorkspaces(workspaces.status());
     const skillRevision = skills.status().revision + 1; skills.close(); skills = makeSkills(skillRevision); publishSkills(skills.status());
+    const toolRevision = tools.status().revision + 1; await tools.close(); tools = makeTools(toolRevision); publishTools(tools.status());
     scheduler = createScheduler({ store: workspaceStore, policy, development,
       hostAuthority: () => !closing && (backgroundHost?.executionAllowed() ?? !backgroundLaunch),
       connections: { acquire: (...args) => manager.acquireRead(...args), epoch: id => manager.epoch(id) }, nextCalendar: (config, after, signal) => nextCalendar(calendarHelper, config, after, signal),
@@ -222,7 +243,7 @@ app.whenReady().then(async () => {
     authorizationMonitor = setInterval(() => { if (!closing) void backgroundHost.refresh().catch(() => {}); }, 1000); authorizationMonitor.unref();
     await scheduler.check('startup');
   } catch { publish(manager.status()); }
-  if (qualifying) await require('./qualify.cjs').run({ window, directory, helper, vault, manager, workspaces, issues, pipelines, policy, development, scheduler, scheduling, background, backgroundHost, backgroundNative, skills, skillStore, skillChannel: skillChannel(), attachWindow, backgroundChannel: backgroundChannel(), schedulingChannel: schedulingChannel(), developmentChannel: developmentChannel(), workspaceChannel: workspaceChannel(), issueChannel: issueChannel(), pipelineChannel: pipelineChannel(), channel: channel(), windowReadyMs });
+  if (qualifying) await require('./qualify.cjs').run({ window, directory, helper, vault, manager, workspaces, issues, pipelines, policy, development, scheduler, scheduling, background, backgroundHost, backgroundNative, skills, skillStore, tools, toolStore, toolChannel: toolChannel(), skillChannel: skillChannel(), attachWindow, backgroundChannel: backgroundChannel(), schedulingChannel: schedulingChannel(), developmentChannel: developmentChannel(), workspaceChannel: workspaceChannel(), issueChannel: issueChannel(), pipelineChannel: pipelineChannel(), channel: channel(), windowReadyMs });
 }).catch(() => { console.error('Pipeliner could not start safely.'); app.exit(1); });
 
 async function githubPrompt({ connection, verificationUri, userCode, signal, cancel }) {

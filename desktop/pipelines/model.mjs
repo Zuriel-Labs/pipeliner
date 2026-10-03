@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { developmentTemplate, releaseTemplate, capabilityNames, canonicalJSON, record } from '../core/settings.mjs';
+import { developmentTemplate, releaseTemplate, capabilityNames, canonicalJSON, record, validateExtension } from '../core/settings.mjs';
 import { containsSecret } from '../connections/commands.mjs';
 import { stepTypes, inputNames, evidenceNames } from './commands.mjs';
 
@@ -15,7 +15,9 @@ export function presetChanges(scenario) {
     'pipelines.development': development, 'pipelines.release': structuredClone(releaseTemplate), 'delivery.publish': false };
 }
 export function editDefinition(value, action, newId = () => 'step_' + randomUUID().replaceAll('-', '')) {
-  canonicalJSON(value); canonicalJSON(action); if (containsSecret(canonicalJSON(action))) throw new Error('Sensitive pipeline input');
+  canonicalJSON(value); canonicalJSON(action); const sensitive = structuredClone(action);
+  if (action.operation === 'set' && action.field === 'extension') { validateExtension(action.value); sensitive.value.pin = 'captured-definition'; }
+  if (containsSecret(canonicalJSON(sensitive))) throw new Error('Sensitive pipeline input');
   const graph = structuredClone(value), get = number => {
     if (!Number.isSafeInteger(number) || number < 1 || number > graph.steps.length) throw new Error('Choose an existing step'); return graph.steps[number - 1];
   };
@@ -49,7 +51,8 @@ export function editDefinition(value, action, newId = () => 'step_' + randomUUID
       step[field] = action.value.map(value => Object.hasOwn(choices, value) ? value : Object.entries(choices).find(([, label]) => label.toLowerCase() === value.toLowerCase())?.[0] ?? (step[field].includes(value) ? value : null));
       if (step[field].some(value => value === null)) throw new Error('Choose a declared input, evidence or permission');
     } else if (['label', 'expectedResult'].includes(field)) { if (!name(action.value)) throw new Error('Invalid pipeline text'); step[field] = action.value; }
-    else if (field === 'kind') { if (!Object.hasOwn(stepTypes, action.value)) throw new Error('Unknown pipeline step type'); step.kind = action.value; }
+    else if (field === 'kind') { if (!Object.hasOwn(stepTypes, action.value)) throw new Error('Unknown pipeline step type'); step.kind = action.value; if (step.kind !== 'extension') delete step.extension; }
+    else if (field === 'extension') { step.extension = structuredClone(action.value); step.kind = 'extension'; if (step.extension.kind === 'mcp') step.retryLimit = 0; }
     else if (['retryLimit', 'visitLimit'].includes(field)) { if (!Number.isSafeInteger(action.value) || action.value < 0 || action.value > 1000000) throw new Error('Invalid pipeline bound'); step[field] = action.value; }
     else if (field === 'timeoutSeconds') { if (action.value === null) delete step.timeoutSeconds;
       else { if (!Number.isSafeInteger(action.value) || action.value < 1 || action.value > 604800) throw new Error('Invalid pipeline timeout'); step.timeoutSeconds = action.value; } }

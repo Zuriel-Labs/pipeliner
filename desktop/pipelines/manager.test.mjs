@@ -10,22 +10,27 @@ import { openPolicyStore } from '../core/policy.mjs';
 import { inspectWorkspace } from '../core/identity.mjs';
 import { createPipelineControlChannel } from '../core/control.mjs';
 import { createPipelineManager } from './manager.mjs';
+import { openToolStore } from '../tools/store.mjs';
+import { openSkillStore } from '../skills/store.mjs';
+import { toolPackage } from '../tools/package.mjs';
+import { capabilityNames } from '../core/settings.mjs';
 
-function fixture(t) {
+function fixture(t, withTools = false) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-40-policy-'))), store = openWorkspaceStore(root);
   const repo = id => ({ id, repositoryId: 'R_' + id, slug: 'fixture/' + id, name: 'Fixture / ' + id, localKey: id === 'one' ? '1:2' : '1:3', path: root, project: { id: 'P1' } });
   store.register(repo('one')); store.register(repo('two')); store.select('one'); let now = 1000;
-  const policy = openPolicyStore(root, { clock: () => now, catalog: () => ({ repositories: ['one', 'two'], capabilities: ['workspace.read', 'workspace.write', 'worker.exec'], maxConcurrency: 1, background: false,
-    connections: [{ id: 'codex', provider: 'codex', repositories: ['one', 'two'] }], developers: [{ id: 'dev', connection: 'codex', metrics: [] }], extensions: [] }),
+  const tools = withTools ? openToolStore(root) : null, skills = withTools ? openSkillStore(root) : null;
+  const policy = openPolicyStore(root, { clock: () => now, catalog: () => ({ repositories: ['one', 'two'], capabilities: withTools ? capabilityNames : ['workspace.read', 'workspace.write', 'worker.exec'], maxConcurrency: 1, background: false,
+    connections: [{ id: 'codex', provider: 'codex', repositories: ['one', 'two'] }], developers: [{ id: 'dev', connection: 'codex', metrics: [] }], extensions: skills?.catalog() ?? [], ...(tools ? { tools: tools.catalog() } : {}) }),
     inspectors: { repository: async ({ repository, issue }) => ({ repository, issue, state: 'OPEN', status: 'In Progress', active: [{ issue, status: 'In Progress' }], observedAt: now }) } });
-  let manager = createPipelineManager({ store, policy });
-  t.after(() => { manager.close(); policy.close(); store.close(); rmSync(root, { recursive: true }); assert(!existsSync(root)); });
+  let manager = createPipelineManager({ store, policy, tools, skills });
+  t.after(() => { manager.close(); policy.close(); tools?.close(); skills?.close(); store.close(); rmSync(root, { recursive: true }); assert(!existsSync(root)); });
   const apply = changes => {
     const input = policy.control.capture({ commandId: randomUUID(), conversationId: 'fixture-pm', target: 'one', text: 'Change scoped policy' });
     const p = policy.control.prepare({ inputId: input.id, requestId: randomUUID(), scope: 'repository', target: 'one', changes, reset: [] });
     return policy.control.apply({ commandId: randomUUID(), proposalId: p.id, hash: p.hash, inputId: p.inputId, conversationId: 'fixture-pm', target: 'one' });
   };
-  return { root, store, policy, apply, get manager() { return manager; }, advance: ms => { now += ms; }, restart() { manager.close(); manager = createPipelineManager({ store, policy }); } };
+  return { root, store, policy, tools, skills, apply, get manager() { return manager; }, advance: ms => { now += ms; }, restart() { manager.close(); manager = createPipelineManager({ store, policy, tools, skills }); } };
 }
 function prepare(f) { f.manager.dispatch({ operation: 'prepare' }); const p = f.manager.status().preview; assert(p); return p.hash; }
 const chat = (f, text) => f.manager.dispatch({ operation: 'chat', text });
@@ -108,4 +113,34 @@ test('registered workspace identities remain exact while human text remains prot
   const f = fixture(t), id = 'repo_' + 'a'.repeat(24);
   f.store.register({ id, repositoryId: 'R3', slug: 'fixture/three', name: 'ghu_syntheticSecretOnly123', localKey: '1:4', path: f.root, project: { id: 'P1' } }); f.store.select(id);
   assert.equal(f.manager.status().workspaceId, id); assert.equal(f.manager.status().repositoryLabel, 'Sensitive text hidden');
+});
+test('plain PM pipeline bindings use only selected immutable tools and approved typed fields without granting permissions', t => {
+  const f = fixture(t, true), item = f.tools.install(toolPackage({ name: 'queue', purpose: 'Check synthetic queue', version: '1', license: 'MIT', dataCategories: ['issue.title', 'pm.supplied'],
+    command: { script: 'printf done', timeoutSeconds: 30, inputSchema: { type: 'object', properties: { title: { type: 'string' } }, required: ['title'] } } }), 0);
+  f.apply({ 'tools.extensions': [item.id] }); chat(f, 'Add an Extension step after step 2 called Check the queue');
+  chat(f, 'Use tool queue in step 3'); chat(f, 'Give step 3 Issue title as title');
+  const step = f.manager.status().draft.definition.steps[2];
+  assert.equal(step.extension.pin, item.id); assert.deepEqual(step.extension.bindings, [{ path: ['title'], source: 'issue.title' }]);
+  assert.deepEqual(step.permissions, item.permissions); assert.equal(step.retryLimit, 0);
+  assert.throws(() => chat(f, 'Give step 3 Issue body as body'), /Pipeline .*data/i);
+  assert.throws(() => f.manager.dispatch({ operation: 'edit', action: { operation: 'set', step: 3, field: 'extension', value: { ...step.extension, pin: 'tool-' + 'f'.repeat(40) } } }), /Pipeline .*selected/i);
+  const hash = prepare(f); assert.equal(f.manager.status().preview.after['pipelines.development'].value.steps[2].extension.pin, item.id);
+  f.manager.dispatch({ operation: 'apply', hash }); assert.equal(f.policy.worker.read('one').values['permissions.grants'].value.includes('extension.invoke'), false);
+  f.restart(); assert.equal(f.manager.status().current.definition.steps[2].extension.pin, item.id);
+  chat(f, 'Edit Development pipeline'); chat(f, 'Rename step 3 to Inspect the queue'); prepare(f);
+  f.tools.remove(item.name, f.tools.revision()); assert.throws(() => f.manager.dispatch({ operation: 'apply' }), /Pipeline preview/);
+  assert.equal(f.manager.status().draft.definition.steps[2].extension.pin, item.id);
+});
+test('nested PM input replacement preserves neighboring values and rejects reserved or overlapping paths', t => {
+  const f = fixture(t, true), item = f.tools.install(toolPackage({ name: 'nested', purpose: 'Synthetic typed input', version: '1', license: 'MIT', dataCategories: ['pm.supplied', 'issue.title'],
+    command: { script: 'printf done', timeoutSeconds: 30, inputSchema: { type: 'object' } } }), 0);
+  f.apply({ 'tools.extensions': [item.id] }); chat(f, 'Use tool nested in step 2');
+  chat(f, 'Set step 2 input label to text Preserved label'); chat(f, 'Set step 2 input options.name to text First');
+  chat(f, 'Set step 2 input options.name to text Second'); chat(f, 'Remove step 2 input missing.label');
+  assert.deepEqual(f.manager.status().draft.definition.steps[1].extension.constants, { label: 'Preserved label', options: { name: 'Second' } });
+  chat(f, 'Remove step 2 input options.name'); chat(f, 'Give step 2 Issue title as options.name');
+  assert.deepEqual(f.manager.status().draft.definition.steps[1].extension.constants, { label: 'Preserved label' });
+  assert.throws(() => f.manager.dispatch({ operation: 'input', step: 2, path: ['__proto__', 'name'], source: 'pm.supplied', value: 'no' }));
+  assert.throws(() => f.manager.dispatch({ operation: 'input', step: 2, path: ['options'], source: 'issue.title' }));
+  assert.equal(f.manager.status().draft.definition.steps[1].extension.bindings[0].path.join('.'), 'options.name');
 });

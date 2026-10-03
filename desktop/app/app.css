@@ -8,3 +8,4 @@
 #schedule-settings>.connection-card{margin:20px 0}
 #background-settings>.connection-card{margin:20px 0}
 #skill-settings>.connection-card{margin:20px 0}#skill-settings .setup-preview button{margin:6px 8px 0 0}#skill-settings .connection-heading h3{margin:0}#skill-settings .connection-card:focus-within{border-color:var(--work)}
+#tool-settings>.connection-card{margin:20px 0}#tool-settings .setup-preview button{margin:6px 8px 0 0}#tool-settings .connection-heading h3{margin:0}#tool-settings .connection-card:focus-within{border-color:var(--work)}#tool-settings summary{cursor:pointer;min-height:44px;padding:10px 0;font-weight:650}.tool-schema{white-space:pre-wrap;overflow-wrap:anywhere;max-height:260px;overflow:auto;font-size:.85rem}

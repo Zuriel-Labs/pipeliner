@@ -87,6 +87,31 @@ test('agent installation requires an exact prior PM pin and effective installati
     assert.equal(f.tools.available(staged.id), false);
   } finally { await f.close(); }
 });
+test('PM data changes create a new immutable pin without modifying old definitions or granting calls', async () => {
+  const f = fixture();
+  try {
+    await f.dispatch({ operation: 'chat', text: 'Inspect tool server from https://example.com/mcp' });
+    await f.dispatch({ operation: 'select', tool: 'queue' }); await f.dispatch({ operation: 'apply' });
+    const old = f.tools.list()[0], graph = f.policy.worker.read('R1').values['pipelines.development'].value;
+    await f.dispatch({ operation: 'chat', text: 'Set tool queue data to Issue title, PM supplied values' });
+    const p = f.manager.status().preview;
+    assert.deepEqual(p.item.dataCategories, ['issue.title', 'pm.supplied']); assert.notEqual(p.item.id, old.id);
+    assert.deepEqual(f.tools.get(old.id).definition.dataCategories, []);
+    assert.equal(f.policy.worker.read('R1').values['tools.extensions'].value[0], old.id);
+    await f.dispatch({ operation: 'apply', hash: p.hash });
+    assert.equal(f.policy.worker.read('R1').values['tools.extensions'].value[0], p.item.id);
+    assert.equal(f.policy.worker.read('R1').values['permissions.grants'].value.includes('extension.invoke'), false);
+    assert.deepEqual(f.policy.worker.read('R1').values['pipelines.development'].value, graph);
+    await f.dispatch({ operation: 'permission', scope: 'host', enabled: true }); await f.dispatch({ operation: 'apply' });
+    await f.dispatch({ operation: 'permission', scope: 'repository', enabled: true }); await f.dispatch({ operation: 'apply' });
+    const view = f.policy.worker.read('R1'), captured = f.tools.capture(view);
+    await f.dispatch({ operation: 'data', name: 'queue', categories: [] }); assert.match(f.manager.status().preview.timing, /immediately revoke/);
+    await f.dispatch({ operation: 'apply' });
+    assert.throws(() => f.tools.assertCaptured(captured.manifest, captured.hash, f.policy.worker.authority('R1', view.revision)), /revoked/);
+    await assert.rejects(f.dispatch({ operation: 'data', name: 'queue', categories: ['credentials'] }));
+    assert.equal(f.tools.get(old.id).definition.dataCategories.length, 0);
+  } finally { await f.close(); }
+});
 test('cancelled discovery terminates its owned lease and cannot restore a late catalog or replace a newer scope preview', async () => {
   const f = fixture();
   try {

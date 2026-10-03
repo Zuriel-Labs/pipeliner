@@ -16,7 +16,7 @@ function verified(pack) {
 }
 const manifestEntry = item => ({ id: item.id, name: item.name, version: item.version, digest: item.digest, kind: item.kind });
 
-export function openSkillStore(directory) {
+export function openSkillStore(directory, { occupiedNames = () => [] } = {}) {
   const db = new DatabaseSync(protectedFile(directory, 'skills.sqlite'), { allowExtension: false, timeout: 1000 });
   let closed = false;
   const ready = () => { if (closed) throw new Error('Skill storage unavailable.'); };
@@ -51,6 +51,8 @@ export function openSkillStore(directory) {
   function available(item) { return item.kind === 'bundled' || db.prepare('SELECT installed FROM skill_names WHERE name=?').get(item.name)?.installed === 1; }
   const generation = item => item.kind === 'bundled' ? 0 : db.prepare("SELECT COALESCE(MAX(revision),0) AS revision FROM skill_events WHERE name=? AND operation='remove'").get(item.name).revision;
   function sourceCollision(pack) {
+    const occupied = occupiedNames(); if (!Array.isArray(occupied) || !occupied.every(skillName)) throw new Error('Skill name inventory unavailable.');
+    if (occupied.includes(pack.name)) throw new Error('Skill name collision.');
     if (bundled.some(item => item.name === pack.name)) throw new Error('Skill name collision.');
     const current = db.prepare('SELECT current_id FROM skill_names WHERE name=?').get(pack.name);
     if (current) { const old = get(current.current_id); if (old.source.repository !== pack.source.repository || old.source.path !== pack.source.path || old.originalName !== pack.originalName) throw new Error('Skill name collision.'); }
@@ -87,6 +89,7 @@ export function openSkillStore(directory) {
     }).join('\n\n');
   }
   return Object.freeze({ revision, get, list, capture, prompt,
+    names() { ready(); return [...bundled.map(item => item.name), ...db.prepare('SELECT name FROM skill_names ORDER BY name').all().map(row => row.name)]; },
     available(id) { return available(get(id)); },
     removed(id) { const item = get(id); return item.kind !== 'bundled' && db.prepare('SELECT installed FROM skill_names WHERE name=?').get(item.name)?.installed === 0; },
     catalog() { ready(); return [...bundled.map(({ id, digest }) => ({ id, digest })), ...db.prepare('SELECT id,digest FROM skill_versions ORDER BY id').all().map(({ id, digest }) => ({ id, digest }))]; },

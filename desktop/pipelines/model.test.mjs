@@ -7,7 +7,7 @@ import { pipelineCommand } from './commands.mjs';
 test('the three preset definitions preserve consent defaults and satisfy their actual canonical gate rules', () => {
   for (const scenario of ['supervised', 'pm-autonomous', 'scheduled-autonomous']) {
     const changes = presetChanges(scenario);
-    validateState({ schemaVersion: 2, defaults, host: {}, global: {}, repositories: { repo_one: changes } });
+    validateState({ schemaVersion: 3, defaults, host: {}, global: {}, repositories: { repo_one: changes } });
     assert.equal(changes['pipelines.development'].steps.filter(step => step.kind === 'pm-qa').length, scenario === 'supervised' ? 1 : 0);
     assert.equal(changes['pipelines.release'].steps.some(step => step.kind === 'pm-qa'), false);
     assert.equal(changes['intake.trigger'], scenario === 'scheduled-autonomous' ? 'schedule' : 'pm');

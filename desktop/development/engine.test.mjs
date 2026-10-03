@@ -10,44 +10,105 @@ import { sourceTree } from './source.mjs';
 import { starterHash, starterSkills } from './starter.mjs';
 import { createDevelopmentEngine } from './engine.mjs';
 import { openSkillStore } from '../skills/store.mjs';
+import { openToolStore } from '../tools/store.mjs';
+import { toolPackage } from '../tools/package.mjs';
 
 const hash = value => createHash('sha256').update(typeof value === 'string' ? value : canonicalJSON(value)).digest('hex');
 const file = content => ({ path: 'app.mjs', mode: '100644', content: Buffer.from(content).toString('base64') });
-function fixture(extraLimits = {}, fallbackIds = [], hostAuthority = () => true, selectedSkills = false) {
+function fixture(extraLimits = {}, fallbackIds = [], hostAuthority = () => true, selectedSkills = false, custom = null, connectMCP = null, customSkill = false) {
   const issue = { number: 1, title: 'Change fixture value to two', body: 'A bounded fixture.' };
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-development-engine-'))), source = [file('export const value = 1;\n')], candidate = { sourceCommit: 'a'.repeat(40), gitTree: sourceTree(source) };
+  const tools = custom ? openToolStore(root) : null, pack = custom ? tools.install(custom, 0) : null;
+  const selectedTools = tools?.capture({ values: { 'tools.extensions': { value: [pack.id] }, 'tools.disabled': { value: [] } } });
+  const pipeline = structuredClone(developmentTemplate);
+  if (pack) { pipeline.steps[1].kind = 'extension'; pipeline.steps[1].extension = { kind: pack.kind, pin: pack.id, bindings: [{ path: ['title'], source: 'issue.title' }], constants: {} }; }
+  if (customSkill) { pipeline.steps[1].kind = 'extension'; pipeline.steps[1].extension = { kind: 'skill', pin: starterSkills[0].id,
+    bindings: [{ path: ['title'], source: 'issue.title' }], constants: { audience: 'PM' } }; }
   const run = { id: 'run-one', repository: 'repo-one', issue: 1, dev: 'dev-one', epoch: 1, policyRevision: 1, policyHash: 'b'.repeat(64), createdAt: Date.now(),
-    pipelineHash: hash(developmentTemplate), control: 'running', limits: { 'limits.stepTurns': 8, 'limits.issueTurns': 16, 'limits.agentSeconds': 1800, ...extraLimits } };
-  const skills = selectedSkills ? openSkillStore(root) : null, selected = skills?.capture({ values: { 'skills.bundledEnabled': { value: true }, 'skills.extensions': { value: [] }, 'skills.disabled': { value: [starterSkills[1].id] } } });
-  const ledger = openDevelopmentStore(root); ledger.create(run, { pipeline: developmentTemplate, source: candidate, developer: { id: run.dev, connection: 'ollama', model: 'test-model' },
+    pipelineHash: hash(pipeline), control: 'running', limits: { 'limits.stepTurns': 8, 'limits.issueTurns': 16, 'limits.agentSeconds': 1800, ...extraLimits } };
+  const skills = selectedSkills || customSkill ? openSkillStore(root) : null, selected = skills?.capture({ values: { 'skills.bundledEnabled': { value: true }, 'skills.extensions': { value: [] }, 'skills.disabled': { value: [starterSkills[1].id] } } });
+  const ledger = openDevelopmentStore(root); ledger.create(run, { pipeline, source: candidate, developer: { id: run.dev, connection: 'ollama', model: 'test-model' },
+    ...(selectedTools ? { toolManifest: selectedTools.manifest, toolsHash: selectedTools.hash } : {}),
     fallbacks: fallbackIds.map(id => ({ id, connection: 'ollama', model: 'test-model' })), skillsHash: selected?.hash ?? starterHash, ...(selected ? { skillManifest: selected.manifest } : {}), issueHash: developmentIssueHash(issue), checks: [{ name: 'Fixture check', command: 'node --test' }], logBytes: 1048576 });
-  let files = [], turns = 0, lease; const operations = [], binding = { runId: run.id, epoch: run.epoch }, permissions = ['provider.turn', 'workspace.read', 'workspace.write', 'worker.exec'];
+  let files = [], turns = 0, lease; const operations = [], binding = { runId: run.id, epoch: run.epoch }, permissions = ['provider.turn', 'workspace.read', 'workspace.write', 'worker.exec', ...(pack ? ['extension.invoke'] : [])];
   const makeLease = () => { let closed = false; return { check: () => { if (closed) throw new Error('connection-changed'); }, close: () => { closed = true; }, turn: async input => { turns++; return await next(input, turns); } }; };
   let next = async () => { throw new Error('provider unavailable'); };
   const perform = async (_binding, request) => { assert.deepEqual(_binding, binding); operations.push(request.operation);
     const shapes = { seed: ['files'], list: [], read: ['path'], write: ['path', 'content', 'mode', 'beforeHash'], run: ['command', 'timeoutMs'], export: [] };
-    record(request, ['operation', ...shapes[request.operation]]);
+    record(request, ['operation', ...shapes[request.operation]], request.operation === 'run' ? ['input'] : []);
     if (request.operation === 'seed') { files = structuredClone(request.files); return { files: files.length }; }
     if (request.operation === 'export') return { files: structuredClone(files) };
     if (request.operation === 'list') return { files: files.map(file => ({ path: file.path, hash: hash(Buffer.from(file.content, 'base64').toString()) })) };
     if (request.operation === 'read') return { path: request.path, content: Buffer.from(files[0].content, 'base64').toString(), hash: hash(Buffer.from(files[0].content, 'base64').toString()) };
     if (request.operation === 'write') { assert.equal(request.beforeHash, hash(Buffer.from(files[0].content, 'base64').toString())); files = [{ path: request.path, mode: request.mode, content: request.content }]; return { path: request.path }; }
-    if (request.operation === 'run') return { exitCode: Buffer.from(files[0].content, 'base64').toString().includes('= 2') ? 0 : 1, output: 'Fixture check', truncated: false, timedOut: false };
+    if (request.operation === 'run') { if (request.input) {
+      assert.equal(ledger.evidence(binding).at(-1).state, 'dispatched'); assert.equal(ledger.evidence(binding).at(-1).kind, 'extension');
+      assert.deepEqual(request.input, { title: issue.title }); return { exitCode: 0, output: 'Typed command completed', truncated: false, timedOut: false }; }
+      return { exitCode: pack || Buffer.from(files[0].content, 'base64').toString().includes('= 2') ? 0 : 1, output: 'Fixture check', truncated: false, timedOut: false }; }
     throw new Error('tool denied');
   };
   const supervisor = { tool: async (...args) => args[1].operation === 'read' && args[1].path === 'missing.mjs' ? { ok: false, error: 'tool-denied-or-incomplete' } : ({ ok: true, result: await perform(...args) }) };
-  const grant = { dev: run.dev, connections: ['ollama'], capabilities: permissions, bundledSkills: true, extensions: [], deniedExtensions: selected ? [starterSkills[1].id] : [], takeover: fallbackIds.length > 0, fallbacks: fallbackIds };
+  const grant = { dev: run.dev, connections: ['ollama'], capabilities: permissions, bundledSkills: true, extensions: [], deniedExtensions: selected ? [starterSkills[1].id] : [], tools: pack ? [pack.id] : [], deniedTools: [], takeover: fallbackIds.length > 0, fallbacks: fallbackIds };
   const policy = { runtime: { status: () => run }, worker: { authority: () => grant } };
   const connections = { acquireProvider: async (id, model) => { assert.equal(id, 'ollama'); assert.equal(model, 'test-model'); lease = makeLease(); return lease; } };
   return { ledger, source, binding, run, grant, permissions, operations, get lease() { return lease; }, set next(value) { next = value; }, get turns() { return turns; },
-    engine: createDevelopmentEngine({ ledger, policy, supervisor, connections, hostAuthority, skills }), context: { issue, source },
-    cleanup() { ledger.close(); skills?.close(); rmSync(root, { recursive: true }); } };
+    engine: createDevelopmentEngine({ ledger, policy, supervisor, connections, hostAuthority, skills, tools, connectMCP }), context: { issue, source },
+    cleanup() { ledger.close(); skills?.close(); tools?.close(); rmSync(root, { recursive: true }); } };
 }
 const output = (evidence, documents = []) => ({ outcome: 'success', summary: 'Scoped fixture evidence.', evidence, documents, findings: [] });
 const call = (f, operation, payload, epoch = f.binding.epoch) => ({ content: '', thinking: '', usage: { input: 10, output: 5 }, tool_calls: [{ function: {
   name: 'pipeliner_tool', arguments: { ...f.binding, epoch, operation, payload } } }] });
 const latestEvidence = input => JSON.parse(input.messages.filter(message => message.role === 'tool').at(-1).content).evidenceId;
 const documents = ['research', 'specification', 'design'].map(kind => ({ kind, title: kind, paragraphs: ['Inspect the fixture; change one value; verify its check.'] }));
+
+test('custom skill step uses its exact instruction pin and declared typed input without undeclared Issue or prior-output content', async () => {
+  const f = fixture({}, [], () => true, false, null, null, true);
+  try {
+    f.next = async (input, turn) => {
+      if (turn === 1) return call(f, 'list', {});
+      if (turn === 2) return call(f, 'finish', output([latestEvidence(input)], documents));
+      const prompt = input.messages[0].content;
+      assert.match(prompt, /pipeliner-forge/); assert.doesNotMatch(prompt, /pipeliner-motif|pipeliner-shape|pipeliner-lens|A bounded fixture\.|Inspect the fixture; change one value/);
+      assert.deepEqual(JSON.parse(/Captured typed input: ([^\n]+)/.exec(prompt)?.[1] ?? 'null'), { audience: 'PM', title: f.context.issue.title });
+      assert.match(prompt, /Recorded plan complete: true/); throw new Error('fixture-stop-after-skill-input');
+    };
+    await assert.rejects(f.engine.run(f.binding, f.context), /fixture-stop-after-skill-input/);
+    assert.equal(f.turns, 3); assert.equal(f.ledger.status(f.run.id).step, 'implement');
+  } finally { f.cleanup(); }
+});
+
+test('captured custom command step records intent before the exact restricted effect and advances through real ledger evidence', async () => {
+  const pack = toolPackage({ name: 'check', purpose: 'Check scoped work', version: '1', license: 'MIT', dataCategories: ['issue.title'],
+    command: { script: 'printf done', timeoutSeconds: 30, inputSchema: { type: 'object', properties: { title: { type: 'string' } }, required: ['title'], additionalProperties: false } } });
+  const f = fixture({}, [], () => true, false, pack);
+  try {
+    f.next = async (input, turn) => { if (turn === 1) return call(f, 'list', {}); if (turn === 2) return call(f, 'finish', output([latestEvidence(input)], documents)); throw new Error('fixture-stop-after-custom-command'); };
+    await assert.rejects(f.engine.run(f.binding, f.context), /fixture-stop/);
+    const evidence = f.ledger.evidence(f.binding).find(row => row.kind === 'extension'); assert.equal(evidence.state, 'verified');
+    assert.equal(evidence.payload.pin, f.ledger.captured(f.run.id).toolManifest[0].id); assert.equal(evidence.result.result.structuredContent.exitCode, 0);
+    assert.deepEqual(f.operations.slice(0, 5), ['seed', 'export', 'list', 'run', 'export']); assert.equal(f.ledger.outputs(f.run.id)[1].step, 'implement');
+    f.ledger.suspend(f.binding); f.ledger.rebind(f.run.id, 2); f.binding.epoch = 2; f.run.epoch = 2;
+    await assert.rejects(f.engine.run(f.binding, f.context), /fixture-stop/); assert.equal(f.operations.filter(operation => operation === 'run').length, 2, 'completed custom step never repeats; subsequent repository check accounts for the second command');
+  } finally { f.cleanup(); }
+});
+
+test('captured MCP effect preserves uncertainty on reply loss and cannot resume or replay without verified recovery', async () => {
+  const pack = toolPackage({ name: 'queue', purpose: 'Read scoped queue', version: '1', license: 'MIT', dataCategories: ['issue.title'], mcp: {
+    endpoint: 'https://example.com/mcp', protocolVersion: '2026-07-28', tool: { name: 'queue', inputSchema: { type: 'object', properties: { title: { type: 'string' } }, required: ['title'], additionalProperties: false } } } });
+  let f, calls = 0, closed = 0;
+  f = fixture({}, [], () => true, false, pack, async installed => ({ endpoint: installed.definition.mcp.endpoint, protocolVersion: '2026-07-28',
+    async list() { return { tools: [installed.definition.mcp.tool] }; },
+    async call(_tool, input) { calls++; assert.deepEqual(input, { title: f.context.issue.title }); assert.equal(f.ledger.evidence(f.binding).at(-1).state, 'dispatched'); throw Object.assign(new Error('private-provider-detail'), { dispatched: true }); },
+    close() { closed++; } }));
+  try {
+    f.next = async (input, turn) => turn === 1 ? call(f, 'list', {}) : call(f, 'finish', output([latestEvidence(input)], documents));
+    await assert.rejects(f.engine.run(f.binding, f.context), /Tool execution failed/);
+    const evidence = f.ledger.evidence(f.binding).find(row => row.kind === 'extension'); assert.equal(evidence.state, 'uncertain'); assert.equal(calls, 1); assert.equal(closed, 1);
+    assert.equal(JSON.stringify(evidence).includes('private-provider-detail'), false);
+    f.ledger.suspend(f.binding); assert.throws(() => f.ledger.rebind(f.run.id, 2), /recovery unresolved/);
+    await assert.rejects(f.engine.run(f.binding, f.context), /pending outcome needs recovery/); assert.equal(calls, 1); assert.equal(f.ledger.status(f.run.id).qa, undefined);
+  } finally { f.cleanup(); }
+});
 
 test('captured skill selection excludes disabled instructions and tightening fences the returned tool before dispatch', async () => {
   const f = fixture({}, [], () => true, true);

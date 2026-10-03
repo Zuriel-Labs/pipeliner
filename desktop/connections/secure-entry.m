@@ -19,27 +19,35 @@ int main(int argc, const char *argv[]) {
       [NSApp run];
       return 0;
     }
+    BOOL mcp = argc >= 3 && strcmp(argv[1], "--mcp") == 0;
+    NSString *destination = mcp ? [NSString stringWithUTF8String:argv[2]] : nil;
+    if (mcp) {
+      NSURL *url = [NSURL URLWithString:destination];
+      if (destination.length > 2048 || ![url.scheme isEqualToString:@"https"] || !url.host.length || url.user || url.password || url.query || url.fragment) return 2;
+    }
     NSAlert *alert = [[NSAlert alloc] init];
-    [alert setMessageText:@"Connect Ollama Cloud"];
-    [alert setInformativeText:@"Enter your API key. Pipeliner sends it only to Ollama Cloud and stores it with macOS Keychain protection. Never paste keys into chat."];
+    [alert setMessageText:mcp ? @"Connect MCP tool server" : @"Connect Ollama Cloud"];
+    [alert setInformativeText:mcp ? [NSString stringWithFormat:@"Enter this server's bearer credential. Pipeliner sends it only to %@ and stores it with macOS Keychain protection. Never paste credentials into chat. Replacing it stops this server's active requests; old runs keep their captured connection version.", destination]
+      : @"Enter your API key. Pipeliner sends it only to Ollama Cloud and stores it with macOS Keychain protection. Never paste keys into chat."];
     [alert addButtonWithTitle:@"Connect"];
     [alert addButtonWithTitle:@"Cancel"];
     NSSecureTextField *field = [[NSSecureTextField alloc] initWithFrame:NSMakeRect(0, 0, 340, 32)];
-    [field setPlaceholderString:@"Ollama Cloud API key"];
-    [field setAccessibilityLabel:@"Ollama Cloud API key"];
+    [field setPlaceholderString:mcp ? @"MCP server bearer credential" : @"Ollama Cloud API key"];
+    [field setAccessibilityLabel:mcp ? @"MCP server bearer credential" : @"Ollama Cloud API key"];
     [alert setAccessoryView:field];
     [[alert window] setInitialFirstResponder:field];
     [NSApp activateIgnoringOtherApps:YES];
 #ifdef PIPELINER_QUALIFY
-    if ((argc == 2 || argc == 3) && strcmp(argv[1], "--qualify") == 0) {
+    int qualification = mcp ? 3 : 1;
+    if ((argc == qualification + 1 || argc == qualification + 2) && strcmp(argv[qualification], "--qualify") == 0) {
       dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
         [[alert window] makeFirstResponder:field];
         [[field currentEditor] insertText:@"synthetic-native-entry-only"];
         [[alert window] endEditingFor:field];
-        if (argc == 3) {
+        if (argc == qualification + 2) {
           NSBitmapImageRep *bitmap = [field bitmapImageRepForCachingDisplayInRect:field.bounds];
           [field cacheDisplayInRect:field.bounds toBitmapImageRep:bitmap];
-          [[bitmap representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:[NSString stringWithUTF8String:argv[2]] atomically:YES];
+          [[bitmap representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:[NSString stringWithUTF8String:argv[qualification + 1]] atomically:YES];
         }
         [[alert buttons][0] performClick:nil];
       });

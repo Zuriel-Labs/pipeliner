@@ -63,3 +63,16 @@ test('skill/tool names share one namespace; removal/disable/reinstall never revi
     assert.equal(f.tools.catalog().some(item => item.id === first.id), true);
   } finally { f.close(); }
 });
+test('MCP capture binds its credential epoch; anonymous, replaced and disconnected credentials cannot change an old run', () => {
+  const f = fixture(); let currentEpoch = 0;
+  try {
+    const pack = f.tools.install(mcp(), 0), epoch = endpoint => { assert.equal(endpoint, pack.definition.mcp.endpoint); return currentEpoch; };
+    const selected = f.tools.capture(view([pack.id]), { epoch }), authority = { tools: [pack.id], deniedTools: [], capabilities: pack.permissions };
+    assert.equal(selected.manifest[0].connectionEpoch, 0);
+    assert.equal(f.tools.assertCaptured(selected.manifest, selected.hash, authority, { epoch })[0].id, pack.id);
+    currentEpoch = 1; assert.throws(() => f.tools.assertCaptured(selected.manifest, selected.hash, authority, { epoch }), /connection changed/);
+    assert.throws(() => f.tools.assertCaptured(selected.manifest, selected.hash, authority), /connection changed/);
+    const next = f.tools.capture(view([pack.id]), { epoch }); currentEpoch = 2;
+    assert.throws(() => f.tools.assertCaptured(next.manifest, next.hash, authority, { epoch }), /connection changed/);
+  } finally { f.close(); }
+});

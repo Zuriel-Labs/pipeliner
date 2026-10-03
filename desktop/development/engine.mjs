@@ -29,7 +29,7 @@ const outputErrors = { 'Invalid Development output': 'invalid-development-output
   'Unknown Development document': 'unknown-development-document', 'Duplicate Development document': 'duplicate-development-document', 'Invalid Development finding': 'invalid-development-finding' };
 
 // Host orchestration only. Every executable source command stays in the existing worker.
-export function createDevelopmentEngine({ ledger, policy, supervisor, connections, skills, tools, connectMCP, onChange = () => {}, hostAuthority = () => true }) {
+export function createDevelopmentEngine({ ledger, policy, supervisor, connections, skills, tools, connectMCP, toolEpoch, onChange = () => {}, hostAuthority = () => true }) {
   return Object.freeze({
     async run(binding, { issue, source }, signal) {
       const boundTool = structuredClone(tool);
@@ -61,7 +61,7 @@ export function createDevelopmentEngine({ ledger, policy, supervisor, connection
         skillPrompt(grant);
         if (captured.toolManifest) {
           if (!tools) throw new Error('Captured tool storage unavailable. Restore exact pins before resuming.');
-          tools.assertCaptured(captured.toolManifest, captured.toolsHash, grant);
+          tools.assertCaptured(captured.toolManifest, captured.toolsHash, grant, { epoch: toolEpoch });
         }
         const state = ledger.status(binding.runId);
         if (state.epoch !== binding.epoch) throw new Error('Stale Development epoch');
@@ -159,7 +159,7 @@ export function createDevelopmentEngine({ ledger, policy, supervisor, connection
           }
           if (ledger.evidence(binding).some(value => ['prepared', 'dispatched', 'uncertain'].includes(value.state))) throw new Error('Development pending outcome needs recovery');
           if (step.kind === 'extension' && step.extension.kind !== 'skill') {
-            const pack = tools.assertCaptured(captured.toolManifest, captured.toolsHash, policy.worker.authority(repository, captured.run.policyRevision)).find(value => value.id === step.extension.pin);
+            const pack = tools.assertCaptured(captured.toolManifest, captured.toolsHash, policy.worker.authority(repository, captured.run.policyRevision), { epoch: toolEpoch }).find(value => value.id === step.extension.pin);
             if (!pack || pack.kind !== step.extension.kind) throw new Error('Captured tool step content unavailable.');
             if (pack.kind === 'command' && !hasPlan()) throw new Error('Research specification and design required before source execution');
             const input = boundToolInput(step.extension, pack, { issue, candidate: ledger.status(binding.runId).candidate, records: ledger.evidence(binding) });

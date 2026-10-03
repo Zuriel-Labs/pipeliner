@@ -87,7 +87,7 @@ async function validateTool(tool, signal) {
 
 // Fixed destination and host-only credential. No proxy, redirect, legacy downgrade, session, server request or replay.
 export function createMCPClient({ endpoint, local, credential = null, authorize }) {
-  const url = endpointURL(endpoint, local), requests = new Set(), operations = new Set(); let closed = false;
+  const url = endpointURL(endpoint, local), requests = new Set(), operations = new Set(), completions = new Set(); let closed = false;
   if (typeof authorize !== 'function' || credential !== null && (typeof credential !== 'string' || !/^[A-Za-z0-9._~+\/-]{8,4096}={0,2}$/.test(credential))) throw failure('connection unavailable');
   function fence(signal) {
     if (closed) throw failure('connection closed'); signal?.throwIfAborted(); endpointURL(endpoint, local);
@@ -101,12 +101,13 @@ export function createMCPClient({ endpoint, local, credential = null, authorize 
     const { signal: external, timeoutMs = 30000 } = options;
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 30000 || active >= 5) throw failure('capacity or deadline unavailable');
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), timeoutMs);
+    let finish; const done = new Promise(resolve => { finish = resolve; }); completions.add(done);
     operations.add(controller);
     const signal = external ? AbortSignal.any([external, controller.signal]) : controller.signal;
     active++; let dispatched = false;
     try { fence(signal); return await work(signal, () => { dispatched = true; }); }
     catch (error) { throw failure(closed ? 'connection closed' : external?.aborted ? 'cancelled' : controller.signal.aborted ? 'deadline exceeded' : /^MCP /.test(error?.message) ? error.message.slice(4, -1) : 'response invalid or unavailable', dispatched); }
-    finally { clearTimeout(timer); operations.delete(controller); active--; }
+    finally { clearTimeout(timer); operations.delete(controller); active--; completions.delete(done); finish(); }
   }
   async function rpc(method, params, headers, signal, markDispatched) {
     fence(signal); const target = await destination(url, local, signal); fence(signal);
@@ -210,6 +211,6 @@ export function createMCPClient({ endpoint, local, credential = null, authorize 
       if (tool.outputSchema !== undefined && (!Object.hasOwn(result, 'structuredContent') || !await checkSchema(tool.outputSchema, result.structuredContent, { signal }))) throw failure('output invalid');
       fence(signal); return result;
     }, options); },
-    close() { closed = true; for (const controller of operations) controller.abort(); for (const request of requests) request.destroy(); },
+    async close() { closed = true; for (const controller of operations) controller.abort(); for (const request of requests) request.destroy(); await Promise.all([...completions]); },
   });
 }

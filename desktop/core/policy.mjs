@@ -7,16 +7,16 @@ import { protectedFile } from './storage.mjs';
 const digest = value => createHash('sha256').update(canonicalJSON(value)).digest('hex');
 const id = value => typeof value === 'string' && /^[A-Za-z][A-Za-z0-9_-]{0,95}$/.test(value) && !['constructor', 'prototype'].includes(value);
 const checkedId = value => { if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(value)) throw new Error('Invalid command identity'); };
-const empty = () => ({ schemaVersion: 2, defaults, host: {}, global: {}, repositories: {} });
+const empty = () => ({ schemaVersion: 3, defaults, host: {}, global: {}, repositories: {} });
 function catalogData(value) {
   canonicalJSON(value);
-  record(value, ['repositories', 'capabilities', 'maxConcurrency', 'background', 'connections', 'developers', 'extensions'], ['resources', 'checks', 'updateSources', 'notifications']);
+  record(value, ['repositories', 'capabilities', 'maxConcurrency', 'background', 'connections', 'developers', 'extensions'], ['resources', 'checks', 'updateSources', 'notifications', 'tools']);
   const ids = list => Array.isArray(list) && list.length <= 1000 && list.every(id) && new Set(list).size === list.length;
   if (!ids(value.repositories) || !Array.isArray(value.capabilities) || !value.capabilities.every(v => capabilityNames.includes(v))
     || new Set(value.capabilities).size !== value.capabilities.length || !Number.isSafeInteger(value.maxConcurrency) || value.maxConcurrency < 1 || value.maxConcurrency > 5
     || typeof value.background !== 'boolean' || (value.notifications !== undefined && typeof value.notifications !== 'boolean')) throw new Error('Invalid host capability catalog');
   for (const key of ['resources', 'checks', 'updateSources']) if (value[key] !== undefined && !ids(value[key])) throw new Error('Invalid capability references');
-  for (const key of ['connections', 'developers', 'extensions']) {
+  for (const key of ['connections', 'developers', 'extensions', ...(value.tools !== undefined ? ['tools'] : [])]) {
     if (!Array.isArray(value[key]) || value[key].length > 1000 || new Set(value[key].map(v => v.id)).size !== value[key].length) throw new Error('Invalid capability catalog');
     for (const item of value[key]) {
       if (!id(item.id)) throw new Error('Invalid capability identity');
@@ -97,7 +97,7 @@ export function openPolicyStore(directory, { catalog, clock = Date.now, inspecto
       if (!['host', 'global', 'repository'].includes(scope) || (scope === 'repository') !== (target !== null)) throw new Error('Invalid policy scope or target');
       if (!request.changes || Array.isArray(request.changes) || !Array.isArray(request.reset) || new Set(request.reset).size !== request.reset.length) throw new Error('Invalid policy changes');
       const document = JSON.parse(canonicalJSON(currentVersion.document));
-      document.schemaVersion = 2; document.defaults = defaults;
+      document.schemaVersion = 3; document.defaults = defaults;
       if (scope === 'repository') document.repositories[target] ??= {};
       const values = scope === 'repository' ? document.repositories[target] : document[scope];
       let changes = request.changes, reset = request.reset;
@@ -131,7 +131,7 @@ export function openPolicyStore(directory, { catalog, clock = Date.now, inspecto
           if (value.some(c => !current.capabilities.includes(c))) throw new Error('Host capability unavailable');
           if (key === 'permissions.grants' && value.some(c => !after['permissions.ceiling'].includes(c))) throw new Error('Repository permission exceeds host ceiling');
         }
-        const referenceLists = { 'permissions.resources': 'resources', 'skills.extensions': 'extensions', 'skills.disabled': 'extensions', 'testing.requiredChecks': 'checks', 'delivery.output': 'resources', 'updates.source': 'updateSources' };
+        const referenceLists = { 'permissions.resources': 'resources', 'skills.extensions': 'extensions', 'skills.disabled': 'extensions', 'tools.extensions': 'tools', 'tools.disabled': 'tools', 'testing.requiredChecks': 'checks', 'delivery.output': 'resources', 'updates.source': 'updateSources' };
         if (Object.hasOwn(referenceLists, key)) for (const ref of Array.isArray(value) ? value : value === null ? [] : [value]) {
           if (!(current[referenceLists[key]] ?? []).some(item => (typeof item === 'string' ? item : item.id) === ref)) throw new Error('Referenced capability unavailable');
         }
@@ -221,6 +221,7 @@ export function openPolicyStore(directory, { catalog, clock = Date.now, inspecto
             for (const resource of before['permissions.resources']) if (!after['permissions.resources'].includes(resource) || !(current.resources ?? []).includes(resource)) revoke.run(repository, 'resource', resource, revision);
             for (const provider of ['github', 'codex', 'ollama']) if (before[`connections.${provider}`] && after[`connections.${provider}`] === null) revoke.run(repository, 'connection', before[`connections.${provider}`], revision);
             for (const extension of after['skills.disabled']) if (!before['skills.disabled'].includes(extension)) revoke.run(repository, 'extension', extension, revision);
+            for (const tool of after['tools.disabled']) if (!before['tools.disabled'].includes(tool)) revoke.run(repository, 'tool', tool, revision);
             if (before['skills.bundledEnabled'] && !after['skills.bundledEnabled']) revoke.run(repository, 'bundled', 'bundled', revision);
             if (before['agents.takeover'] && !after['agents.takeover']) revoke.run(repository, 'takeover', 'automatic', revision);
             for (const dev of before['agents.fallbacks']) if (!after['agents.fallbacks'].includes(dev)) revoke.run(repository, 'fallback', dev, revision);
@@ -244,7 +245,7 @@ export function openPolicyStore(directory, { catalog, clock = Date.now, inspecto
         const revocations = db.prepare('SELECT kind,reference FROM policy_revocations WHERE repository=? AND revision>?').all(target, captured.revision);
         const revoked = (kind, reference) => revocations.some(r => r.kind === kind && r.reference === reference);
         const old = rawValues(captured.document, target), active = rawValues(latest.document, target);
-        const stillBound = (key, ref) => ref && captured.bindings[key].some(b => b.id === ref && current[key].some(n => n.id === ref && canonicalJSON(n) === canonicalJSON(b)));
+        const stillBound = (key, ref) => ref && (captured.bindings[key] ?? []).some(b => b.id === ref && (current[key] ?? []).some(n => n.id === ref && canonicalJSON(n) === canonicalJSON(b)));
         const connectionAllowed = ref => !revoked('connection', ref) && stillBound('connections', ref) && current.connections.some(c => c.id === ref && c.healthy !== false && (!target || c.repositories.includes(target)));
         const connections = ['github', 'codex', 'ollama'].map(provider => old[`connections.${provider}`]).filter(connectionAllowed);
         const dev = old['agents.dev'];
@@ -255,6 +256,8 @@ export function openPolicyStore(directory, { catalog, clock = Date.now, inspecto
           fallbacks: old['agents.fallbacks'].filter(dev => !revoked('fallback', dev) && devAllowed(dev)), takeover: old['agents.takeover'] && active['agents.takeover'] && !revoked('takeover', 'automatic'),
           extensions: old['skills.extensions'].filter(ref => !revoked('extension', ref) && !old['skills.disabled'].includes(ref) && !active['skills.disabled'].includes(ref) && stillBound('extensions', ref)),
           deniedExtensions: current.extensions.filter(item => old['skills.disabled'].includes(item.id) || active['skills.disabled'].includes(item.id) || revoked('extension', item.id)).map(item => item.id),
+          tools: old['tools.extensions'].filter(ref => !revoked('tool', ref) && !old['tools.disabled'].includes(ref) && !active['tools.disabled'].includes(ref) && stillBound('tools', ref)),
+          deniedTools: (current.tools ?? []).filter(item => old['tools.disabled'].includes(item.id) || active['tools.disabled'].includes(item.id) || revoked('tool', item.id)).map(item => item.id),
           bundledSkills: old['skills.bundledEnabled'] && active['skills.bundledEnabled'] && !revoked('bundled', 'bundled'),
           intake: { mode: old['intake.mode'] === active['intake.mode'] && !revoked('intake', old['intake.mode']) ? old['intake.mode'] : 'pm',
             agentCreation: old['intake.agentCreation'] && active['intake.agentCreation'] && !revoked('intake', 'agentCreation') } });

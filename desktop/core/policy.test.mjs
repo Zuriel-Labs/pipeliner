@@ -21,7 +21,7 @@ test('additive scheduling schema reads immutable legacy policy hashes and upgrad
   const input = old.control.capture({ commandId: 'legacy-edit', conversationId: 'legacy-chat', target: repository, text: 'Use a 45 minute interval.' });
   const p = old.control.prepare({ inputId: input.id, requestId: 'legacy-preview', target: repository, scope: 'repository', changes: { 'scheduling.intervalMinutes': 45 }, reset: [] });
   old.control.apply({ commandId: 'legacy-apply', proposalId: p.id, inputId: p.inputId, hash: p.hash, conversationId: 'legacy-chat', target: repository });
-  assert.equal(old.worker.read(repository).schemaVersion, 2); assert.equal(old.worker.read(repository, 0).hash, hash); assert.equal(old.worker.read(repository, 0).values['scheduling.enabled'].value, false);
+  assert.equal(old.worker.read(repository).schemaVersion, 3); assert.equal(old.worker.read(repository, 0).hash, hash); assert.equal(old.worker.read(repository, 0).values['scheduling.enabled'].value, false);
   assert.equal(old.worker.read(repository).values['scheduling.intervalMinutes'].value, 45);
 });
 
@@ -32,6 +32,35 @@ test('calendar policy requires explicit complete named-zone configuration before
   f.apply(f.proposal({ 'scheduling.enabled': true, 'scheduling.mode': 'calendar', 'scheduling.calendar': { days: [1, 2, 3, 4, 5], time: '09:00' }, 'scheduling.timezone': 'America/Chicago' }));
   assert.equal(f.store.worker.read(repository).values['background.enabled'].value, false);
   assert.equal(f.store.worker.read(repository).values['intake.trigger'].value, 'pm');
+});
+
+test('tools have empty safe defaults; exact legacy version two survives reopen until PM apply', t => {
+  const f = fixture(t); f.store.close();
+  const settings = settingsSchema(), oldDefaults = Object.fromEntries(settings.filter(field => !field.id.startsWith('tools.')).map(field => [field.id, field.defaultValue]));
+  assert.equal(createHash('sha256').update(canonicalJSON(oldDefaults)).digest('hex'), 'df27c746de7ab30bd9ec014966e681844eb1f4d29dc5bbc57e6a2d4c4a646883', 'defaults match the actual committed schema-two candidate');
+  const document = { schemaVersion: 2, defaults: oldDefaults, host: {}, global: {}, repositories: {} }, hash = createHash('sha256').update(canonicalJSON({ document, catalog: facts() })).digest('hex');
+  const db = new DatabaseSync(join(f.directory, 'policy.sqlite')); db.exec('DROP TRIGGER immutable_policy_update'); db.prepare('UPDATE policy_versions SET document=?,hash=? WHERE revision=0').run(canonicalJSON(document), hash); db.close();
+  const reopened = f.open(); assert.equal(reopened.worker.read(repository).hash, hash); assert.deepEqual(reopened.worker.read(repository).values['tools.extensions'].value, []);
+  assert.deepEqual(reopened.worker.authority(repository, 0).tools, []); assert.equal(reopened.worker.authority(repository, 0).capabilities.includes('extension.invoke'), false);
+  const input = reopened.control.capture({ commandId: 'v2-edit', conversationId: 'v2-chat', target: repository, text: 'Change interval to 35 minutes.' });
+  const preview = reopened.control.prepare({ inputId: input.id, requestId: 'v2-preview', scope: 'repository', target: repository, changes: { 'scheduling.intervalMinutes': 35 }, reset: [] });
+  reopened.control.apply({ commandId: 'v2-apply', proposalId: preview.id, hash: preview.hash, inputId: input.id, conversationId: 'v2-chat', target: repository });
+  assert.equal(reopened.worker.read(repository).schemaVersion, 3); assert.equal(reopened.worker.read(repository, 0).hash, hash);
+});
+
+test('tool invocation needs captured pins and both permission scopes; disabling is durable across re-enable/restart', t => {
+  const f = fixture(t), catalog = facts(), pin = 'tool-' + 'a'.repeat(40);
+  catalog.capabilities.push('extension.invoke'); catalog.tools = [{ id: pin, digest: 'b'.repeat(64) }]; f.setCatalog(catalog);
+  assert.throws(() => f.proposal({ 'tools.extensions': ['unknown-tool'] }), /Referenced capability/);
+  assert.throws(() => f.proposal({ 'permissions.grants': ['extension.invoke'] }), /ceiling/);
+  f.apply(f.proposal({ 'permissions.ceiling': ['workspace.read', 'workspace.write', 'worker.exec', 'extension.invoke'] }, 'host', null));
+  f.apply(f.proposal({ 'permissions.grants': ['workspace.read', 'workspace.write', 'worker.exec', 'extension.invoke'], 'tools.extensions': [pin] }));
+  const captured = f.store.worker.read(repository).revision;
+  assert.deepEqual(f.store.worker.authority(repository, captured).tools, [pin]); assert.deepEqual(f.store.worker.authority(repository, 0).tools, []);
+  f.apply(f.proposal({ 'tools.disabled': [pin] })); f.apply(f.proposal({ 'tools.disabled': [] }));
+  const reopened = f.open(); assert.deepEqual(reopened.worker.authority(repository, captured).tools, []); assert.deepEqual(reopened.worker.authority(repository, captured).deniedTools, [pin]);
+  const current = reopened.worker.read(repository).revision; assert.deepEqual(reopened.worker.authority(repository, current).tools, [pin]);
+  catalog.tools[0].digest = 'c'.repeat(64); f.setCatalog(catalog); assert.deepEqual(reopened.worker.authority(repository, current).tools, []);
 });
 const facts = () => ({ repositories: [repository, other], capabilities: ['workspace.read', 'workspace.write', 'worker.exec', 'github.read'],
   maxConcurrency: 1, background: false, connections: [{ id: 'github-one', provider: 'github', repositories: [repository, other] }, { id: 'codex-one', provider: 'codex', repositories: [repository, other] }],

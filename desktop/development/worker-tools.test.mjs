@@ -41,3 +41,16 @@ test('helper rejects symlink and hardlink exports; command output cannot forge h
     rmSync(join(f.directory, 'escape.mjs')); linkSync(join(f.directory, 'app.mjs'), join(f.directory, 'linked.mjs')); assert.equal(f.invoke({ operation: 'export' }).ok, false);
   } finally { f.cleanup(); }
 });
+
+test('typed custom command input stays JSON in an owned file, never shell interpolation; input file is removed', () => {
+  const f = fixture();
+  try {
+    const title = "$(touch escaped); 'quoted'; newline\nsecond line";
+    const executable = "'" + process.execPath.replaceAll("'", "'\\''") + "'";
+    const result = f.invoke({ operation: 'run', command: executable + " -e 'const fs=require(\"fs\"); const path=process.env.PIPELINER_STEP_INPUT_FILE; console.log(JSON.stringify({path,input:JSON.parse(fs.readFileSync(path,\"utf8\"))}));'", timeoutMs: 1000, input: { title } });
+    assert.equal(result.ok, true); assert.equal(result.result.exitCode, 0); const readback = JSON.parse(result.result.output.trim());
+    assert.deepEqual(readback.input, { title }); assert.match(readback.path, /pipeliner-step-[^/]+\/input.json$/);
+    assert.throws(() => readFileSync(readback.path), { code: 'ENOENT' }); assert.throws(() => readFileSync(join(f.directory, 'escaped')), { code: 'ENOENT' });
+    assert.equal(f.invoke({ operation: 'run', command: 'true', timeoutMs: 1000, input: JSON.parse('{"__proto__":{}}') }).ok, false);
+  } finally { f.cleanup(); }
+});

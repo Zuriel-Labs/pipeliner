@@ -12,7 +12,7 @@ import { createDevelopmentEngine } from './engine.mjs';
 
 const hash = value => createHash('sha256').update(typeof value === 'string' ? value : canonicalJSON(value)).digest('hex');
 const file = content => ({ path: 'app.mjs', mode: '100644', content: Buffer.from(content).toString('base64') });
-function fixture(extraLimits = {}, fallbackIds = []) {
+function fixture(extraLimits = {}, fallbackIds = [], hostAuthority = () => true) {
   const issue = { number: 1, title: 'Change fixture value to two', body: 'A bounded fixture.' };
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-development-engine-'))), source = [file('export const value = 1;\n')], candidate = { sourceCommit: 'a'.repeat(40), gitTree: sourceTree(source) };
   const run = { id: 'run-one', repository: 'repo-one', issue: 1, dev: 'dev-one', epoch: 1, policyRevision: 1, policyHash: 'b'.repeat(64), createdAt: Date.now(),
@@ -38,7 +38,7 @@ function fixture(extraLimits = {}, fallbackIds = []) {
   const policy = { runtime: { status: () => run }, worker: { authority: () => grant } };
   const connections = { acquireProvider: async (id, model) => { assert.equal(id, 'ollama'); assert.equal(model, 'test-model'); lease = makeLease(); return lease; } };
   return { ledger, source, binding, run, grant, permissions, operations, get lease() { return lease; }, set next(value) { next = value; }, get turns() { return turns; },
-    engine: createDevelopmentEngine({ ledger, policy, supervisor, connections }), context: { issue, source },
+    engine: createDevelopmentEngine({ ledger, policy, supervisor, connections, hostAuthority }), context: { issue, source },
     cleanup() { ledger.close(); rmSync(root, { recursive: true }); } };
 }
 const output = (evidence, documents = []) => ({ outcome: 'success', summary: 'Scoped fixture evidence.', evidence, documents, findings: [] });
@@ -46,6 +46,18 @@ const call = (f, operation, payload, epoch = f.binding.epoch) => ({ content: '',
   name: 'pipeliner_tool', arguments: { ...f.binding, epoch, operation, payload } } }] });
 const latestEvidence = input => JSON.parse(input.messages.filter(message => message.role === 'tool').at(-1).content).evidenceId;
 const documents = ['research', 'specification', 'design'].map(kind => ({ kind, title: kind, paragraphs: ['Inspect the fixture; change one value; verify its check.'] }));
+
+test('host revocation fences the next provider or workspace effect without resetting captured usage', async () => {
+  for (const before of [true, false]) {
+    let allowed = !before; const f = fixture({}, [], () => allowed);
+    try {
+      f.next = async () => { allowed = false; return call(f, 'list', {}); };
+      await assert.rejects(f.engine.run(f.binding, f.context), /host execution/);
+      assert.equal(f.turns, before ? 0 : 1); assert.deepEqual(f.operations, before ? [] : ['seed', 'export']);
+      assert.equal(f.ledger.status(f.run.id).turns, before ? 0 : 1);
+    } finally { f.cleanup(); }
+  }
+});
 
 test('classified provider failure retries inside the same operation and records unavailable charged usage', async () => {
   const f = fixture();

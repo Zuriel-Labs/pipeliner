@@ -9,6 +9,13 @@ const moduleAt = file => import(pathToFileURL(path.join(__dirname, file)).href);
 const fixtureKey = 'synthetic-native-entry-only';
 let nativeResult, workspaceFixture, folderFailure = null, folderCancelled = false;
 const issueFixtures = new Map();
+// Only the explicit qualification launcher uses this adapter. No macOS authorization is fabricated.
+exports.backgroundNative = () => {
+  let status = 'not-registered', registrations = 0, removals = 0;
+  return { inspect: () => ({ qualified: true, status }), async register() { registrations++; status = 'enabled'; },
+    async unregister() { removals++; status = 'not-registered'; }, async openSettings() {},
+    fixture: { status(value) { status = value; }, counts: () => ({ registrations, removals }) } };
+};
 exports.adapters = async ({ directory, helper, nativeKeyEntry }) => {
   let entries = 0;
   const { ollamaAdapter } = await moduleAt('../connections/providers.mjs');
@@ -57,9 +64,9 @@ exports.workspaceOptions = async ({ directory, helper, nativeFolderEntry }) => {
         project.fields = [...project.fields.filter(item => item.id !== changed.id), changed]; return copy(changed); } } };
 };
 
-exports.run = async ({ window, directory, vault, manager, workspaces, issues, pipelines, policy, development, scheduler, scheduling, schedulingChannel, developmentChannel, workspaceChannel, issueChannel, pipelineChannel, channel, windowReadyMs }) => {
+exports.run = async ({ window, directory, vault, manager, workspaces, issues, pipelines, policy, development, scheduler, scheduling, background, backgroundHost, backgroundNative, attachWindow, backgroundChannel, schedulingChannel, developmentChannel, workspaceChannel, issueChannel, pipelineChannel, channel, windowReadyMs }) => {
   const started = performance.now(), checks = [], measurements = [];
-  const schedulingScope = process.argv.includes('--qualify-scheduling'), developmentScope = process.argv.includes('--qualify-development'), pipelineScope = process.argv.includes('--qualify-pipelines'), issueScope = schedulingScope || developmentScope || pipelineScope || process.argv.includes('--qualify-issues');
+  const backgroundScope = process.argv.includes('--qualify-background'), schedulingScope = process.argv.includes('--qualify-scheduling'), developmentScope = process.argv.includes('--qualify-development'), pipelineScope = process.argv.includes('--qualify-pipelines'), issueScope = backgroundScope || schedulingScope || developmentScope || pipelineScope || process.argv.includes('--qualify-issues');
   const js = code => window.webContents.executeJavaScript(code);
   const wait = async predicate => { const until = Date.now() + 10000; while (!await predicate()) { if (Date.now() >= until) throw new Error('qualification-wait-timeout'); await new Promise(resolve => setTimeout(resolve, 50)); } };
   let pipelineControl;
@@ -457,6 +464,61 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
         window.webContents.setZoomFactor(1); window.setSize(1180, 840);
       });
     }
+    if (backgroundScope) {
+      const chat = async text => { await js(`document.getElementById('chat-nav').click();document.getElementById('prompt').value=${JSON.stringify(text)};document.getElementById('composer').requestSubmit()`); await wait(() => !background.status().busy); };
+      await check('background-frame-context-host-scope-fences', async () => {
+        const frame = window.webContents.mainFrame, payload = { operation: 'prepare', changes: { 'background.enabled': true }, contextRevision: background.status().revision };
+        assert.throws(() => backgroundChannel.dispatch({ sender: {}, senderFrame: frame }, payload));
+        assert.throws(() => backgroundChannel.dispatch({ sender: window.webContents, senderFrame: frame }, { ...payload, contextRevision: payload.contextRevision - 1 }));
+        assert.throws(() => backgroundChannel.dispatch({ sender: window.webContents, senderFrame: frame }, { ...payload, repository: 'R1' }));
+        await chat('"Enable background operation"'); assert.equal(background.status().preview, null);
+      });
+      await check('background-default-off-chat-preview-cancel', async () => {
+        assert.equal(backgroundHost.status().configured, false); assert.equal(backgroundHost.status().startAtLogin, false); assert.equal(backgroundNative.fixture.counts().registrations, 0);
+        await chat('Enable background operation'); await wait(() => Boolean(background.status().preview)); assert.equal(backgroundHost.status().configured, false);
+        await chat('Cancel this background change'); await wait(() => !background.status().preview); assert.equal(backgroundNative.fixture.counts().registrations, 0);
+      });
+      await check('background-chat-and-keyboard-apply-login-independent', async () => {
+        await chat('Enable background operation'); await wait(() => Boolean(background.status().preview));
+        await js("document.getElementById('settings-nav').click();document.getElementById('settings-background').click();document.getElementById('background-apply').focus()");
+        window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+        await wait(() => backgroundHost.status().effective); assert.equal(backgroundHost.status().startAtLogin, false);
+        await chat('Start at login'); await wait(() => Boolean(background.status().preview)); await chat('Apply this background change'); await wait(() => backgroundHost.status().startAtLogin);
+        assert.equal(backgroundNative.fixture.counts().registrations, 1);
+        const { openPolicyStore } = await moduleAt('../core/policy.mjs'), reopened = openPolicyStore(directory, { catalog: () => ({ repositories: [], capabilities: [], maxConcurrency: 1, background: true, connections: [], developers: [], extensions: [] }) });
+        try { assert.equal(reopened.worker.read(null).values['background.startAtLogin'].value, true); } finally { reopened.close(); }
+      });
+      await check('background-actual-window-close-reopen-same-host-and-owner', async () => {
+        const first = window, pid = process.pid, revision = policy.worker.read(null).revision;
+        const closed = new Promise(resolve => first.once('closed', resolve)); first.close(); await closed;
+        assert.equal(first.isDestroyed(), true); assert.equal(backgroundHost.status().visible, false); assert.equal(backgroundHost.executionAllowed(), true);
+        const [reopened, duplicate] = await Promise.all([attachWindow(), attachWindow()]); assert.equal(reopened, duplicate);
+        window = reopened; await wait(() => js("Boolean(document.getElementById('background-form'))"));
+        assert.equal(process.pid, pid); assert.equal(policy.worker.read(null).revision, revision); assert.equal(backgroundNative.fixture.counts().registrations, 1);
+        assert.equal(backgroundHost.status().visible, true); assert.equal(window.webContents.getLastWebPreferences().sandbox, true);
+        assert.throws(() => backgroundChannel.dispatch({ sender: first.webContents, senderFrame: null }, { operation: 'apply', contextRevision: background.status().revision }));
+        const { openExecutionSupervisor } = await moduleAt('../core/execution.mjs'); assert.throws(() => openExecutionSupervisor(directory, { store: policy }), /owner|locked|already/i);
+      });
+      await check('background-OS-revocation-sleep-wake-no-auto-registration', async () => {
+        backgroundNative.fixture.status('requires-approval'); backgroundHost.setVisible(false); assert.equal(backgroundHost.executionAllowed(), false);
+        await backgroundHost.refresh(); await backgroundHost.refresh(); assert.equal(backgroundNative.fixture.counts().registrations, 1);
+        backgroundHost.setVisible(true); await backgroundHost.suspend(); assert.equal(backgroundHost.executionAllowed(), false);
+        await backgroundHost.wake(); assert.equal(backgroundHost.executionAllowed(), true); assert.equal(backgroundHost.status().effective, false);
+        backgroundNative.fixture.status('enabled'); await backgroundHost.refresh(); assert.equal(backgroundNative.fixture.counts().registrations, 1);
+      });
+      await check('background-disable-removes-service-and-keeps-paused-work', async () => {
+        await chat('Disable background operation'); await wait(() => Boolean(background.status().preview)); await chat('Apply this background change');
+        await wait(() => !backgroundHost.status().configured); assert.equal(backgroundHost.status().startAtLogin, false); assert.equal(backgroundHost.status().authorization, 'not-registered');
+        assert.equal(backgroundNative.fixture.counts().removals, 1); assert.equal(backgroundHost.status().cleanupPending, false); assert.equal(development.status().run, null);
+      });
+      await check('background-Settings-unsaved-draft-labels-narrow-zoom', async () => {
+        await js("document.getElementById('settings-nav').click();document.getElementById('settings-background').click();document.getElementById('background-login').focus();document.getElementById('background-login').value='true'");
+        background.sync(); await new Promise(resolve => setTimeout(resolve, 50)); assert.equal(await js("document.getElementById('background-login').value"), 'true'); assert.equal(backgroundHost.status().startAtLogin, false);
+        assert.equal(await js("Array.from(document.querySelectorAll('#background-settings select')).every(input=>Array.from(document.querySelectorAll('#background-settings label')).some(label=>label.htmlFor===input.id))"), true);
+        for (const zoom of [1, 2]) { window.setSize(420, 760); window.webContents.setZoomFactor(zoom); await new Promise(resolve => setTimeout(resolve, 100)); assert.equal(await js('document.documentElement.scrollWidth<=innerWidth'), true); }
+        window.webContents.setZoomFactor(1); window.setSize(1180, 840);
+      });
+    }
     await check('themes-narrow-zoom-high-contrast-reduced-motion', async () => {
       if (developmentScope) await js("document.getElementById('settings-nav').click();document.getElementById('settings-agents').click()");
       for (const theme of ['light', 'dark']) for (const view of ['repositories', 'issues', 'settings']) { nativeTheme.themeSource = theme; await js(`document.getElementById('${view}-nav').click()`); assert.equal(await js('document.documentElement.scrollWidth<=innerWidth'), true); }
@@ -474,6 +536,7 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
       if (pipelineScope) await js("document.getElementById('settings-nav').click();document.getElementById('settings-pipelines').click();document.getElementById('pipeline-step-1').open=true;window.scrollTo(0,document.getElementById('pipeline-draft').offsetTop-100)");
       if (developmentScope) await js("document.getElementById('settings-nav').click();document.getElementById('settings-agents').click();document.getElementById('dev-starter-skills').open=true");
       if (schedulingScope) await js("document.getElementById('settings-nav').click();document.getElementById('settings-schedule').click();window.scrollTo(0,0)");
+      if (backgroundScope) await js("document.getElementById('settings-nav').click();document.getElementById('settings-background').click();window.scrollTo(0,0)");
       await js('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))'); await new Promise(resolve => setTimeout(resolve, 100));
       if (developmentScope) assert.equal(await js("!document.getElementById('settings-view').hidden && !document.getElementById('agent-settings').hidden && document.getElementById('settings-nav').getAttribute('aria-current')==='page'"), true);
       assert.equal(await js("getComputedStyle(document.body).backgroundColor==='rgb(16, 23, 34)'"), true);
@@ -492,9 +555,9 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
       assert.equal(folderCancelled, true);
     });
   } catch { const snapshot = workspaces.status(); workspaceEvidence = { checkpoint: workspaceStage, busy: snapshot.busy, state: snapshot.draft?.state, error: snapshot.draft?.error, folderSelected: Boolean(snapshot.draft?.folder), projectCount: snapshot.draft?.projects?.length ?? 0 }; process.exitCode = 1; }
-  const report = { desktopQualification: schedulingScope ? 'deterministic-scheduling' : developmentScope ? 'development-controls' : pipelineScope ? 'versioned-pipeline-editing' : 'protected-issue-intake', checks, passed: checks.length === (schedulingScope ? 23 : developmentScope ? 22 + (pipelineScope ? 6 : 0) : pipelineScope ? 24 : issueScope ? 18 : 21) && checks.every(c => c.passed), milliseconds: Math.round(performance.now() - started), windowReadyFromMainEntryMs: windowReadyMs, measurements,
+  const report = { desktopQualification: backgroundScope ? 'optional-background-host' : schedulingScope ? 'deterministic-scheduling' : developmentScope ? 'development-controls' : pipelineScope ? 'versioned-pipeline-editing' : 'protected-issue-intake', checks, passed: checks.length === (backgroundScope ? 25 : schedulingScope ? 23 : developmentScope ? 22 + (pipelineScope ? 6 : 0) : pipelineScope ? 24 : issueScope ? 18 : 21) && checks.every(c => c.passed), milliseconds: Math.round(performance.now() - started), windowReadyFromMainEntryMs: windowReadyMs, measurements,
     versions: { electron: process.versions.electron, chromium: process.versions.chrome, node: process.versions.node, sqlite: process.versions.sqlite, os: process.platform, architecture: process.arch },
-    nativeEvidence, workspaceEvidence, folderFailure, folderCancelled, synthetic: 'Synthetic GitHub/model replies and first folder selection; actual native secure field, folder-panel cancellation, protected storage, local Git and own window',
+    nativeEvidence, workspaceEvidence, folderFailure, folderCancelled, synthetic: 'Synthetic GitHub/model replies, first folder selection and optional background-service adapter; actual native secure field, folder-panel cancellation, protected storage, local Git and own window. Actual SMAppService/bootstrap is qualified separately.',
     notRun: issueScope ? ['Unchanged Codex unauthenticated discovery', 'Unchanged public GitHub App qualification', 'Unchanged invalid Cloud key probe'] : [],
     pending: ['Human native folder selection', 'Authenticated provider/GitHub PM journeys', 'Human task observation', 'Screen reader', 'Windows/Linux', 'Stable signed package storage identity'], captureAvailable: Boolean(capture),
     nativeCaptureAvailable: existsSync(path.join(directory, 'secure-field.png')), qaCaptureAvailable: existsSync(path.join(directory, 'qa-capture.png')) };

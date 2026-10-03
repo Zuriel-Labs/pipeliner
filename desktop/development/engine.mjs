@@ -27,7 +27,7 @@ const outputErrors = { 'Invalid Development output': 'invalid-development-output
   'Unknown Development document': 'unknown-development-document', 'Duplicate Development document': 'duplicate-development-document', 'Invalid Development finding': 'invalid-development-finding' };
 
 // Host orchestration only. Every executable source command stays in the existing worker.
-export function createDevelopmentEngine({ ledger, policy, supervisor, connections, onChange = () => {} }) {
+export function createDevelopmentEngine({ ledger, policy, supervisor, connections, onChange = () => {}, hostAuthority = () => true }) {
   return Object.freeze({
     async run(binding, { issue, source }, signal) {
       const boundTool = structuredClone(tool);
@@ -45,6 +45,7 @@ export function createDevelopmentEngine({ ledger, policy, supervisor, connection
       if (!developer || run.dev !== developer.id) throw new Error('Development captured Dev assignment changed');
       const current = (permissions = [], dispatch = false) => {
         signal?.throwIfAborted(); lease?.check();
+        if (!hostAuthority()) throw new Error('Development host execution is unavailable.');
         const run = policy.runtime.status(repository), grant = policy.worker.authority(repository, captured.run.policyRevision);
         if (!run || run.id !== binding.runId || run.epoch !== binding.epoch || run.control !== 'running' || run.dev !== developer.id || !runtimeDeveloperAllowed(grant, run.dev)
           || !grant.bundledSkills || !grant.connections.includes(developer.connection)

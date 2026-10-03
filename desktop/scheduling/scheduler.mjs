@@ -5,7 +5,7 @@ import { conditionalReads } from './read-cache.mjs';
 
 // One host queue serializes eligibility and start dispatch; Development owns actual execution.
 export function createScheduler({ store, policy, development, connections, nextCalendar, api = github, clock = Date.now,
-  onChange = () => {}, timers = { set: setTimeout, clear: clearTimeout } }) {
+  onChange = () => {}, timers = { set: setTimeout, clear: clearTimeout }, hostAuthority = () => true }) {
   let pending = null, timer, closed = false, suspended = false, checking;
   const controller = new AbortController();
   const caches = new Map();
@@ -31,7 +31,7 @@ export function createScheduler({ store, policy, development, connections, nextC
     }
   }
   async function arm() {
-    timers.clear(timer); timer = undefined; if (closed || suspended) return;
+    timers.clear(timer); timer = undefined; if (closed || suspended || !hostAuthority()) return;
     const due = store.workspaces().map(workspace => state(workspace.id)?.nextAt).filter(value => value !== null && value !== undefined);
     if (!due.length) return;
     timer = timers.set(() => { void check('timer').catch(() => {}); }, Math.max(1, Math.min(2147483647, Math.min(...due) - now()))); timer?.unref?.();
@@ -61,9 +61,11 @@ export function createScheduler({ store, policy, development, connections, nextC
     finally { if (app) app.close(); if (project && project !== app) project.close(); if (current.pending?.kind !== 'start') current.pending = null; save(workspace.id, current); }
   }
   async function perform(reason, repository) {
+    if (!hostAuthority()) return;
     await refresh(); const candidates = [];
     for (const workspace of store.workspaces()) {
       checking.signal.throwIfAborted(); controller.signal.throwIfAborted(); const old = state(workspace.id), view = policy.worker.read(workspace.id);
+      if (!hostAuthority()) return;
       if (repository && workspace.id !== repository || reason !== 'manual' && !old.config['scheduling.enabled']
         || reason === 'timer' && (old.nextAt === null || old.nextAt > now())) continue;
       const candidate = await inspect(workspace, view, old, reason); if (candidate) candidates.push(candidate);
@@ -71,6 +73,7 @@ export function createScheduler({ store, policy, development, connections, nextC
     candidates.sort((a, b) => a.current.eligible.at - b.current.eligible.at || a.current.eligible.priority - b.current.eligible.priority || a.issue.number - b.issue.number || a.workspace.id.localeCompare(b.workspace.id));
     for (const candidate of candidates) {
       checking.signal.throwIfAborted(); controller.signal.throwIfAborted(); const { workspace, issue, view, current, automatic } = candidate;
+      if (!hostAuthority()) return;
       const occupied = store.workspaces().filter(value => { const state = development.availability(value.id); return state.run && !['paused', 'stopped'].includes(state.run.control) || state.busy; }).length;
       if (occupied >= policy.worker.read(workspace.id).values['limits.concurrency'].value) { current.reason = 'host-capacity'; save(workspace.id, current); continue; }
       if (policy.worker.read(workspace.id).hash !== view.hash) { current.reason = 'policy-changed'; save(workspace.id, current); continue; }
@@ -94,6 +97,7 @@ export function createScheduler({ store, policy, development, connections, nextC
     async sync() { if (closed) return; if (pending) await pending; if (closed) return; await refresh(); await arm(); },
     async completed(repository) { const config = scheduleConfig(policy.worker.read(repository)); if (config['scheduling.enabled'] && config['scheduling.afterCompletion'] === 'immediate' && policy.worker.read(repository).values['intake.trigger'].value === 'schedule') await check('completion', repository); },
     suspend() { suspended = true; timers.clear(timer); checking?.abort(); },
+    async resume() { if (pending) await pending.catch(() => {}); if (closed) return; suspended = false; await refresh(); await arm(); },
     async wake() { if (pending) await pending.catch(() => {}); suspended = false; await check('wake'); },
     async close() { closed = true; timers.clear(timer); controller.abort(); if (pending) await pending.catch(() => {}); caches.clear(); } });
 }

@@ -66,7 +66,9 @@ test('known incompatible autonomous paths block before activation, reservation, 
   }
 });
 
-for (const ungated of [false, true]) test((ungated ? 'captured zero-gate policy' : 'registered approval') + ' integrates once; failed cleanup retains claim, then lost closeout replies reconcile and release', async () => {
+for (const mode of ['supervised', 'autonomous', 'takeover']) test(mode === 'takeover' ? 'takeover continuity checks assignment, metadata, source and uncertain effects before rebinding' :
+  (mode === 'autonomous' ? 'captured zero-gate policy' : 'registered approval') + ' integrates once; failed cleanup retains claim, then lost closeout replies reconcile and release', async () => {
+  const ungated = mode === 'autonomous', takeover = mode === 'takeover';
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-development-closeout-'))), checkout = join(root, 'repository'); mkdirSync(checkout, { mode: 0o700 });
   const profile = JSON.parse(readFileSync(new URL('../../pipeliner.config.json', import.meta.url), 'utf8'));
   profile.repository.owner = 'fixture'; profile.repository.name = 'repo'; profile.project.owner = 'fixture'; profile.project.number = 1; profile.quality.requiredChecks = [];
@@ -79,6 +81,7 @@ for (const ungated of [false, true]) test((ungated ? 'captured zero-gate policy'
   const store = openWorkspaceStore(root); store.register(workspace); store.select(workspace.id);
   const fixture = issueFixture(workspace), issue = fixture.issues[0]; issue.ready = true; issue.status = 'Pending Review'; issue.metadata.Status = issue.status;
   const dev = { id: 'dev-one', connection: 'ollama', model: 'test-model', metrics: [] }, head = 'a'.repeat(40), merged = 'b'.repeat(40), candidate = { sourceCommit: head, gitTree: snapshot.candidate.gitTree };
+  const fallback = { ...dev, id: 'dev-two' }, developers = takeover ? [dev, fallback] : [dev];
   let manager, mergedRemote = false, branch = true, cleanupFails = true, mergeWrites = 0, closeWrites = 0, branchWrites = 0;
   const lease = { check() {}, close() {}, signal: new AbortController().signal, value: { credential: { accessToken: 'synthetic-app' } }, send: async (url, request) => {
     const path = new URL(url).pathname;
@@ -95,9 +98,9 @@ for (const ungated of [false, true]) test((ungated ? 'captured zero-gate policy'
     if (path.endsWith('/issues/7') && request.method === 'PATCH') { closeWrites++; issue.state = 'CLOSED'; throw Error('lost synthetic close reply'); }
     throw Error('Unexpected closeout fixture route');
   } };
-  const connections = { developers: () => [dev], status: () => ({}), acquire: async () => lease };
+  const connections = { developers: () => developers, status: () => ({}), acquire: async () => lease };
   const policy = openPolicyStore(root, { catalog: () => ({ repositories: [workspace.id], capabilities: developmentPermissions, maxConcurrency: 1, background: false,
-    developers: [dev], connections: ['github', 'ollama'].map(id => ({ id, provider: id, repositories: [workspace.id], healthy: true })), extensions: [] }),
+    developers, connections: ['github', 'ollama'].map(id => ({ id, provider: id, repositories: [workspace.id], healthy: true })), extensions: [] }),
     inspectors: { repository: value => manager.observe(value), effect: action => manager.inspectIntegration(action), worker: binding => ({ ...binding, state: 'stopped', observedAt: Date.now() }) } });
   const ledger = openDevelopmentStore(root); let work;
   const supervisor = { status: () => ({ worker: 'stopped', pending: null, error: null }), attach() {}, control(binding, operation) {
@@ -105,14 +108,39 @@ for (const ungated of [false, true]) test((ungated ? 'captured zero-gate policy'
     async settle() { await work; }, async cleanupRun() { if (cleanupFails) throw Error('Development owned cleanup failed.'); return { workspaceRemoved: true }; }, async shutdown() {} };
   manager = createDevelopmentManager({ store, policy, ledger, connections, supervisor, api: fixture.api });
   try {
-    for (const [scope, target, changes] of [['host', null, { 'permissions.ceiling': developmentPermissions }], ['repository', workspace.id, { 'permissions.grants': developmentPermissions, 'agents.dev': dev.id, 'connections.github': 'github', 'connections.ollama': 'ollama', ...(ungated ? presetChanges('pm-autonomous') : {}) }]]) {
+    for (const [scope, target, changes] of [['host', null, { 'permissions.ceiling': developmentPermissions }], ['repository', workspace.id, { 'permissions.grants': developmentPermissions, 'agents.dev': dev.id, 'connections.github': 'github', 'connections.ollama': 'ollama', ...(ungated ? presetChanges('pm-autonomous') : {}), ...(takeover ? { 'agents.fallbacks': [fallback.id], 'agents.takeover': true } : {}) }]]) {
       const input = policy.control.capture({ commandId: scope + '-input', conversationId: 'qualification', target, text: 'Synthetic scoped test configuration.' });
       const preview = policy.control.prepare({ inputId: input.id, requestId: scope + '-preview', scope, target, conversationId: 'qualification', changes, reset: [] });
       policy.control.apply({ commandId: scope + '-apply', proposalId: preview.id, inputId: input.id, hash: preview.hash, conversationId: 'qualification', target });
     }
     const run = (await policy.runtime.reserve(identity, { commandId: 'reserve-fixture', issue: 7, pipeline: 'development' })).run, binding = { runId: run.id, epoch: run.epoch };
     ledger.create(run, { pipeline: policy.worker.read(workspace.id).values['pipelines.development'].value, source: snapshot.candidate, executionProfile: { kind: 'pipeliner-desktop', version: 1 },
-      developer: { id: dev.id, connection: 'ollama', model: dev.model }, skillsHash: starterHash, issueHash: developmentIssueHash({ number: 7, title: issue.title, body: issue.body }), checks: [{ name: 'Synthetic check', command: 'node --test' }], logBytes: 1048576 });
+      developer: { id: dev.id, connection: 'ollama', model: dev.model }, ...(takeover ? { fallbacks: [{ id: fallback.id, connection: fallback.connection, model: fallback.model }] } : {}),
+      skillsHash: starterHash, issueHash: developmentIssueHash({ number: 7, title: issue.title, body: issue.body }), checks: [{ name: 'Synthetic check', command: 'node --test' }], logBytes: 1048576 });
+    if (takeover) {
+      ledger.begin(binding); ledger.attempt(binding, 'provider-one');
+      const request = ledger.prepare(binding, 'provider-attempt', 'provider', { retryKey: 'provider-one' }); ledger.dispatch(binding, request.id);
+      ledger.finish(binding, request.id, { candidate: snapshot.candidate, result: { error: 'http-503' } }, 'denied');
+      ledger.retry(binding, 'provider-one', 'http-503', Date.now() + 1000);
+      policy.runtime.requestControl(binding, 'pause'); await policy.runtime.verifyControl(binding); ledger.suspend(binding);
+      issue.assignees = ['fixture-agent'];
+      const expected = { ...binding, repository: workspace.id, issue: 7, dev: fallback.id, candidate: snapshot.candidate };
+      const context = { development: { executionIssue: { id: issue.id, itemId: issue.itemId, metadata: structuredClone(issue.metadata), assignee: 'fixture-agent' },
+        takeoverProof: { ...binding, dev: fallback.id, candidate: snapshot.candidate, observedAt: Date.now() } } };
+      store.saveIssueContext(workspace.id, context);
+      assert.equal((await manager.inspectContinuity(expected)).verified, true);
+      issue.assignees = ['someone-else']; await assert.rejects(manager.inspectContinuity(expected), /live Issue/); issue.assignees = ['fixture-agent'];
+      const priority = issue.metadata.Priority; issue.metadata.Priority = 'Changed'; await assert.rejects(manager.inspectContinuity(expected), /live Issue/); issue.metadata.Priority = priority;
+      const title = issue.title; issue.title = 'Changed'; await assert.rejects(manager.inspectContinuity(expected), /live Issue/); issue.title = title;
+      const unresolved = store.prepare('uncertain-takeover', 'mutation', { kind: 'development', repository: workspace.id }); store.dispatch(unresolved.id);
+      await assert.rejects(manager.inspectContinuity(expected), /unresolved effects/); store.finish(unresolved.id, 'verified', {});
+      const source = readFileSync(join(checkout, 'app.mjs'), 'utf8'); writeFileSync(join(checkout, 'app.mjs'), 'changed source');
+      assert.equal((await manager.inspectContinuity(expected)).verified, true); // Uncommitted user work stays outside the immutable source capture.
+      git(['add', '--', 'app.mjs']); git(['-c', 'user.name=Synthetic', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'Changed owned fixture source']);
+      const changedHead = git(['rev-parse', 'HEAD']).trim(); await assert.rejects(manager.inspectContinuity(expected), /host source/);
+      git(['update-ref', 'refs/heads/main', snapshot.candidate.sourceCommit, changedHead]); writeFileSync(join(checkout, 'app.mjs'), source);
+      assert.equal((await manager.inspectContinuity(expected)).verified, true); assert.equal(ledger.status(run.id).turns, 1); return;
+    }
     for (const kind of ['source', 'implementation', 'tests', 'review']) {
       ledger.begin(binding); const request = ledger.prepare(binding, kind, kind, {}); ledger.dispatch(binding, request.id);
       ledger.finish(binding, request.id, { candidate: snapshot.candidate, result: kind === 'tests' ? { name: 'Synthetic check', command: 'node --test', exitCode: 0 } : {} });

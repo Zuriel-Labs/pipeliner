@@ -16,7 +16,7 @@ const hash = 'a'.repeat(64);
 const candidate = { sourceCommit: 'b'.repeat(40), gitTree: 'c'.repeat(40) };
 const catalog = () => ({ repositories: [repository], capabilities: ['workspace.read', 'workspace.write', 'worker.exec', 'github.pr.write'], maxConcurrency: 1, background: false,
   connections: [{ id: 'codex-fixture', provider: 'codex', repositories: [repository] }], developers: [{ id: 'dev-fixture', connection: 'codex-fixture', metrics: [] }], extensions: [] });
-function fixture(t) {
+function fixture(t, extraCatalog = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-d08-'))), directory = join(root, 'state'), checkout = join(root, 'repository');
   mkdirSync(directory, { mode: 0o700 }); mkdirSync(checkout);
   const git = args => execFileSync('/usr/bin/git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'commit.gpgSign=false', '-C', checkout, ...args], { env: { PATH: '/usr/bin:/bin', HOME: root, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' }, stdio: 'pipe' });
@@ -29,7 +29,8 @@ function fixture(t) {
     async worker({ runId, epoch }) { return { runId, epoch, state: worker, observedAt: now }; },
     async effect(action) { const result = observations.get(action.id); if (!result) throw new Error('Readback unavailable'); const keys = ['runId', 'repository', 'issue', 'step', 'epoch', 'operation', 'candidate', 'commandId', 'requestHash', 'preconditionsHash', 'expectedHash', 'fingerprint', 'attempts', 'dispatchEpoch']; return { ...Object.fromEntries(keys.map(key => [key, action[key]])), ...result, observationHash: hash, observedAt: now }; },
   };
-  const stores = [], open = () => { const store = openPolicyStore(directory, { catalog, clock: () => now, inspectors }); stores.push(store); return store; };
+  const facts = () => ({ ...catalog(), ...extraCatalog });
+  const stores = [], open = () => { const store = openPolicyStore(directory, { catalog: facts, clock: () => now, inspectors }); stores.push(store); return store; };
   const store = open(); let command = 0;
   const configure = (changes, scope = 'repository', target = repository) => {
     const input = store.control.capture({ commandId: `input-${++command}`, conversationId: 'fixture-chat', target, text: 'Configure synthetic fixture.' });
@@ -41,10 +42,35 @@ function fixture(t) {
   const identity = inspectWorkspace(checkout, remote);
   const reserve = (s = store, commandId = 'claim-one', issue = 1, workspace = identity) => s.runtime.reserve(workspace, { commandId, issue, pipeline: 'development' });
   const intent = (binding, extra = {}, s = store) => s.runtime.intent(binding, { commandId: 'write-one', step: 'implement', operation: 'workspace.write', candidate, requestHash: hash, preconditionsHash: hash, expectedHash: hash, ...extra });
-  return { store, open, root, directory, checkout, git, identity, reserve, intent, configure, inspectors, catalog, observe: (id, result) => observations.set(id, result),
+  return { store, open, root, directory, checkout, git, identity, reserve, intent, configure, inspectors, catalog: facts, observe: (id, result) => observations.set(id, result),
     advance: ms => { now += ms; }, setWorker: value => { worker = value; }, setIntegration: value => { integration = value; }, setStatus: (value, issues = [{ issue: 1, status: value }], issueState = 'OPEN') => { status = value; active = issues; state = issueState; } };
 }
 const binding = run => ({ runId: run.id, epoch: run.epoch });
+
+test('ordered takeover requires stopped continuity, keeps one reservation and fences the old Dev', async t => {
+  const f = fixture(t, { developers: [...catalog().developers, { id: 'dev-two', connection: 'codex-fixture', metrics: [] }] });
+  f.configure({ 'agents.fallbacks': ['dev-two'], 'agents.takeover': true });
+  const run = (await f.reserve()).run, b = binding(run);
+  f.inspectors.continuity = async value => ({ ...value, verified: true, observedAt: 1000 });
+  f.setWorker('running'); await assert.rejects(f.store.runtime.takeover(b, { dev: 'dev-two', candidate }), /stopped/i);
+  f.setWorker('stopped'); f.store.runtime.requestControl(b, 'pause'); await f.store.runtime.verifyControl(b);
+  f.setWorker('running'); await assert.rejects(f.store.runtime.takeover(b, { dev: 'dev-two', candidate }), /stopped/i); f.setWorker('stopped');
+  await assert.rejects(f.store.runtime.takeover(b, { dev: 'unconfigured', candidate }), /configured|ordered/);
+  f.inspectors.continuity = async value => ({ ...value, candidate: { ...candidate, gitTree: 'f'.repeat(40) }, verified: true, observedAt: 1000 });
+  await assert.rejects(f.store.runtime.takeover(b, { dev: 'dev-two', candidate }), /continuity/);
+  f.inspectors.continuity = async value => ({ ...value, verified: true, observedAt: 1000 });
+  const next = await f.store.runtime.takeover(b, { dev: 'dev-two', candidate });
+  assert.equal(next.id, run.id); assert.equal(next.issue, run.issue); assert.equal(next.policyHash, run.policyHash); assert.deepEqual(next.limits, run.limits);
+  assert.equal(next.dev, 'dev-two'); assert.equal(next.epoch, run.epoch + 1); assert.equal(next.control, 'paused');
+  assert.throws(() => f.intent(b), /epoch/);
+  const reopened = f.open(); assert.equal(reopened.runtime.status(repository).dev, 'dev-two');
+  const db = new DatabaseSync(join(f.directory, 'policy.sqlite'));
+  try { assert.throws(() => db.exec('UPDATE runtime_assignments SET hash=hash'), /immutable/i);
+    assert.throws(() => db.exec('DELETE FROM runtime_assignments'), /immutable/i); }
+  finally { db.close(); }
+  const resumed = await reopened.runtime.resume(binding(next)); assert.equal(resumed.dev, 'dev-two');
+  f.configure({ 'agents.takeover': false }); assert.throws(() => f.intent(binding(resumed), {}, reopened), /authority|revoked/);
+});
 
 test('aliases, worktrees and duplicate clients share one durable repository claim', async t => {
   const f = fixture(t), alias = join(f.root, 'alias'), worktree = join(f.root, 'worktree'); symlinkSync(f.checkout, alias); f.git(['worktree', 'add', '--detach', worktree]);
@@ -189,7 +215,7 @@ test('two real host processes race one reservation without creating another epoc
 
 function legacy(f) {
   f.store.close(); const db = new DatabaseSync(join(f.directory, 'policy.sqlite'));
-  db.exec('DROP TABLE runtime_actions; DROP TABLE runtime_commands; DROP TABLE runtime_runs; DROP TABLE runtime_workspaces; DROP TABLE runtime_repositories; DROP TABLE runtime_clock; PRAGMA user_version=1;'); db.close();
+  db.exec('DROP TABLE runtime_assignments; DROP TABLE runtime_actions; DROP TABLE runtime_commands; DROP TABLE runtime_runs; DROP TABLE runtime_workspaces; DROP TABLE runtime_repositories; DROP TABLE runtime_clock; PRAGMA user_version=1;'); db.close();
 }
 
 test('schema-1 migration keeps an independently readable private compatible backup', t => {
@@ -202,6 +228,21 @@ test('schema-1 migration keeps an independently readable private compatible back
   const restored = join(f.root, 'restored'); mkdirSync(restored, { mode: 0o700 }); copyFileSync(path, join(restored, 'policy.sqlite'));
   const recovery = openPolicyStore(restored, { catalog }); try { assert.equal(recovery.worker.read(repository).revision, 2); assert.equal(recovery.worker.read(repository, 1).values['scheduling.intervalMinutes'].value, 30); } finally { recovery.close(); }
   f.open(); assert.equal(readdirSync(f.directory).filter(name => /^policy-v1-.*\.sqlite$/.test(name)).length, 1);
+});
+
+test('schema-2 upgrade preserves its claim and an independently readable private backup', async t => {
+  const f = fixture(t), run = (await f.reserve()).run;
+  f.store.close(); const db = new DatabaseSync(join(f.directory, 'policy.sqlite'));
+  db.exec('DROP TABLE runtime_assignments; PRAGMA user_version=2;'); db.close();
+  const reopened = f.open(), current = reopened.runtime.status(repository);
+  assert.equal(current.id, run.id); assert.equal(current.policyHash, run.policyHash); assert.equal(current.epoch, run.epoch);
+  assert.deepEqual(current.limits, run.limits); assert.equal(current.control, 'recovery-required');
+  const backups = readdirSync(f.directory).filter(name => /^policy-v2-.*\.sqlite$/.test(name)); assert.equal(backups.length, 1);
+  const path = join(f.directory, backups[0]), backup = new DatabaseSync(path, { readOnly: true });
+  try { assert.equal(backup.prepare('PRAGMA user_version').get().user_version, 2);
+    assert.equal(backup.prepare('SELECT id FROM runtime_runs').get().id, run.id);
+    assert.equal(backup.prepare('PRAGMA quick_check').get().quick_check, 'ok'); assert.equal(lstatSync(path).mode & 0o777, 0o600); }
+  finally { backup.close(); }
 });
 
 test('interrupted migration rolls back DDL; writer contention and actual SQLite FULL preserve claims', async t => {

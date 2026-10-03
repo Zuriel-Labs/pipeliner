@@ -55,12 +55,12 @@ export function validatePipeline(value, development = false, requireQa = false) 
     if (!identifier(value.entry) || !Array.isArray(value.steps) || !value.steps.length || value.steps.length > 64) throw new Error();
     const steps = new Map(), labels = new Set();
     for (const s of value.steps) {
-      record(s, ['id', 'label', 'kind', 'permissions', 'inputs', 'expectedResult', 'evidence', 'routes', 'retryLimit', 'visitLimit']);
+      record(s, ['id', 'label', 'kind', 'permissions', 'inputs', 'expectedResult', 'evidence', 'routes', 'retryLimit', 'visitLimit'], ['timeoutSeconds']);
       record(s.routes, ['success', 'failure', 'feedback']);
       if (!identifier(s.id) || ['complete', 'blocked'].includes(s.id) || steps.has(s.id) || !text(s.label) || !text(s.expectedResult)
         || !['agent', 'check', 'pm-qa', 'pr-integration', 'build', 'artifact-verify', 'retain', 'publish', 'extension'].includes(s.kind)
         || !capabilities(s.permissions) || !list(s.inputs) || !list(s.evidence) || !s.evidence.length
-        || !number(0, 10)(s.retryLimit) || !number(1, 100)(s.visitLimit) || !Object.values(s.routes).every(identifier)) throw new Error();
+        || !number(0, 10)(s.retryLimit) || !number(1, 100)(s.visitLimit) || s.timeoutSeconds !== undefined && !number(1, 604800)(s.timeoutSeconds) || !Object.values(s.routes).every(identifier)) throw new Error();
       const label = s.label.normalize('NFKC').trim().toLowerCase();
       if (!label || labels.has(label)) throw new Error('Pipeline step names must be nonempty and unique');
       labels.add(label); steps.set(s.id, s);

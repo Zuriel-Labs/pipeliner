@@ -42,3 +42,11 @@ test('guided commands reject quoted apply, secrets and invented scope; typed edi
   const invalid = editDefinition(developmentTemplate, { operation: 'set', step: 1, field: 'retryLimit', value: 999 });
   assert.throws(() => validatePipeline(invalid, true));
 });
+
+test('step timeout chat edits inherit on reset and reject out-of-range values', () => {
+  const changed = editDefinition(developmentTemplate, pipelineCommand('Set step 1 timeout to 7 seconds').action);
+  validatePipeline(changed, true); assert.equal(changed.steps[0].timeoutSeconds, 7);
+  const reset = editDefinition(changed, pipelineCommand('Reset step 1 timeout to inherit').action);
+  validatePipeline(reset, true); assert.equal(Object.hasOwn(reset.steps[0], 'timeoutSeconds'), false);
+  for (const value of [0, 604801, 1.5]) assert.throws(() => editDefinition(changed, { operation: 'set', step: 1, field: 'timeoutSeconds', value }));
+});

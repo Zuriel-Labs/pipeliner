@@ -14,8 +14,8 @@ export function candidateJob(ledger, run, previous = false) {
   const round = (ledger.status(run.id).qaHistory ?? []).filter(row => row.decision === 'feedback').length - Number(previous);
   return round > 0 ? run.id + '-candidate-' + round : run.id;
 }
-export function developmentPublication(store, ledger, run) {
-  const effect = store.effects(candidateJob(ledger, run)).find(effect => effect.step === 'pull-request' && effect.state === 'verified');
+export function developmentPublication(store, ledger, run, previous = false) {
+  const effect = store.effects(candidateJob(ledger, run, previous)).find(effect => effect.step === 'pull-request' && effect.state === 'verified');
   return effect ? { ...effect.result, baseBranch: effect.result.baseBranch ?? effect.binding.payload?.base, candidate: { sourceCommit: effect.result.head, gitTree: effect.binding.candidate.gitTree } } : null;
 }
 

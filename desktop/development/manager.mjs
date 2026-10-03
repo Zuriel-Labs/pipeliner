@@ -4,7 +4,8 @@ import { inspectWorkspace, workspaceData } from '../core/identity.mjs';
 import { validateProfile } from '../../scripts/lib/config.mjs';
 import { githubRequest } from '../repositories/github.mjs';
 import * as github from '../issues/github.mjs';
-import { snapshotWorkspace } from './source.mjs';
+import { snapshotWorkspace, sourceTree } from './source.mjs';
+import { runtimeDeveloperAllowed } from '../core/runtime.mjs';
 import { developmentWorkerProgram } from './worker-tools.mjs';
 import { starterSkills, starterHash } from './starter.mjs';
 import { createDevelopmentEngine } from './engine.mjs';
@@ -45,7 +46,7 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     if (available) {
       view = policy.worker.read(selected); run = selected ? policy.runtime.status(selected) : null;
       if (run) {
-        try { development = ledger.status(run.id); const captured = ledger.captured(run.id); runDeveloper = captured.developer;
+        try { development = ledger.status(run.id); const captured = ledger.captured(run.id); runDeveloper = [captured.developer, ...(captured.fallbacks ?? [])].find(dev => dev.id === run.dev);
           stepLabel = captured.pipeline.steps.find(step => step.id === development.step)?.label ?? development.state;
           integrationReady = development.state === 'candidate' && captured.pipeline.steps.find(step => step.id === development.step)?.kind === 'pr-integration';
         } catch { /* Reservation may precede its first ledger record. */ }
@@ -75,7 +76,10 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
   }
   async function acquire(target, signal) {
     const app = await connections.acquire('github', signal); let project = app;
-    try { if (target.connections.setup) project = await connections.acquire(target.connections.setup, signal); return { app, project }; }
+    try { if (target.connections.setup) project = await connections.acquire(target.connections.setup, signal);
+      const run = policy.runtime.status(target.id), view = policy.worker.read(target.id), limits = run?.limits ?? Object.fromEntries(Object.entries(view.values).filter(([key]) => key.startsWith('limits.')).map(([key, field]) => [key, field.value]));
+      const retry = { attempts: limits['limits.transientAttempts'], deadlineAt: Date.now() + limits['limits.controlSeconds'] * 1000 };
+      const boundedApp = { ...app, retry }; return { app: boundedApp, project: project === app ? boundedApp : { ...project, retry } }; }
     catch (error) { app.close(); throw error; }
   }
   const release = held => { held.app.close(); if (held.project !== held.app) held.project.close(); };
@@ -104,7 +108,7 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
       errors.set(target.id, safeError(error)); messages.set(target.id, task.controller.signal.aborted ? 'Development was interrupted. Verify local controls and any pending outcomes before resuming.' : safeError(error));
       const run = policy.runtime.status(target.id);
       if (run?.control === 'running' && supervisor) {
-        try { supervisor.control({ runId: run.id, epoch: run.epoch }, 'pause'); await supervisor.settle(target.id); }
+        try { const binding = { runId: run.id, epoch: run.epoch }; supervisor.control(binding, 'pause'); await supervisor.settle(target.id); ledger.suspend(binding); }
         catch { errors.set(target.id, 'Development local termination still needs verification.'); }
       }
     }).finally(() => { tasks.delete(target.id); publish(); });
@@ -113,8 +117,9 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
   function authority(target, run, signal, closeout = false) {
     signal?.throwIfAborted(); if (closed || closing) throw new Error('Development app is closing.');
     const current = policy.runtime.status(target.id), grant = policy.worker.authority(target.id, run.policyRevision);
-    if (!current || current.id !== run.id || current.epoch !== run.epoch || !(closeout ? ['running', 'paused', 'stopped'] : ['running']).includes(current.control) || grant.dev !== run.dev
+    if (!current || current.id !== run.id || current.epoch !== run.epoch || !(closeout ? ['running', 'paused', 'stopped'] : ['running']).includes(current.control) || current.dev !== run.dev || !runtimeDeveloperAllowed(grant, run.dev)
       || developmentPermissions.some(permission => !grant.capabilities.includes(permission)) || !grant.connections.includes('github')) throw new Error('Development run authority unavailable or revoked.');
+    if (!closeout && ledger.status(run.id).turns >= run.limits['limits.issueTurns']) throw new Error('Captured Development turn limit exhausted.');
   }
   async function fieldEffect(target, held, job, issue, name, signal) {
     const intent = store.prepare(job, 'status-' + name.replaceAll(' ', '-'), { kind: 'development', repository: target.id, issue: issue.number, item: issue.itemId, status: name });
@@ -132,12 +137,25 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
   }
   async function execute(target, run, snapshot, profile, issue, signal) {
     authority(target, run, signal);
-    const binding = { runId: run.id, epoch: run.epoch }, identity = inspectWorkspace(target.path, { repository: target.id, owner: target.slug.split('/')[0], name: target.slug.split('/')[1] });
+    let binding = { runId: run.id, epoch: run.epoch };
+    const identity = inspectWorkspace(target.path, { repository: target.id, owner: target.slug.split('/')[0], name: target.slug.split('/')[1] });
     if (workspaceData(identity).localKey !== target.localKey) throw new Error('Development local workspace changed.');
-    await supervisor.start(identity, binding, { candidate: snapshot.candidate, program: developmentWorkerProgram, allowedPath: 'development-result' });
     const engine = createDevelopmentEngine({ ledger, policy, supervisor, connections, onChange: publish });
-    const state = await engine.run(binding, { issue: { number: issue.number, title: issue.title, body: issue.body }, source: snapshot.files }, signal);
+    let state;
+    for (;;) {
+      await supervisor.start(identity, binding, { candidate: snapshot.candidate, program: developmentWorkerProgram, allowedPath: 'development-result' });
+      if (run.assignment) {
+        const actual = await supervisor.tool(binding, { operation: 'export' }, { signal });
+        if (!actual.ok || sourceTree(actual.result?.files) !== ledger.status(run.id).candidate.gitTree) throw new Error('Development takeover worker candidate continuity failed.');
+      }
+      try { state = await engine.run(binding, { issue: { number: issue.number, title: issue.title, body: issue.body }, source: snapshot.files }, signal); break; }
+      catch (error) {
+        if (error.code !== 'development-provider-transient') throw error;
+        run = await takeOver(target, run, signal); binding = { runId: run.id, epoch: run.epoch }; publish();
+      }
+    }
     if (state.state === 'blocked') throw new Error('Development step is blocked; inspect its verified evidence.');
+    authority(target, run, signal);
     const response = await supervisor.tool(binding, { operation: 'export' }, { signal }); authority(target, run, signal);
     if (response.ok !== true || !response.result) throw new Error('Development candidate export denied or incomplete.');
     const exported = response.result;
@@ -152,6 +170,7 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     await policy.runtime.reserve(identity, { commandId: 'candidate-' + run.id + '-' + run.epoch, issue: run.issue, pipeline: 'development' });
     supervisor.control(binding, 'pause'); await supervisor.settle(target.id);
     if (policy.runtime.status(target.id).control !== 'paused') throw new Error('Development worker pause could not be verified.');
+    ledger.suspend(binding);
     const publication = developmentPublication(store, ledger, run);
     if (ledger.captured(run.id).pipeline.steps.find(step => step.id === state.step)?.kind === 'pm-qa') {
       ledger.offerQA(binding, buildDevelopmentShowcase({ ledger, run, workspace: target, publication }));
@@ -167,6 +186,7 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     if (!Number.isSafeInteger(number) || number < 1) throw new Error('Development needs a specific selected Issue.');
     if (policy.runtime.status(target.id)) throw new Error('Development already holds this repository; use its local controls.');
     const view = policy.worker.read(target.id), grant = policy.worker.authority(target.id, view.revision), dev = connections.developers().find(dev => dev.id === grant.dev);
+    const fallbacks = grant.takeover ? view.values['agents.fallbacks'].value.map(id => connections.developers().find(dev => dev.id === id && grant.fallbacks.includes(id))) : [];
     if (!dev || developmentPermissions.some(permission => !grant.capabilities.includes(permission)) || !grant.connections.includes('github') || !grant.connections.includes(dev.connection) || !grant.bundledSkills) throw new Error('Development needs a qualified assigned Dev and both host and repository permissions.');
     const identity = inspectWorkspace(target.path, { repository: target.id, owner: target.slug.split('/')[0], name: target.slug.split('/')[1] });
     if (workspaceData(identity).localKey !== target.localKey) throw new Error('Development local workspace changed.');
@@ -180,6 +200,7 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
       if (view.values['limits.tokens'].value !== null || view.values['limits.costUsd'].value !== null) throw new Error('Development hard provider metric is unavailable before execution.');
       if (ungated && !['pm-autonomous', 'scheduled-autonomous', 'custom'].includes(view.values['autonomy.scenario'].value)) throw new Error('Development ungated execution needs explicit PM selection of the Desktop workflow.');
       if (ungated && !dev.noPrompts) throw new Error('Development provider prompt-free execution is unqualified.');
+      if (fallbacks.some(next => !next || next.id === dev.id || !grant.connections.includes(next.connection) || ungated && !next.noPrompts)) throw new Error('Development configured fallback is unavailable or unqualified before execution.');
       const provider = await connections.acquireProvider(dev.connection, dev.model, signal);
       try { provider.check(); unchangedPolicy(); } finally { provider.close(); }
       integrationMethod = await readIntegrationMethod(held.app, target); unchangedPolicy();
@@ -208,13 +229,69 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
         || actual.title !== boundIssue.title || actual.body !== boundIssue.body) throw new Error('Development assignment or Issue input readback changed.');
       if (intent.state !== 'verified') store.finish(intent.id, 'verified', { assignee: login, issue: number });
       issue = { ...issue, ...boundIssue }; unchangedPolicy();
+      const contextAfterAssignment = store.issueContext(target.id);
+      store.saveIssueContext(target.id, { ...contextAfterAssignment, development: { ...contextAfterAssignment.development,
+        executionIssue: { id: issue.id, itemId: issue.itemId, metadata: issue.metadata, assignee: login } } });
     } finally { release(held); }
     unchangedPolicy();
     const reservation = await policy.runtime.reserve(identity, { commandId: randomUUID(), issue: number, pipeline: 'development', policyHash: view.hash }), run = reservation.run;
     ledger.create(run, { pipeline: view.values['pipelines.development'].value, source: snapshot.candidate, developer: { id: dev.id, connection: dev.connection, model: dev.model }, skillsHash: starterHash, issueHash: developmentIssueHash({ number: issue.number, title: issue.title, body: issue.body }),
-      executionProfile: { kind: 'pipeliner-desktop', version: 1 }, integrationMethod,
+      executionProfile: { kind: 'pipeliner-desktop', version: 1 }, integrationMethod, fallbacks: fallbacks.map(({ id, connection, model }) => ({ id, connection, model })),
       checks: profile.quality.commands.map((command, index) => ({ name: 'Repository check ' + (index + 1), command })), logBytes: Math.min(50, view.values['privacy.runLogMiB'].value) * 1024 * 1024 });
     await execute(target, run, snapshot, profile, issue, signal);
+  }
+  function takeoverEligible(run, dev) {
+    const binding = { runId: run.id, epoch: run.epoch }, captured = ledger.captured(run.id), state = ledger.status(run.id), grant = policy.worker.authority(run.repository, run.policyRevision);
+    ledger.budget(binding);
+    const order = captured.fallbacks ?? [], current = order.findIndex(value => value.id === run.dev);
+    const next = order.find((value, index) => index > current && grant.fallbacks.includes(value.id));
+    const provider = ledger.evidence(binding).filter(row => row.kind === 'provider').at(-1), attempts = state.attempts?.[provider?.payload.retryKey];
+    if (!grant.takeover || !next || dev !== next.id || state.state !== 'executing' || state.epoch !== run.epoch
+      || state.turns >= captured.run.limits['limits.issueTurns'] || state.stepTurns >= captured.run.limits['limits.stepTurns']
+      || !attempts?.error || attempts.count >= (captured.run.limits['limits.transientAttempts'] ?? 3)
+      || ledger.evidence(binding).some(row => ['prepared', 'dispatched', 'uncertain'].includes(row.state))
+      || store.pending('development').some(row => row.binding.repository === run.repository)) throw new Error('Development takeover is blocked by authority, budget or unresolved effects.');
+    return { captured, state, next };
+  }
+  async function takeOver(target, run, signal) {
+    const captured = ledger.captured(run.id), grant = policy.worker.authority(target.id, run.policyRevision), index = (captured.fallbacks ?? []).findIndex(dev => dev.id === run.dev);
+    const next = (captured.fallbacks ?? []).find((dev, position) => position > index && grant.fallbacks.includes(dev.id));
+    takeoverEligible(run, next?.id); authority(target, run, signal);
+    const binding = { runId: run.id, epoch: run.epoch }, actual = await supervisor.tool(binding, { operation: 'export' }, { signal }), candidate = ledger.status(run.id).candidate;
+    if (!actual.ok || sourceTree(actual.result?.files) !== candidate.gitTree) throw new Error('Development takeover current worker candidate changed.');
+    const context = store.issueContext(target.id);
+    store.saveIssueContext(target.id, { ...context, development: { ...context.development, takeoverProof: { ...binding, dev: next.id, candidate, observedAt: Date.now() } } });
+    supervisor.control(binding, 'pause'); await supervisor.settle(target.id); ledger.suspend(binding); signal.throwIfAborted();
+    if (policy.runtime.status(target.id).control !== 'paused') throw new Error('Development takeover prior worker stop is unverified.');
+    const assigned = await policy.runtime.takeover(binding, { dev: next.id, candidate });
+    ledger.rebind(run.id, assigned.epoch, { developer: next.id, candidate });
+    const resumed = await policy.runtime.resume({ runId: run.id, epoch: assigned.epoch }); ledger.rebind(run.id, resumed.epoch);
+    messages.set(target.id, 'Prior worker stopped and the same Issue and candidate were verified. Continuing with the next configured Dev; budgets and QA remain unchanged.');
+    return resumed;
+  }
+  async function inspectContinuity(expected) {
+    const target = workspace(expected.repository), run = policy.runtime.status(target.id);
+    if (!run || run.id !== expected.runId || run.epoch !== expected.epoch || run.issue !== expected.issue || !['paused', 'stopped'].includes(run.control)) throw new Error('Development takeover reservation changed.');
+    const { captured, state } = takeoverEligible(run, expected.dev), proof = store.issueContext(target.id)?.development?.takeoverProof;
+    if (!proof || proof.runId !== run.id || proof.epoch !== run.epoch || proof.dev !== expected.dev || proof.observedAt > Date.now() || Date.now() - proof.observedAt > 30000
+      || canonicalJSON(proof.candidate) !== canonicalJSON(expected.candidate) || canonicalJSON(state.candidate) !== canonicalJSON(expected.candidate)) throw new Error('Development takeover continuity proof is stale or changed.');
+    const identity = inspectWorkspace(target.path, { repository: target.id, owner: target.slug.split('/')[0], name: target.slug.split('/')[1] }), snapshot = snapshotWorkspace(identity), profile = executionProfile(snapshot.files, target);
+    if (workspaceData(identity).localKey !== target.localKey || canonicalJSON(snapshot.candidate) !== canonicalJSON(captured.source)) throw new Error('Development takeover host source changed.');
+    const held = await acquire(target);
+    try {
+      const catalog = await api.readCatalog(held.app, held.project, target), issue = catalog.issues.find(value => value.number === run.issue), detail = await api.readDetail(held.app, target, run.issue);
+      const original = store.issueContext(target.id)?.development?.executionIssue;
+      if (!issue || issue.state !== 'OPEN' || !issue.ready || catalog.active.length !== 1 || catalog.active[0].number !== run.issue || detail.dependencies.some(value => value.state !== 'CLOSED')
+        || !original || issue.id !== original.id || issue.itemId !== original.itemId || issue.assignees.length !== 1 || issue.assignees[0] !== original.assignee
+        || ['Priority', 'Impact', 'Effort'].some(role => issue.metadata[role] !== original.metadata[role])
+        || developmentIssueHash({ number: detail.number, title: detail.title, body: detail.body }) !== captured.issueHash) throw new Error('Development takeover live Issue or dependencies changed.');
+      const publication = developmentPublication(store, ledger, run) ?? developmentPublication(store, ledger, run, true);
+      if (publication) { const remote = await readDevelopmentCandidate({ lease: held.app, workspace: target, publication, profile, capturedSource: captured.source });
+        if (remote.pull.merged) throw new Error('Development takeover candidate already integrated.'); }
+      const base = await githubRequest(held.app, 'GET', '/repos/' + target.slug + '/git/ref/heads/' + encodeURIComponent(profile.repository.defaultBranch));
+      if (base.ref !== 'refs/heads/' + profile.repository.defaultBranch || base.object?.sha !== captured.source.sourceCommit || base.object?.type !== 'commit') throw new Error('Development takeover branch source changed.');
+      takeoverEligible(run, expected.dev); return { ...expected, verified: true, observedAt: Date.now() };
+    } finally { release(held); }
   }
   function control(target, operation) {
     const run = policy.runtime.status(target.id);
@@ -225,10 +302,11 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
       await old?.done; const binding = { runId: run.id, epoch: run.epoch };
       if (operation === 'resume') {
         if (closed || closing) throw new Error('Development app is closing.');
-        if (ledger.evidence(binding).some(value => ['prepared', 'dispatched', 'uncertain'].includes(value.state))) throw new Error('Development pending tool outcome needs recovery before resume.');
-        supervisor.control(binding, 'resume'); await supervisor.settle(target.id);
-        const next = policy.runtime.status(target.id); if (next.control !== 'running' || next.epoch <= run.epoch) throw new Error('Development resume could not be verified.');
-        ledger.rebind(run.id, next.epoch); controls.delete(target.id);
+        const recorded = ledger.status(run.id);
+        if (ledger.evidence({ runId: run.id, epoch: recorded.epoch }).some(value => ['prepared', 'dispatched', 'uncertain'].includes(value.state))) throw new Error('Development pending tool outcome needs recovery before resume.');
+        const next = await policy.runtime.resume(binding); if (next.control !== 'running' || next.epoch <= run.epoch) throw new Error('Development resume could not be verified.');
+        const previous = ledger.status(run.id);
+        ledger.rebind(run.id, next.epoch, previous.developer && previous.developer !== next.dev ? { developer: next.dev, candidate: next.assignment.candidate } : undefined); controls.delete(target.id);
         operate(target, async signal => {
           const identity = inspectWorkspace(target.path, { repository: target.id, owner: target.slug.split('/')[0], name: target.slug.split('/')[1] }), snapshot = snapshotWorkspace(identity);
           const captured = ledger.captured(run.id); if (canonicalJSON(snapshot.candidate) !== canonicalJSON(captured.source)) throw new Error('Development captured source changed before resume.');
@@ -237,7 +315,7 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
           if (developmentIssueHash({ number: issue.number, title: issue.title, body: issue.body }) !== captured.issueHash) throw new Error('Development captured Issue changed before resume.');
           await execute(target, next, snapshot, executionProfile(snapshot.files, target), issue, signal);
         });
-      } else { supervisor.control(binding, operation); await supervisor.settle(target.id); messages.set(target.id, 'Development ' + operation + ' verified. Work and the repository claim remain preserved.'); }
+      } else { supervisor.control(binding, operation); await supervisor.settle(target.id); ledger.suspend(binding); messages.set(target.id, 'Development ' + operation + ' verified. Work and the repository claim remain preserved.'); }
     })().catch(error => { errors.set(target.id, safeError(error)); messages.set(target.id, safeError(error)); }).finally(() => { controls.delete(target.id); publish(); });
     controls.set(target.id, work); publish(); return { accepted: true, snapshot: status() };
   }
@@ -405,8 +483,11 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     }
     return control(target, payload.operation);
   }
-  return Object.freeze({ status, dispatch, observe, inspectIntegration, sync() { sync(); publish(); }, async idle() { await Promise.allSettled([...tasks.values()].map(task => task.done)); await Promise.allSettled([...controls.values()]); },
+  return Object.freeze({ status, dispatch, observe, inspectIntegration, inspectContinuity, sync() { sync(); publish(); }, async idle() { await Promise.allSettled([...tasks.values()].map(task => task.done)); await Promise.allSettled([...controls.values()]); },
     async close() { closing = true; invalidate(); for (const task of tasks.values()) task.controller.abort(); try { await this.idle(); const snapshot = status(); await supervisor?.shutdown();
+      for (const workspace of store?.workspaces() ?? []) { const run = policy?.runtime.status(workspace.id); if (run && ['paused', 'stopped'].includes(run.control)) {
+        let state; try { state = ledger.status(run.id); } catch (error) { if (error.message !== 'Unknown Development run') throw error; }
+        if (state) ledger.suspend({ runId: run.id, epoch: state.epoch }); } }
       lastSnapshot = { ...snapshot, run: selected && policy ? policy.runtime.status(selected) : null, execution: snapshot.execution ? { worker: 'stopped', pending: null, error: null } : null }; closed = true;
     } catch (error) { closing = false; throw error; } } });
 }

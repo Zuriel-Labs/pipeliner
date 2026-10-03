@@ -11,7 +11,7 @@ export const definitions = Object.freeze([
 const node = value => typeof value === 'string' && /^[A-Za-z0-9_=-]{1,180}$/.test(value);
 const positive = value => Number.isSafeInteger(value) && value > 0;
 const text = (value, limit) => typeof value === 'string' && value.trim().length > 0 && value.length <= limit && !/[\p{Cc}\p{Cf}]/u.test(value);
-export const githubRequest = (lease, method, path, body) => { lease.check(); return makeRequest(lease.value.credential.accessToken, lease.send ?? fetch, lease.signal)(method, path, body).then(value => { lease.check(); return value; }); };
+export const githubRequest = (lease, method, path, body) => { lease.check(); return makeRequest(lease.value.credential.accessToken, lease.send ?? fetch, lease.signal, lease.retry)(method, path, body).then(value => { lease.check(); return value; }); };
 const request = githubRequest;
 const query = (lease, query, variables) => request(lease, 'POST', '/graphql', { query, variables });
 async function pages(fetchPage) { let count = 0; return collectConnection(cursor => { if (++count > 100) throw new Error('partial-access'); return fetchPage(cursor); }).catch(error => { if (/^(http-|graphql-|connection-|cancelled)/.test(error.message)) throw error; throw new Error('partial-access'); }); }

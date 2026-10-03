@@ -5,7 +5,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { protectedFile } from './storage.mjs';
 import { canonicalJSON, immutable, record } from './settings.mjs';
 import { workspaceData, workspaceCandidate } from './identity.mjs';
-import { transact } from './runtime.mjs';
+import { transact, runtimeDeveloperAllowed } from './runtime.mjs';
 import { openWorkerEnvironment, restrictedWorkerArgs } from './worker.mjs';
 import { developmentWorkerProgram } from '../development/worker-tools.mjs';
 
@@ -65,7 +65,7 @@ export function openExecutionSupervisor(directory, { store }) {
     const run = repository ? store.runtime.status(repository) : [...identities.keys()].map(repo => store.runtime.status(repo)).find(value => value?.id === binding.runId);
     if (!run || run.id !== binding.runId || run.epoch !== binding.epoch) throw new Error('Stale execution epoch');
     if (running && (foregroundPausing || run.control !== 'running')) throw new Error('Execution paused, stopped or recovery-required');
-    if (running) { const authority = store.worker.authority(run.repository, run.policyRevision); if (authority.dev !== run.dev || !authority.capabilities.includes('worker.exec')) throw new Error('Execution authority unavailable or revoked'); }
+    if (running) { const authority = store.worker.authority(run.repository, run.policyRevision); if (!runtimeDeveloperAllowed(authority, run.dev) || !authority.capabilities.includes('worker.exec')) throw new Error('Execution authority unavailable or revoked'); }
     return run;
   }
   function candidateCheck(identity, candidate) { if (canonicalJSON(workspaceCandidate(identity)) !== canonicalJSON(candidate)) throw new Error('Execution candidate changed'); }
@@ -105,8 +105,9 @@ export function openExecutionSupervisor(directory, { store }) {
         const retained = older ? rowFor({ runId: run.id, epoch: older.epoch }) : null;
         const nonce = randomUUID().replaceAll('-', '');
         const manifest = { name: `pipeliner-${nonce}`, nonce, runId: run.id, repository: run.repository, epoch: run.epoch, workspace: retained?.data.manifest.workspace ?? `${prepared.workspaceRoot}/${run.id.replaceAll('-', '')}`, image: prepared.image };
-        const data = { manifest, issue: run.issue, dev: run.dev, policyHash: run.policyHash, candidate, program, allowedPath, deadline: retained?.data.deadline ?? run.createdAt + run.limits['limits.agentSeconds'] * 1000 };
-        if (data.deadline <= Date.now()) throw new Error('Captured execution deadline exhausted');
+        // Development's durable per-step budget supplies every tool signal. Other programs keep their original bounded deadline.
+        const data = { manifest, issue: run.issue, dev: run.dev, policyHash: run.policyHash, candidate, program, allowedPath, deadline: program === developmentWorkerProgram ? null : retained?.data.deadline ?? run.createdAt + run.limits['limits.agentSeconds'] * 1000 };
+        if (data.deadline !== null && data.deadline <= Date.now()) throw new Error('Captured execution deadline exhausted');
         // Validate before recording, but record before the container can be created.
         restrictedWorkerArgs(manifest, program); current(binding, true);
         for (const prior of db.prepare('SELECT run_id,epoch FROM workers WHERE run_id=?').all(run.id)) await termination({ runId: prior.run_id, epoch: prior.epoch });
@@ -157,8 +158,9 @@ export function openExecutionSupervisor(directory, { store }) {
       while (inspections.has(binding.runId)) { options.signal?.throwIfAborted(); await inspections.get(binding.runId); }
       options.signal?.throwIfAborted();
       const run = current(binding, true), row = rowFor(binding), identity = identities.get(run.repository);
-      if (!row || !identity || row.data.program !== developmentWorkerProgram || row.data.deadline <= Date.now()) throw new Error('Development worker tool unavailable');
-      const deadlineSignal = AbortSignal.timeout(row.data.deadline - Date.now()), signal = options.signal ? AbortSignal.any([options.signal, deadlineSignal]) : deadlineSignal;
+      if (!row || !identity || row.data.program !== developmentWorkerProgram || row.data.deadline !== null && row.data.deadline <= Date.now()) throw new Error('Development worker tool unavailable');
+      const deadlineSignal = row.data.deadline === null ? null : AbortSignal.timeout(row.data.deadline - Date.now());
+      const signal = options.signal && deadlineSignal ? AbortSignal.any([options.signal, deadlineSignal]) : options.signal ?? deadlineSignal;
       if (inFlight.has(run.id)) throw new Error('Execution operation already pending');
       const required = { seed: ['workspace.read', 'workspace.write'], list: ['workspace.read'], read: ['workspace.read'], write: ['workspace.write'],
         run: ['worker.exec', 'workspace.write'], export: ['workspace.read'] }[request.operation];
@@ -166,11 +168,11 @@ export function openExecutionSupervisor(directory, { store }) {
       if (!required || required.some(capability => !grant.capabilities.includes(capability))) throw new Error('Development tool authority unavailable or revoked');
       candidateCheck(identity, row.data.candidate);
       const work = environment.tool(row.data.manifest, row.cid, request, { signal, mayRestart: () => {
-        try { current(binding, true); return row.data.deadline > Date.now(); } catch { return false; }
+        try { current(binding, true); return !signal?.aborted && (row.data.deadline === null || row.data.deadline > Date.now()); } catch { return false; }
       } });
       inFlight.set(run.id, work);
       try {
-        const result = await work; signal.throwIfAborted(); current(binding, true); candidateCheck(identity, row.data.candidate);
+        const result = await work; signal?.throwIfAborted(); current(binding, true); candidateCheck(identity, row.data.candidate);
         const active = store.worker.authority(run.repository, run.policyRevision);
         if (required.some(capability => !active.capabilities.includes(capability))) throw new Error('Development tool authority revoked during execution');
         const observation = await environment.inspect(row.data.manifest, row.cid); update(binding, observation.state, row.cid);
@@ -300,7 +302,7 @@ export function openExecutionSupervisor(directory, { store }) {
             continue;
           }
           let grant; try { grant = store.worker.authority(run.repository, run.policyRevision); } catch { supervisor.control(binding, 'stop'); continue; }
-          if (Date.now() >= row.data.deadline || grant.dev !== run.dev || !grant.capabilities.includes('worker.exec')) { supervisor.control(binding, 'stop'); continue; }
+          if (row.data.deadline !== null && Date.now() >= row.data.deadline || !runtimeDeveloperAllowed(grant, run.dev) || !grant.capabilities.includes('worker.exec')) { supervisor.control(binding, 'stop'); continue; }
           await supervisor.refresh(resource.repository);
         } catch (error) { update(binding, 'blocked', row.cid, failure(error)); }
       }

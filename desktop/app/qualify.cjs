@@ -264,6 +264,7 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
         assert.equal(await js("document.getElementById('pipeline-settings').querySelectorAll('script,iframe,img').length"), 0);
       });
       await check('pipeline-controls-add-reorder-declarations-routes-bounds-and-correction', async () => {
+        const originalPermissions = structuredClone(pipelines.status().current.grantedPermissions);
         await pipelineChat('Edit Development pipeline'); await js("document.getElementById('settings-nav').click()");
         await js("document.getElementById('pipeline-add-label').value='Bounded evidence check';document.getElementById('pipeline-add-kind').value='check';document.getElementById('pipeline-add-after').value='1';document.getElementById('pipeline-add-label').form.requestSubmit()");
         await wait(() => pipelines.status().draft.definition.steps.length === 7);
@@ -273,14 +274,15 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
         await js("document.getElementById('pipeline-step-3-evidence-tests').click();"); await wait(() => pipelines.status().draft.definition.steps[2].evidence.includes('tests'));
         await js("document.getElementById('pipeline-step-3-inputs-artifact').click()"); await wait(() => pipelines.status().draft.definition.steps[2].inputs.includes('artifact'));
         await js("document.getElementById('pipeline-step-3-permissions-workspace.write').click()"); await wait(() => pipelines.status().draft.definition.steps[2].permissions.includes('workspace.write'));
-        assert.equal(pipelines.status().current.grantedPermissions.includes('workspace.write'), false);
+        assert.deepEqual(pipelines.status().current.grantedPermissions, originalPermissions);
+        assert.equal(pipelines.status().current.grantedPermissions.includes('github.pr.write'), false);
         await change('pipeline-step-3-feedback', '2'); await change('pipeline-step-3-retryLimit', '11');
         await js("document.getElementById('pipeline-review').click()"); await wait(() => Boolean(pipelines.status().error)); assert.equal(pipelines.status().preview, null);
         await change('pipeline-step-3-retryLimit', '2'); await change('pipeline-step-3-visitLimit', '5'); await pipelineChat('Review this pipeline');
         assert(pipelines.status().preview); await pipelineChat('Remove step 3');
         await js("document.getElementById('settings-nav').click();document.getElementById('pipeline-review').click()"); await wait(() => Boolean(pipelines.status().error)); assert.equal(pipelines.status().preview, null);
         await pipelineChat('Send step 2 success to step 3'); await pipelineChat('Rename step 2 to Implement the bounded change'); await pipelineChat('Review this pipeline'); await pipelineChat('Apply this pipeline');
-        assert.equal(pipelines.status().current.definition.steps.length, 6); assert.equal(pipelines.status().current.grantedPermissions.includes('workspace.write'), false);
+        assert.equal(pipelines.status().current.definition.steps.length, 6); assert.deepEqual(pipelines.status().current.grantedPermissions, originalPermissions);
       });
       await check('pipeline-durable-drafts-inheritance-stale-base-and-repository-switch', async () => {
         await pipelineChat('Edit global Release pipeline'); await pipelineChat('Rename step 1 to Build on the compatible host'); await pipelineChat('Review this pipeline'); await pipelineChat('Apply this pipeline');
@@ -305,6 +307,19 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
         await pipelineChat('Reset Release pipeline to inherit'); await pipelineChat('Review this pipeline'); await pipelineChat('Apply this pipeline');
         assert.equal(pipelines.status().current.definition.steps[0].label, 'Build on the compatible host'); assert.equal(pipelines.status().current.source, 'global');
         assert.equal(policy.worker.read(first).values['privacy.conversationDays'].value, 120);
+      });
+      await check('pipeline-native-step-timeout-chat-and-control-inheritance', async () => {
+        await pipelineChat('Edit repository Development pipeline'); await pipelineChat('Set step 1 timeout to 7 seconds');
+        await pipelineChat('Review this pipeline'); await pipelineChat('Apply this pipeline');
+        assert.equal(pipelines.status().current.definition.steps[0].timeoutSeconds, 7);
+        await pipelineChat('Edit repository Development pipeline');
+        await js("document.getElementById('settings-nav').click();document.getElementById('settings-pipelines').click();document.getElementById('pipeline-step-1').open=true");
+        assert.equal(await js("document.getElementById('pipeline-step-1-timeoutSeconds').value"), '7');
+        assert.equal(await js("document.querySelector('label[for=pipeline-step-1-timeoutSeconds]').textContent"), 'Timeout in seconds · leave empty to inherit');
+        await js("const input=document.getElementById('pipeline-step-1-timeoutSeconds');input.focus();input.value='';input.dispatchEvent(new Event('change',{bubbles:true}))");
+        await wait(() => !Object.hasOwn(pipelines.status().draft.definition.steps[0], 'timeoutSeconds'));
+        await pipelineChat('Review this pipeline'); await pipelineChat('Apply this pipeline');
+        assert.equal(Object.hasOwn(pipelines.status().current.definition.steps[0], 'timeoutSeconds'), false);
       });
       await check('pipeline-preset-preview-and-accessible-semantic-fields', async () => {
         await pipelineChat('Edit repository Development pipeline'); await pipelineChat('Use PM-triggered Autonomous Dev'); await pipelineChat('Review this pipeline');
@@ -362,11 +377,14 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
         const qa = { hash: 'c'.repeat(64), decision: null, showcase: { summary: 'Synthetic source-only QA card. No Human acceptance.', findings: [], testResults: ['Synthetic recorded source check.'],
           target: 'Source-only synthetic PR target', prerequisites: ['Synthetic display fixture only.'], steps: [{ action: 'Inspect the bounded source change.', expected: 'One corrected value.' }],
           regressions: ['Original local work preserved.'], limitations: ['No app or installer testing claimed.'], nextOutcome: 'Approval integrates the displayed exact source and closes its Issue.', candidate } };
-        const display = { ...snapshot, revision: snapshot.revision + 100, busy: false, run: { issue: 7, control: 'paused' },
-          development: { state: 'candidate', turns: 4, usage: { input: 100, output: 20 } }, qa, publication: null, pending: [] };
+        const display = { ...snapshot, revision: snapshot.revision + 100, busy: false, run: { issue: 7, control: 'paused', limits: { 'limits.issueTurns': 100, 'limits.stepTurns': 20 } },
+          development: { state: 'candidate', turns: 4, stepTurns: 2, remediationCycles: 1, takeovers: [{ developer: 'synthetic-fallback' }], usage: { input: 100, output: 20, unavailable: true } }, qa, publication: null, pending: [] };
         window.webContents.send('development:status', display); await wait(() => js("Boolean(document.getElementById('chat-development-qa-approve'))"));
         assert.equal(await js("document.getElementById('chat-development-run').textContent.includes('None reported.')"), true);
         assert.equal(await js("document.getElementById('chat-development-run').textContent.includes('No app or installer testing claimed.')"), true);
+        assert.equal(await js("document.getElementById('chat-development-run').textContent.includes('4 / 100 per Issue · 2 / 20 for this step.')"), true);
+        assert.equal(await js("document.getElementById('chat-development-run').textContent.includes('Reported tokens: 120 · Some usage is unavailable. USD usage: unavailable.')"), true);
+        assert.equal(await js("document.getElementById('chat-development-run').textContent.includes('Remediation cycles: 1 · Dev takeovers: 1.')"), true);
         await js("document.getElementById('chat-nav').click();document.getElementById('chat-development-qa-feedback').focus()");
         assert.equal(await js("document.querySelector('label[for=chat-development-qa-feedback]').textContent"), 'Corrections for this candidate');
         await js("document.getElementById('chat-development-qa-feedback').value='ghu_syntheticQaFixtureOnly123';document.getElementById('chat-development-qa-send').click()");
@@ -422,7 +440,7 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
       assert.equal(folderCancelled, true);
     });
   } catch { const snapshot = workspaces.status(); workspaceEvidence = { checkpoint: workspaceStage, busy: snapshot.busy, state: snapshot.draft?.state, error: snapshot.draft?.error, folderSelected: Boolean(snapshot.draft?.folder), projectCount: snapshot.draft?.projects?.length ?? 0 }; process.exitCode = 1; }
-  const report = { desktopQualification: developmentScope ? 'development-controls' : pipelineScope ? 'versioned-pipeline-editing' : 'protected-issue-intake', checks, passed: checks.length === (developmentScope ? 22 : pipelineScope ? 23 : issueScope ? 18 : 21) && checks.every(c => c.passed), milliseconds: Math.round(performance.now() - started), windowReadyFromMainEntryMs: windowReadyMs, measurements,
+  const report = { desktopQualification: developmentScope ? 'development-controls' : pipelineScope ? 'versioned-pipeline-editing' : 'protected-issue-intake', checks, passed: checks.length === (developmentScope ? 22 + (pipelineScope ? 6 : 0) : pipelineScope ? 24 : issueScope ? 18 : 21) && checks.every(c => c.passed), milliseconds: Math.round(performance.now() - started), windowReadyFromMainEntryMs: windowReadyMs, measurements,
     versions: { electron: process.versions.electron, chromium: process.versions.chrome, node: process.versions.node, sqlite: process.versions.sqlite, os: process.platform, architecture: process.arch },
     nativeEvidence, workspaceEvidence, folderFailure, folderCancelled, synthetic: 'Synthetic GitHub/model replies and first folder selection; actual native secure field, folder-panel cancellation, protected storage, local Git and own window',
     notRun: issueScope ? ['Unchanged Codex unauthenticated discovery', 'Unchanged public GitHub App qualification', 'Unchanged invalid Cloud key probe'] : [],

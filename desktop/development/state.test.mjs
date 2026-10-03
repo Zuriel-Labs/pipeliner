@@ -22,6 +22,53 @@ function fixture(edit = () => {}) {
 }
 const output = evidence => ({ outcome: 'success', summary: 'Verified source examined.', evidence, documents: [], findings: [] });
 
+test('step revisits and recovery retain the cumulative turn ceiling', () => {
+  const f = fixture(pipeline => { pipeline.steps[0].retryLimit = 2; });
+  try {
+    f.store.begin(f.binding); f.store.turn(f.binding); f.store.turn(f.binding);
+    f.store.advance(f.binding, { ...output([]), outcome: 'failure' });
+    f.reopen(); f.store.rebind(f.run.id, 2); const next = { runId: f.run.id, epoch: 2 };
+    f.store.begin(next); f.store.turn(next);
+    assert.equal(f.store.status(f.run.id).stepTurns, 3);
+    assert.throws(() => f.store.turn(next), /turn limit/);
+  } finally { f.cleanup(); }
+});
+
+test('active step time and transient attempts remain durable across waiting and a new epoch', () => {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-development-budget-'))); let now = 1000;
+  let store = openDevelopmentStore(directory, { clock: () => now });
+  const f = fixture();
+  try {
+    const run = { ...f.run, limits: { ...f.run.limits, 'limits.agentSeconds': 2, 'limits.transientAttempts': 3 } };
+    store.create(run, f.captured); store.begin(f.binding);
+    now--; assert.throws(() => store.budget(f.binding), /backwards/); now++; store.attempt(f.binding, 'provider-one');
+    now += 600; store.budget(f.binding); now--; assert.throws(() => store.budget(f.binding), /backwards/); now++;
+    store.suspend(f.binding); now += 10000; store.close(); store = openDevelopmentStore(directory, { clock: () => now });
+    store.rebind(run.id, 2); const next = { runId: run.id, epoch: 2 }; store.activate(next);
+    assert.equal(store.budget(next).remainingMs, 1400); assert.equal(store.status(run.id).turns, 1);
+    store.attempt(next, 'provider-one'); store.attempt(next, 'provider-one');
+    assert.throws(() => store.attempt(next, 'provider-one'), /attempt/);
+    now += 1400; assert.throws(() => store.budget(next), /deadline/);
+  } finally { store.close(); rmSync(directory, { recursive: true }); f.cleanup(); }
+});
+
+test('remediation cannot exceed the captured Issue budget through graph retries', () => {
+  const f = fixture(pipeline => { pipeline.steps[0].retryLimit = 10; pipeline.steps[0].visitLimit = 10; });
+  try {
+    for (let n = 0; n < 4; n++) { f.store.begin(f.binding); f.store.advance(f.binding, { ...output([]), outcome: 'failure' }); }
+    assert.equal(f.store.status(f.run.id).state, 'blocked');
+    assert.equal(f.store.status(f.run.id).remediationCycles, 3);
+    assert.throws(() => f.store.begin(f.binding), /blocked/);
+  } finally { f.cleanup(); }
+});
+
+test('step timeout overrides the inherited type deadline without changing the captured run', () => {
+  const f = fixture(pipeline => { pipeline.steps[0].timeoutSeconds = 7; });
+  try { f.store.begin(f.binding); assert.equal(f.store.budget(f.binding).remainingMs <= 7000, true);
+    assert.equal(f.store.captured(f.run.id).run.limits['limits.agentSeconds'], 1800); }
+  finally { f.cleanup(); }
+});
+
 function qaCandidate(f) {
   for (const [kind, result] of [['source', {}], ['implementation', {}], ['tests', { name: 'Repository checks', command: 'node --test', exitCode: 0 }], ['review', {}]]) {
     f.store.begin(f.binding); f.store.turn(f.binding);
@@ -29,6 +76,8 @@ function qaCandidate(f) {
     f.store.finish(f.binding, request.id, { candidate: source, result }); f.store.advance(f.binding, output([request.id]));
   }
   f.store.begin(f.binding);
+  assert.equal(f.store.status(f.run.id).stepTurns, 0);
+  assert.equal(f.store.status(f.run.id).turns, 4);
   return { scope: 'issue', issue: 1, summary: 'Synthetic unit candidate.', findings: [], testResults: ['Repository checks passed.'],
     target: 'Synthetic unit source', prerequisites: [], steps: [{ action: 'Inspect the source.', expected: 'Scoped value change.' }], regressions: ['Original source preserved.'],
     limitations: ['Synthetic unit test; no Human QA.'], nextOutcome: 'Integrate the exact source and close the Issue.', approvalPhrase: 'Approved', candidate: source };

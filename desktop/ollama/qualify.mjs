@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
+import { retryAfter } from '../core/reliability.mjs';
 
 const ORIGINS = { cloud: 'https://ollama.com', 'local-cloud': 'http://127.0.0.1:11434' };
 const MODELS = { cloud: 'deepseek-v4.1-flash', 'local-cloud': 'deepseek-v4.1-flash:cloud' };
@@ -135,7 +136,7 @@ export async function api(path, key, options = {}, send = fetch, timeoutMs = 300
       redirect: 'error',
       signal,
     });
-    if (!response.ok) { await response.body?.cancel().catch(() => {}); throw new Error(`http-${response.status}`); }
+    if (!response.ok) { await response.body?.cancel().catch(() => {}); const error = new Error(`http-${response.status}`); error.retryAfterMs = retryAfter(response); throw error; }
     const result = options.consume ? await options.consume(response) : response;
     signal.throwIfAborted();
     return result;
@@ -143,6 +144,7 @@ export async function api(path, key, options = {}, send = fetch, timeoutMs = 300
     if (options.signal?.aborted) throw new Error('cancelled');
     if (controller.signal.aborted) throw new Error('timeout');
     if (/^http-\d+$/.test(error.message)) throw error;
+    if (/^(?:stream-|malformed-|missing-|model-mismatch|incomplete-line|line-too-large)/.test(error.message)) throw error;
     throw new Error('transport-failed');
   } finally { clearTimeout(timer); }
 }

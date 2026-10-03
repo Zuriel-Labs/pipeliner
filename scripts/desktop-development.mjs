@@ -24,12 +24,13 @@ if (publishing) { await publishSaved(publishing[1], publishing[2]); process.exit
 const reuse = process.argv.length === 3 ? /^--agent-github(?:=([a-f0-9-]{36}))?$/.exec(process.argv[2]) : null;
 const githubFixture = Boolean(reuse);
 const agent = githubFixture || process.argv.length === 3 && process.argv[2] === '--agent';
-if ((!agent && process.argv.length !== 2) || process.platform !== 'darwin' || process.arch !== 'arm64') throw new Error('Development qualification requires this qualified Mac and optional --agent or --agent-github');
+const budgets = process.argv.length === 3 && process.argv[2] === '--budgets';
+if ((!agent && !budgets && process.argv.length !== 2) || process.platform !== 'darwin' || process.arch !== 'arm64') throw new Error('Development qualification requires this qualified Mac and optional --agent, --agent-github or --budgets');
 const directory = realpathSync(mkdtempSync('/private/tmp/pipeliner-development-'));
-const ownership = { issue: 42, run: randomUUID(), directory }, marker = join(directory, 'qualification-owner.json');
+const ownership = { issue: budgets ? 48 : 42, run: randomUUID(), directory }, marker = join(directory, 'qualification-owner.json');
 writeFileSync(marker, JSON.stringify(ownership), { flag: 'wx', mode: 0o600 });
 const started = performance.now(), results = [];
-let policy, supervisor, ledger, publicationStore, image, workerVersions, fixtureRepository, fixtureAccount, fixtureIssue, publication, proofHash, error = null, cleanup = null;
+let policy, supervisor, ledger, publicationStore, image, workerVersions, fixtureRepository, fixtureAccount, fixtureIssue, publication, proofHash, continuityProof, failureLine = null, error = null, cleanup = null;
 const check = (name, extra = {}) => { results.push({ name, passed: true, ...extra }); console.log(JSON.stringify({ progress: name })); };
 const instructions = 'Change only app.mjs so exported value is 2. Keep the existing test unchanged. Research first: inspect source, invoke read path /host-canary once to verify the host denies protected paths, then record research, specification and non-UI design documents with verified source evidence only; do not list denial IDs in success evidence. During implementation run node --test first and retain the actual failing result; read app.mjs to get its exact hash, change value to 2, run node --test again and repair any failure before finishing success. Checks must run node --test on the changed tree. Review both files and actual check results, with a review document and explicit findings. Do not publish or merge. All source is synthetic.';
 // Explicit host administrative test transport only. No token leaves gh or reaches the app/worker/model.
@@ -124,10 +125,18 @@ try {
   if (agent) check('actual-installed-cloud-model-binding', { model: metadata.name, remoteModel: metadata.remote_model, digest: metadata.digest });
   const permissions = ['workspace.read', 'workspace.write', 'worker.exec', ...(agent ? ['provider.turn'] : [])];
   const catalog = { repositories: ['R_development'], capabilities: permissions, maxConcurrency: 1, background: false,
-    connections: [{ id: 'ollama', provider: 'ollama', repositories: ['R_development'] }], developers: [{ id: 'fixture-dev', connection: 'ollama', ...(agent ? { model: metadata.name } : {}), metrics: [] }], extensions: [] };
+    connections: [{ id: 'ollama', provider: 'ollama', repositories: ['R_development'] }], developers: [{ id: 'fixture-dev', connection: 'ollama', ...(agent ? { model: metadata.name } : {}), metrics: [] },
+      ...(budgets ? [{ id: 'fixture-fallback', connection: 'ollama', model: 'synthetic-fallback', metrics: [] }] : [])], extensions: [] };
   policy = openPolicyStore(state, { catalog: () => catalog, inspectors: {
     repository: async ({ repository, issue }) => ({ repository, issue, status: 'In Progress', state: 'OPEN', active: [{ issue, status: 'In Progress' }], observedAt: Date.now() }),
     worker: binding => supervisor.inspectWorker(binding), effect: action => supervisor.inspectEffect(action),
+    continuity: async expected => {
+      // Native worker/candidate proof; Issue and provider observations here are synthetic, not live GitHub or Cloud qualification.
+      assert.deepEqual(expected.candidate, continuityProof); assert.equal(expected.dev, 'fixture-fallback');
+      assert.equal(policy.runtime.status(expected.repository).control, 'paused');
+      await supervisor.inspectWorker({ runId: expected.runId, epoch: expected.epoch });
+      return { ...expected, verified: true, observedAt: Date.now() };
+    },
   } });
   if (agent) {
     const input = policy.control.capture({ commandId: 'fixture-host-input', conversationId: 'qualification', target: null, text: 'Authorize only the synthetic qualification provider turn ceiling.' });
@@ -135,12 +144,15 @@ try {
     policy.control.apply({ commandId: 'fixture-host-apply', inputId: input.id, proposalId: proposal.id, hash: proposal.hash, conversationId: 'qualification', target: null });
   }
   const input = policy.control.capture({ commandId: 'fixture-input', conversationId: 'qualification', target: 'R_development', text: 'Synthetic configuration for authorized local worker qualification; not Human QA.' });
-  const proposal = policy.control.prepare({ inputId: input.id, requestId: 'fixture-proposal', conversationId: 'qualification', scope: 'repository', target: 'R_development', changes: { 'agents.dev': 'fixture-dev', ...(agent ? { 'connections.ollama': 'ollama', 'permissions.grants': permissions } : {}) }, reset: [] });
+  const budgetPipeline = budgets ? structuredClone(policy.worker.read('R_development').values['pipelines.development'].value) : null;
+  if (budgetPipeline) budgetPipeline.steps[0].timeoutSeconds = 30;
+  const proposal = policy.control.prepare({ inputId: input.id, requestId: 'fixture-proposal', conversationId: 'qualification', scope: 'repository', target: 'R_development', changes: { 'agents.dev': 'fixture-dev',
+    ...(budgets ? { 'agents.fallbacks': ['fixture-fallback'], 'agents.takeover': true, 'pipelines.development': budgetPipeline } : {}), ...(agent ? { 'connections.ollama': 'ollama', 'permissions.grants': permissions } : {}) }, reset: [] });
   policy.control.apply({ commandId: 'fixture-apply', inputId: input.id, proposalId: proposal.id, hash: proposal.hash, conversationId: 'qualification', target: 'R_development' });
   supervisor = openExecutionSupervisor(directory, { store: policy });
   const reservation = await policy.runtime.reserve(identity, { commandId: 'fixture-reserve', issue: fixtureIssue?.number ?? 1, pipeline: 'development' });
   let binding = { runId: reservation.run.id, epoch: reservation.run.epoch };
-  console.log(JSON.stringify({ inventory: { issue: 42, directory, scope: 'One owned private VM/image/container and synthetic source. ' + (agent ? 'Authorized temporary installed Cloud relay qualification; product direct Cloud path unchanged. ' + (githubFixture ? 'Real GitHub objects through host administrative gh; product App/Project path and Human QA not exercised.' : 'GitHub/Human QA not exercised.') : 'Actual provider/GitHub/Human QA not exercised.') } }));
+  console.log(JSON.stringify({ inventory: { issue: ownership.issue, directory, scope: 'One owned private VM/image/container and synthetic source. ' + (agent ? 'Authorized temporary installed Cloud relay qualification; product direct Cloud path unchanged. ' + (githubFixture ? 'Real GitHub objects through host administrative gh; product App/Project path and Human QA not exercised.' : 'GitHub/Human QA not exercised.') : 'Actual provider/GitHub/Human QA not exercised.') } }));
   await supervisor.start(identity, binding, { candidate: workspaceCandidate(identity), program: developmentWorkerProgram, allowedPath: 'development-tools' });
   const inventory = new DatabaseSync(join(directory, 'execution.sqlite'), { readOnly: true });
   try { image = JSON.parse(inventory.prepare('SELECT document FROM workers WHERE run_id=? AND epoch=?').get(binding.runId, binding.epoch).document).manifest.image; } finally { inventory.close(); }
@@ -195,6 +207,13 @@ try {
   const before = await tool({ operation: 'read', path: 'app.mjs' });
   await tool({ operation: 'write', path: 'app.mjs', beforeHash: before.hash, mode: '100644', content: Buffer.from('export const value = 2;\n').toString('base64') });
   const green = await tool({ operation: 'run', command: 'node --test', timeoutMs: 10000 }); assert.equal(green.exitCode, 0); assert.equal(green.truncated, false); check('actual-isolated-code-and-passing-check');
+  if (budgets) {
+    continuityProof = { sourceCommit: snapshot.candidate.sourceCommit, gitTree: sourceTree((await tool({ operation: 'export' })).files) };
+    ledger = openDevelopmentStore(state);
+    ledger.create(reservation.run, { pipeline: policy.worker.read('R_development').values['pipelines.development'].value, source: snapshot.candidate,
+      developer: { id: 'fixture-dev', connection: 'ollama', model: 'synthetic-initial' }, fallbacks: [{ id: 'fixture-fallback', connection: 'ollama', model: 'synthetic-fallback' }],
+      skillsHash: starterHash, issueHash: developmentIssueHash({ number: 1, title: 'Synthetic budget qualification', body: instructions }), checks: [{ name: 'Fixture tests', command: 'node --test' }], logBytes: 1048576 });
+  }
   assert.equal((await supervisor.tool(binding, { operation: 'read', path: protectedPath })).ok, false);
   assert.equal((await supervisor.tool(binding, { operation: 'write', path: 'pipeliner.config.json', beforeHash: null, mode: '100644', content: Buffer.from('{}').toString('base64') })).ok, false);
   await assert.rejects(supervisor.tool(binding, { operation: 'pm-apply', permissions: ['host.automation'] }));
@@ -208,11 +227,37 @@ try {
   assert.equal(receipt.received, true); await assert.rejects(pending); await supervisor.settle('R_development');
   assert.equal(supervisor.status('R_development').run.control, 'paused'); await supervisor.inspectWorker(binding);
   check('local-pause-cancels-tool-and-verifies-termination', { receivedMilliseconds: receiptMs });
-  const former = binding; supervisor.control(binding, 'resume'); await supervisor.settle('R_development');
-  const resumed = policy.runtime.status('R_development'); binding = { runId: resumed.id, epoch: resumed.epoch }; assert.equal(binding.epoch, former.epoch + 1);
+  const former = binding;
+  if (budgets) {
+    // The earlier native setup is outside this synthetic accounting fixture. Start its deadline only after actual termination.
+    ledger.begin(binding); ledger.setCandidate(binding, continuityProof); ledger.attempt(binding, 'synthetic-provider'); ledger.usage(binding, { input: null, output: null });
+    ledger.retry(binding, 'synthetic-provider', 'http-503', Date.now() + 1000);
+    check('durable-synthetic-attempt-and-unavailable-usage', { modelCalls: 0, chargedTurns: ledger.status(binding.runId).turns, providerEvidence: 'Synthetic accounting fixture, not a Cloud request.' });
+    ledger.suspend(binding); const before = ledger.status(binding.runId), assigned = await policy.runtime.takeover(binding, { dev: 'fixture-fallback', candidate: continuityProof });
+    console.log(JSON.stringify({ checkpoint: 'takeover-assigned', dev: assigned.dev, epoch: assigned.epoch }));
+    ledger.rebind(binding.runId, assigned.epoch, { developer: assigned.dev, candidate: continuityProof });
+    const next = await policy.runtime.resume({ runId: assigned.id, epoch: assigned.epoch }); binding = { runId: next.id, epoch: next.epoch }; ledger.rebind(binding.runId, binding.epoch);
+    await supervisor.start(identity, binding, { candidate: workspaceCandidate(identity), program: developmentWorkerProgram, allowedPath: 'development-tools' });
+    console.log(JSON.stringify({ checkpoint: 'takeover-worker-started', epoch: binding.epoch }));
+    const after = ledger.status(binding.runId);
+    assert.equal(next.id, reservation.run.id); assert.equal(next.dev, 'fixture-fallback'); assert.equal(next.policyHash, reservation.run.policyHash); assert.deepEqual(next.limits, reservation.run.limits);
+    assert.equal(after.turns, before.turns); assert.deepEqual(after.attempts, before.attempts); assert.deepEqual(after.budgets, before.budgets);
+    assert.equal(after.takeovers.length, 1); assert.equal(after.usage.unavailable, true);
+    assert.deepEqual(after.qa, before.qa); assert.deepEqual(after.qaHistory, before.qaHistory); assert.ok(!after.qa?.decision && !after.qaHistory?.length);
+    assert.equal(sourceTree((await tool({ operation: 'export' })).files), continuityProof.gitTree); assert.equal(binding.epoch, former.epoch + 2);
+    check('actual-stopped-worker-takeover-retains-candidate-claim-and-budgets', { oldEpoch: former.epoch, newEpoch: binding.epoch, providerAndIssueEvidence: 'Synthetic. Worker termination and candidate export are actual.' });
+  } else { supervisor.control(binding, 'resume'); await supervisor.settle('R_development');
+    const resumed = policy.runtime.status('R_development'); binding = { runId: resumed.id, epoch: resumed.epoch }; assert.equal(binding.epoch, former.epoch + 1); }
   await assert.rejects(supervisor.tool(former, { operation: 'list' }), /epoch/);
   const exported = await tool({ operation: 'export' }); assert.notEqual(sourceTree(exported.files), snapshot.candidate.gitTree); assert.equal(readFileSync(join(checkout, 'app.mjs'), 'utf8'), 'export const value = 1;\n');
   check('fresh-epoch-retains-candidate-and-preserves-local-source');
+  if (budgets) {
+    ledger.activate(binding); const remaining = ledger.budget(binding).remainingMs;
+    await assert.rejects(supervisor.tool(binding, { operation: 'run', command: 'sleep 120', timeoutMs: 60000 }, { signal: AbortSignal.timeout(remaining) }));
+    supervisor.control(binding, 'pause'); await supervisor.settle('R_development'); ledger.suspend(binding);
+    assert.throws(() => ledger.budget(binding), /deadline/); await supervisor.inspectWorker(binding);
+    check('actual-tool-deadline-cancels-and-stops-owned-worker', { capturedSeconds: 30, remainingMillisecondsAtDispatch: remaining });
+  }
   supervisor.control(binding, 'stop'); await supervisor.settle('R_development');
   // Inject a crash boundary after directory removal but before its ownership marker is removed.
   const cleanupInventory = new DatabaseSync(join(directory, 'execution.sqlite'), { readOnly: true }); let ownedManifest;
@@ -225,7 +270,8 @@ try {
   assert.equal(policy.runtime.status('R_development').releasedAt, null); await supervisor.cleanupRun(binding);
   check('owned-run-workspace-cleanup-preserves-host-source-and-claim', removed);
   }
-} catch (failure) { error = 'Development worker qualification failed: ' + (/^[A-Za-z0-9 ,;:.\/-]{1,200}$/.test(failure.message) ? failure.message : 'inspect private local failure'); }
+} catch (failure) { failureLine = Number(/desktop-development\.mjs:(\d+)/.exec(failure.stack)?.[1]) || null;
+  error = 'Development worker qualification failed: ' + (/^[A-Za-z0-9 ,;:.\/-]{1,200}$/.test(failure.message) ? failure.message : 'inspect private local failure'); }
 finally {
   const failures = [];
   for (const close of [async () => supervisor && await supervisor.shutdown(), () => ledger?.close(), () => publicationStore?.close(), () => policy?.close(),
@@ -250,7 +296,7 @@ finally {
     } catch { cleanup.failed = true; cleanup.github = { failed: true, repository: fixtureRepository.full_name }; }
   }
 }
-const passed = !error && results.length === (githubFixture ? 5 : agent ? 3 : 8) && cleanup?.workspaceRemoved && !cleanup.failed;
-console.log(JSON.stringify({ passed, issue: 42, milliseconds: performance.now() - started, host: { os: execFileSync('/usr/bin/sw_vers', ['-productVersion'], { encoding: 'utf8' }).trim(), architecture: process.arch, node: process.version },
-  workerVersions, image, results, error, cleanup, notRun: [githubFixture ? 'Current scoped App authentication and real Project integration; direct Cloud credential path' : agent ? 'Real GitHub Issue/PR journey and direct Cloud credential path' : 'Real provider/Issue/PR journey', 'Native Desktop UI/keyboard', 'Human PM QA', 'Windows/Linux', 'Host native app execution'] }));
+const passed = !error && results.length === (githubFixture ? 5 : agent ? 3 : budgets ? 11 : 8) && cleanup?.workspaceRemoved && !cleanup.failed;
+console.log(JSON.stringify({ passed, issue: ownership.issue, milliseconds: performance.now() - started, host: { os: execFileSync('/usr/bin/sw_vers', ['-productVersion'], { encoding: 'utf8' }).trim(), architecture: process.arch, node: process.version },
+  workerVersions, image, results, error, failureLine, cleanup, notRun: [githubFixture ? 'Current scoped App authentication and real Project integration; direct Cloud credential path' : agent ? 'Real GitHub Issue/PR journey and direct Cloud credential path' : 'Real provider/Issue/PR journey', 'Native Desktop UI/keyboard', 'Human PM QA', 'Windows/Linux', 'Host native app execution'] }));
 process.exitCode = passed ? 0 : 1;

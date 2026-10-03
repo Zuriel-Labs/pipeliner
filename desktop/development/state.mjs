@@ -50,7 +50,7 @@ export function validateDevelopmentOutput(value) {
 }
 
 // Only the trusted Development host receives this ledger. Policy/runtime own authority.
-export function openDevelopmentStore(directory) {
+export function openDevelopmentStore(directory, { clock = Date.now } = {}) {
   const db = new DatabaseSync(protectedFile(directory, 'development.sqlite'), { allowExtension: false, timeout: 1000 });
   try {
     const version = db.prepare('PRAGMA user_version').get().user_version;
@@ -84,6 +84,31 @@ export function openDevelopmentStore(directory) {
     if (value.state.epoch !== binding.epoch) throw new Error('Stale Development epoch');
     return value;
   }
+  function now(state) {
+    const value = clock();
+    if (!Number.isSafeInteger(value) || value < (state.budgetClock ?? 0)) throw new Error('Development clock moved backwards; recovery required');
+    return value;
+  }
+  function stepBudget(captured, state) {
+    if (!state.budgets) throw new Error('Development legacy execution budget needs verified recovery');
+    const step = captured.pipeline.steps.find(step => step.id === state.step);
+    const entry = Object.hasOwn(state.budgets, state.step) ? state.budgets[state.step] : { turns: 0, spentMs: 0, activeAt: null };
+    const seconds = step?.timeoutSeconds ?? captured.run.limits['limits.' + (step?.kind === 'check' ? 'build' : step?.kind === 'pr-integration' ? 'control' : 'agent') + 'Seconds'] ?? (step?.kind === 'check' ? 3600 : step?.kind === 'pr-integration' ? 300 : 1800);
+    const time = now(state), spentMs = entry.spentMs + (entry.activeAt === null ? 0 : time - entry.activeAt), remainingMs = seconds * 1000 - spentMs;
+    if (remainingMs <= 0) throw new Error('Captured Development step deadline exhausted');
+    return { entry, time, spentMs, remainingMs, deadlineAt: time + remainingMs };
+  }
+  function seal(state) {
+    const entry = state.budgets && Object.hasOwn(state.budgets, state.step) ? state.budgets[state.step] : null;
+    const time = now(state);
+    if (entry?.activeAt !== null && entry) { entry.spentMs += time - entry.activeAt; entry.activeAt = null; }
+    state.budgetClock = time;
+  }
+  function countTurn(captured, state) {
+    const budget = stepBudget(captured, state);
+    if (state.turns >= captured.run.limits['limits.issueTurns'] || budget.entry.turns >= captured.run.limits['limits.stepTurns']) throw new Error('Captured Development turn limit exhausted');
+    budget.entry.turns++; state.turns++; state.stepTurns = budget.entry.turns; state.budgetClock = budget.time;
+  }
   const write = state => { quota(state.runId, state, 0, true); db.prepare('UPDATE development_runs SET state=?,state_hash=? WHERE id=?').run(canonicalJSON(state), hash(state), state.runId); };
   function request(row) {
     if (!row) throw new Error('Unknown Development request');
@@ -105,7 +130,7 @@ export function openDevelopmentStore(directory) {
   }
   return Object.freeze({
     create(run, settings) {
-      canonicalJSON(run); canonicalJSON(settings); record(settings, ['pipeline', 'source', 'developer', 'skillsHash', 'issueHash', 'checks', 'logBytes'], ['executionProfile', 'integrationMethod']);
+      canonicalJSON(run); canonicalJSON(settings); record(settings, ['pipeline', 'source', 'developer', 'skillsHash', 'issueHash', 'checks', 'logBytes'], ['executionProfile', 'integrationMethod', 'fallbacks']);
       if (settings.integrationMethod !== undefined && !['merge', 'squash'].includes(settings.integrationMethod)) throw new Error('Invalid captured integration method');
       if (settings.executionProfile) { record(settings.executionProfile, ['kind', 'version']);
         if (settings.executionProfile.kind !== 'pipeliner-desktop' || settings.executionProfile.version !== 1) throw new Error('Invalid Desktop execution profile'); }
@@ -113,6 +138,10 @@ export function openDevelopmentStore(directory) {
       validatePipeline(settings.pipeline, true); candidate(settings.source);
       record(settings.developer, ['id', 'connection', 'model']);
       if (settings.developer.id !== run.dev || !['codex', 'ollama'].includes(settings.developer.connection) || !text(settings.developer.model, 160)) throw new Error('Invalid captured Development model');
+      if (settings.fallbacks !== undefined) {
+        if (!Array.isArray(settings.fallbacks) || settings.fallbacks.length > 64 || new Set([run.dev, ...settings.fallbacks.map(dev => dev.id)]).size !== settings.fallbacks.length + 1) throw new Error('Invalid captured Development fallback order');
+        for (const dev of settings.fallbacks) { record(dev, ['id', 'connection', 'model']); if (!id(dev.id) || !['codex', 'ollama'].includes(dev.connection) || !text(dev.model, 160)) throw new Error('Invalid captured Development fallback'); }
+      }
       if (!id(run.id) || !id(run.repository) || !id(run.dev) || !Number.isSafeInteger(run.issue) || run.issue < 1 || !Number.isSafeInteger(run.epoch) || run.epoch < 1
         || !Number.isSafeInteger(run.policyRevision) || run.policyRevision < 0 || !sha(run.policyHash) || run.pipelineHash !== hash(settings.pipeline) || !sha(settings.skillsHash) || !sha(settings.issueHash)
         || !Number.isSafeInteger(settings.logBytes) || settings.logBytes < 65536 || settings.logBytes > 50 * 1024 * 1024 || !Array.isArray(settings.checks) || !settings.checks.length || settings.checks.length > 32) throw new Error('Invalid captured Development binding');
@@ -124,7 +153,8 @@ export function openDevelopmentStore(directory) {
         const previous = db.prepare('SELECT * FROM development_runs WHERE id=?').get(run.id);
         if (previous) { if (previous.captured_hash !== hash(captured)) throw new Error('Development run binding conflict'); return immutable(read(run.id).state); }
         const state = { runId: run.id, epoch: run.epoch, step: settings.pipeline.entry, state: 'ready', candidate: settings.source, visits: {}, retries: {}, visit: 0,
-          turns: 0, stepTurns: 0, usage: { input: 0, output: 0, unavailable: false }, message: null };
+          turns: 0, stepTurns: 0, budgets: {}, attempts: {}, remediationCycles: 0, developer: run.dev, takeovers: [], budgetClock: 0,
+          usage: { input: 0, output: 0, unavailable: false }, message: null };
         db.prepare('INSERT INTO development_runs VALUES(?,?,?,?,?)').run(run.id, canonicalJSON(captured), hash(captured), canonicalJSON(state), hash(state));
         return immutable(state);
       });
@@ -147,21 +177,40 @@ export function openDevelopmentStore(directory) {
         if (!['agent', 'check'].includes(step.kind)) throw new Error('Captured Development step capability unavailable');
         const visits = Object.hasOwn(state.visits, step.id) ? state.visits[step.id] : 0;
         if (visits >= step.visitLimit) throw new Error('Captured Development visit limit exhausted');
-        state.visits[step.id] = visits + 1; state.visit++; state.stepTurns = 0; state.state = 'executing'; state.message = null;
+        const budget = stepBudget(captured, state);
+        state.budgets[step.id] = budget.entry; budget.entry.activeAt ??= budget.time;
+        state.visits[step.id] = visits + 1; state.visit++; state.stepTurns = budget.entry.turns; state.budgetClock = budget.time; state.state = 'executing'; state.message = null;
         write(state); return immutable(state);
       });
     },
     turn(binding) {
       return transact(db, () => {
         const { captured, state } = executing(binding);
-        if (state.turns >= captured.run.limits['limits.issueTurns'] || state.stepTurns >= captured.run.limits['limits.stepTurns']) throw new Error('Captured Development turn limit exhausted');
-        state.turns++; state.stepTurns++; write(state); return immutable({ turns: state.turns, stepTurns: state.stepTurns });
+        countTurn(captured, state); write(state); return immutable({ turns: state.turns, stepTurns: state.stepTurns });
       });
+    },
+    budget(binding) { return transact(db, () => { const { captured, state } = bound(binding), value = stepBudget(captured, state);
+      state.budgetClock = value.time; write(state); return immutable({ step: state.step, spentMs: value.spentMs, remainingMs: value.remainingMs, deadlineAt: value.deadlineAt }); }); },
+    activate(binding) { return transact(db, () => { const { captured, state } = bound(binding), value = stepBudget(captured, state);
+      state.budgets[state.step] = value.entry; value.entry.activeAt ??= value.time; state.budgetClock = value.time; write(state); return immutable(state); }); },
+    suspend(binding) { return transact(db, () => { const { state } = bound(binding); seal(state); write(state); return immutable(state); }); },
+    attempt(binding, key) {
+      if (!id(key)) throw new Error('Invalid Development retry identity');
+      return transact(db, () => { const { captured, state } = executing(binding), prior = Object.hasOwn(state.attempts, key) ? state.attempts[key] : { count: 0, retryAt: 0, error: null };
+        if (prior.count >= (captured.run.limits['limits.transientAttempts'] ?? 3)) throw new Error('Captured Development transient attempts exhausted');
+        if (now(state) < prior.retryAt) throw new Error('Captured Development retry backoff pending');
+        countTurn(captured, state); prior.count++; state.attempts[key] = prior; write(state); return immutable(prior); });
+    },
+    retry(binding, key, error, retryAt) {
+      if (!id(key) || typeof error !== 'string' || !/^(?:http-(?:408|429|5\d\d)|timeout|transport-failed|read-failed)$/.test(error) || !Number.isSafeInteger(retryAt)) throw new Error('Development retry is not a classified transient');
+      return transact(db, () => { const { captured, state } = executing(binding), value = stepBudget(captured, state), prior = state.attempts[key];
+        if (!Object.hasOwn(state.attempts, key) || !prior.count || retryAt < value.time || retryAt >= value.deadlineAt) throw new Error('Captured Development retry cannot fit the remaining deadline');
+        prior.error = error; prior.retryAt = retryAt; state.message = 'Temporary provider failure; bounded retry remains inside the captured budget.'; write(state); return immutable(prior); });
     },
     usage(binding, value) {
       record(value, ['input', 'output']);
       if (![value.input, value.output].every(v => v === null || Number.isSafeInteger(v) && v >= 0)) throw new Error('Invalid provider usage');
-      return transact(db, () => { const { state } = bound(binding); for (const key of ['input', 'output']) { if (value[key] === null) state.usage.unavailable = true; else state.usage[key] += value[key]; } write(state); return immutable(state.usage); });
+      return transact(db, () => { const { state } = bound(binding); for (const key of ['input', 'output']) { if (value[key] === null) state.usage.unavailable = true; else { if (!Number.isSafeInteger(state.usage[key] + value[key])) throw new Error('Provider usage bounds exhausted'); state.usage[key] += value[key]; } } write(state); return immutable(state.usage); });
     },
     prepare(binding, requestId, kind, payload) {
       if (!id(requestId) || !['provider', 'source', 'implementation', 'command', 'tests', 'review', 'publication'].includes(kind)) throw new Error('Invalid Development request kind');
@@ -227,6 +276,11 @@ export function openDevelopmentStore(directory) {
         state.step = step.routes[value.decision === 'approve' ? 'success' : 'feedback'];
         if (value.decision === 'approve') { state.qa.decision = 'approve'; state.qa.inputId = value.inputId; state.state = 'candidate'; }
         else { state.feedback = decision; state.qa = null; state.integration = null; state.state = state.step === 'blocked' ? 'blocked' : 'ready'; }
+        if (value.decision === 'feedback') {
+          if ((state.remediationCycles ?? 0) >= (captured.run.limits['limits.remediationCycles'] ?? 3)) { state.step = 'blocked'; state.state = 'blocked'; }
+          else state.remediationCycles = (state.remediationCycles ?? 0) + 1;
+        }
+        state.stepTurns = state.budgets?.[state.step]?.turns ?? 0;
         state.message = value.decision === 'approve' ? 'Current tested candidate approved for the disclosed outcome.' : value.text;
         write(state); return immutable(state);
       });
@@ -244,7 +298,7 @@ export function openDevelopmentStore(directory) {
     complete(binding, resultHash) {
       return transact(db, () => { const { state } = bound(binding);
         if (state.state !== 'candidate' || !state.integration || state.integration.resultHash !== resultHash) throw new Error('Verified Development integration required for completion');
-        state.state = 'complete'; state.step = 'complete'; state.message = 'Verified integration and source-only closeout complete.'; write(state); return immutable(state);
+        state.state = 'complete'; state.step = 'complete'; state.stepTurns = 0; state.message = 'Verified integration and source-only closeout complete.'; write(state); return immutable(state);
       });
     },
     advance(binding, result) {
@@ -271,16 +325,28 @@ export function openDevelopmentStore(directory) {
         }
         quota(binding.runId, result);
         db.prepare('INSERT INTO development_outputs VALUES(?,?,?,?,?,?)').run(binding.runId, state.visit, state.step, canonicalJSON(state.candidate), canonicalJSON(result), hash(result));
+        seal(state);
         const retries = Object.hasOwn(state.retries, state.step) ? state.retries[state.step] : 0;
-        if (result.outcome === 'failure' && retries < step.retryLimit) { state.retries[state.step] = retries + 1; state.state = 'ready'; }
+        const exhausted = result.outcome !== 'success' && (state.remediationCycles ?? 0) >= (captured.run.limits['limits.remediationCycles'] ?? 3);
+        if (result.outcome !== 'success' && !exhausted) state.remediationCycles = (state.remediationCycles ?? 0) + 1;
+        if (exhausted) { state.step = 'blocked'; state.state = 'blocked'; }
+        else if (result.outcome === 'failure' && retries < step.retryLimit) { state.retries[state.step] = retries + 1; state.state = 'ready'; }
         else { state.step = step.routes[result.outcome]; state.state = state.step === 'blocked' ? 'blocked' : state.step === 'complete' ? 'integration-required' : 'ready'; }
+        state.stepTurns = state.budgets[state.step]?.turns ?? 0;
         state.message = result.summary; write(state); return immutable(state);
       });
     },
-    rebind(runId, epoch) {
+    rebind(runId, epoch, takeover) {
       return transact(db, () => {
-        const { state } = read(runId);
+        const { captured, state } = read(runId);
         if (!Number.isSafeInteger(epoch) || epoch <= state.epoch || requests(runId).some(value => ['prepared', 'dispatched', 'uncertain'].includes(value.state))) throw new Error('Development epoch recovery unresolved');
+        if (takeover) {
+          record(takeover, ['developer', 'candidate']); candidate(takeover.candidate);
+          if (!captured.fallbacks?.some(dev => dev.id === takeover.developer) || canonicalJSON(takeover.candidate) !== canonicalJSON(state.candidate)
+            || state.takeovers?.some(row => row.developer === takeover.developer)) throw new Error('Development takeover binding unavailable');
+          state.takeovers = [...(state.takeovers ?? []), { from: state.developer ?? captured.developer.id, developer: takeover.developer, epoch, candidate: state.candidate }];
+          state.developer = takeover.developer;
+        }
         state.epoch = epoch; write(state); return immutable(state);
       });
     },

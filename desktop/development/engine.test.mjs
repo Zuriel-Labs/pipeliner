@@ -12,15 +12,15 @@ import { createDevelopmentEngine } from './engine.mjs';
 
 const hash = value => createHash('sha256').update(typeof value === 'string' ? value : canonicalJSON(value)).digest('hex');
 const file = content => ({ path: 'app.mjs', mode: '100644', content: Buffer.from(content).toString('base64') });
-function fixture() {
+function fixture(extraLimits = {}, fallbackIds = []) {
   const issue = { number: 1, title: 'Change fixture value to two', body: 'A bounded fixture.' };
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-development-engine-'))), source = [file('export const value = 1;\n')], candidate = { sourceCommit: 'a'.repeat(40), gitTree: sourceTree(source) };
   const run = { id: 'run-one', repository: 'repo-one', issue: 1, dev: 'dev-one', epoch: 1, policyRevision: 1, policyHash: 'b'.repeat(64), createdAt: Date.now(),
-    pipelineHash: hash(developmentTemplate), control: 'running', limits: { 'limits.stepTurns': 8, 'limits.issueTurns': 16, 'limits.agentSeconds': 1800 } };
+    pipelineHash: hash(developmentTemplate), control: 'running', limits: { 'limits.stepTurns': 8, 'limits.issueTurns': 16, 'limits.agentSeconds': 1800, ...extraLimits } };
   const ledger = openDevelopmentStore(root); ledger.create(run, { pipeline: developmentTemplate, source: candidate, developer: { id: run.dev, connection: 'ollama', model: 'test-model' },
-    skillsHash: starterHash, issueHash: developmentIssueHash(issue), checks: [{ name: 'Fixture check', command: 'node --test' }], logBytes: 1048576 });
-  let files = [], closed = false, turns = 0; const operations = [], binding = { runId: run.id, epoch: run.epoch }, permissions = ['provider.turn', 'workspace.read', 'workspace.write', 'worker.exec'];
-  const lease = { check: () => { if (closed) throw new Error('connection-changed'); }, close: () => { closed = true; }, turn: async input => { turns++; return await next(input, turns); } };
+    fallbacks: fallbackIds.map(id => ({ id, connection: 'ollama', model: 'test-model' })), skillsHash: starterHash, issueHash: developmentIssueHash(issue), checks: [{ name: 'Fixture check', command: 'node --test' }], logBytes: 1048576 });
+  let files = [], turns = 0, lease; const operations = [], binding = { runId: run.id, epoch: run.epoch }, permissions = ['provider.turn', 'workspace.read', 'workspace.write', 'worker.exec'];
+  const makeLease = () => { let closed = false; return { check: () => { if (closed) throw new Error('connection-changed'); }, close: () => { closed = true; }, turn: async input => { turns++; return await next(input, turns); } }; };
   let next = async () => { throw new Error('provider unavailable'); };
   const perform = async (_binding, request) => { assert.deepEqual(_binding, binding); operations.push(request.operation);
     const shapes = { seed: ['files'], list: [], read: ['path'], write: ['path', 'content', 'mode', 'beforeHash'], run: ['command', 'timeoutMs'], export: [] };
@@ -34,9 +34,10 @@ function fixture() {
     throw new Error('tool denied');
   };
   const supervisor = { tool: async (...args) => args[1].operation === 'read' && args[1].path === 'missing.mjs' ? { ok: false, error: 'tool-denied-or-incomplete' } : ({ ok: true, result: await perform(...args) }) };
-  const policy = { runtime: { status: () => run }, worker: { authority: () => ({ dev: run.dev, connections: ['ollama'], capabilities: permissions, bundledSkills: true }) } };
-  const connections = { acquireProvider: async (id, model) => { assert.equal(id, 'ollama'); assert.equal(model, 'test-model'); return lease; } };
-  return { ledger, source, binding, run, permissions, operations, lease, set next(value) { next = value; }, get turns() { return turns; },
+  const grant = { dev: run.dev, connections: ['ollama'], capabilities: permissions, bundledSkills: true, takeover: fallbackIds.length > 0, fallbacks: fallbackIds };
+  const policy = { runtime: { status: () => run }, worker: { authority: () => grant } };
+  const connections = { acquireProvider: async (id, model) => { assert.equal(id, 'ollama'); assert.equal(model, 'test-model'); lease = makeLease(); return lease; } };
+  return { ledger, source, binding, run, grant, permissions, operations, get lease() { return lease; }, set next(value) { next = value; }, get turns() { return turns; },
     engine: createDevelopmentEngine({ ledger, policy, supervisor, connections }), context: { issue, source },
     cleanup() { ledger.close(); rmSync(root, { recursive: true }); } };
 }
@@ -45,6 +46,61 @@ const call = (f, operation, payload, epoch = f.binding.epoch) => ({ content: '',
   name: 'pipeliner_tool', arguments: { ...f.binding, epoch, operation, payload } } }] });
 const latestEvidence = input => JSON.parse(input.messages.filter(message => message.role === 'tool').at(-1).content).evidenceId;
 const documents = ['research', 'specification', 'design'].map(kind => ({ kind, title: kind, paragraphs: ['Inspect the fixture; change one value; verify its check.'] }));
+
+test('classified provider failure retries inside the same operation and records unavailable charged usage', async () => {
+  const f = fixture();
+  try {
+    f.next = async (input, turn) => {
+      if (turn === 1) throw new Error('http-503');
+      if (turn === 2) return call(f, 'list', {});
+      if (turn === 3) return call(f, 'finish', output([latestEvidence(input)], documents));
+      throw new Error('fixture-stop-after-transient-recovery');
+    };
+    await assert.rejects(f.engine.run(f.binding, f.context), /fixture-stop/);
+    const state = f.ledger.status(f.run.id); assert.equal(state.attempts['provider-1-1'].count, 2);
+    assert.equal(state.turns, 4); assert.equal(state.usage.unavailable, true); assert.equal(state.usage.input, 20);
+    assert.equal(f.ledger.outputs(f.run.id)[0].step, 'research'); assert.equal(f.operations.includes('write'), false);
+  } finally { f.cleanup(); }
+});
+
+test('exhausted provider attempts cannot restart through a new epoch', async () => {
+  const f = fixture({ 'limits.transientAttempts': 1 });
+  try {
+    f.next = async () => { throw new Error('http-503'); };
+    await assert.rejects(f.engine.run(f.binding, f.context), /attempts exhausted/); assert.equal(f.turns, 1);
+    f.ledger.suspend(f.binding); f.ledger.rebind(f.run.id, 2); f.binding.epoch = 2; f.run.epoch = 2;
+    await assert.rejects(f.engine.run(f.binding, f.context), /attempts exhausted/); assert.equal(f.turns, 1);
+    assert.equal(f.ledger.status(f.run.id).turns, 1); assert.equal(f.ledger.status(f.run.id).usage.unavailable, true);
+  } finally { f.cleanup(); }
+});
+
+test('turn exhaustion denies a new tool from the last allowed model response', async () => {
+  for (const limit of ['limits.issueTurns', 'limits.stepTurns']) {
+    const f = fixture({ [limit]: 1 });
+    try {
+      f.next = async () => call(f, 'list', {});
+      await assert.rejects(f.engine.run(f.binding, f.context), /turn limit/);
+      assert.equal(f.turns, 1); assert.deepEqual(f.operations, ['seed', 'export']);
+      assert.equal(f.ledger.status(f.run.id).turns, 1);
+    } finally { f.cleanup(); }
+  }
+});
+
+test('only a later configured Dev triggers takeover; the last Dev retains bounded transient retry', async () => {
+  for (const last of [false, true]) {
+    const f = fixture({}, ['dev-two', 'dev-three']);
+    try {
+      if (last) {
+        const candidate = f.ledger.status(f.run.id).candidate;
+        f.ledger.rebind(f.run.id, 2, { developer: 'dev-two', candidate }); f.ledger.rebind(f.run.id, 3, { developer: 'dev-three', candidate });
+        f.run.dev = 'dev-three'; f.run.epoch = f.binding.epoch = 3;
+      }
+      f.next = async (_input, turn) => { throw Error(turn === 1 ? 'http-503' : 'fixture-stop'); };
+      await assert.rejects(f.engine.run(f.binding, f.context), last ? /fixture-stop/ : error => error.code === 'development-provider-transient');
+      assert.equal(f.turns, last ? 2 : 1); assert.equal(f.ledger.status(f.run.id).attempts['provider-1-1'].count, last ? 2 : 1);
+    } finally { f.cleanup(); }
+  }
+});
 
 test('core steps bind broker evidence, deny a stale tool and stop before PM testing', async () => {
   const f = fixture();

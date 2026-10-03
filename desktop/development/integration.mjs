@@ -148,7 +148,10 @@ export function integrationObservation(action, proof) {
 
 export async function mergeDevelopmentCandidate({ store, runtime, ledger, lease, workspace, run, publication, profile, authority }) {
   const binding = { runId: run.id, epoch: run.epoch }, state = ledger.status(run.id), captured = ledger.captured(run.id);
-  const current = () => { lease.check(); authority(); };
+  ledger.activate?.(binding);
+  const fallbackDeadline = Date.now() + (run.limits?.['limits.controlSeconds'] ?? 300) * 1000;
+  const remaining = () => ledger.budget ? ledger.budget(binding).remainingMs : fallbackDeadline - Date.now();
+  const current = () => { lease.check(); authority(); if (remaining() <= 0) throw new Error('Captured Development integration deadline exhausted'); };
   current();
   if (profile.release?.strategy !== 'none') throw new Error('Development source-only integration unavailable');
   const approval = developmentIntegrationAuthority(captured, state, publication.candidate);
@@ -159,9 +162,9 @@ export async function mergeDevelopmentCandidate({ store, runtime, ledger, lease,
     try { inspected = await readIntegrationCandidate({ lease, workspace, publication, profile, capturedSource: captured.source }); break; }
     catch (error) {
       if (error.code !== 'integration-pending') throw error;
-      const remaining = run.createdAt + run.limits?.['limits.agentSeconds'] * 1000 - Date.now();
-      if (!Number.isFinite(remaining) || remaining <= 0) throw new Error('Development captured deadline exhausted while waiting for integration evidence.');
-      await delay(Math.min(2000, remaining), undefined, { signal: lease.signal });
+      const time = remaining();
+      if (!Number.isFinite(time) || time <= 0) throw new Error('Development captured deadline exhausted while waiting for integration evidence.');
+      await delay(Math.min(2000, time), undefined, { signal: lease.signal });
     }
   }
   current();

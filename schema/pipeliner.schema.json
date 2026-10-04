@@ -39,6 +39,7 @@
             "backlog": { "$ref": "#/$defs/nonEmptyString" },
             "onHold": { "$ref": "#/$defs/nonEmptyString" },
             "inProgress": { "$ref": "#/$defs/nonEmptyString" },
+            "pendingReview": { "$ref": "#/$defs/nonEmptyString", "description": "Exact native Project status for a circulating baton handoff; omit until verified." },
             "inReview": { "$ref": "#/$defs/nonEmptyString" },
             "done": { "$ref": "#/$defs/nonEmptyString" }
           }
@@ -91,8 +92,9 @@
               "minItems": 5,
               "items": { "$ref": "#/$defs/nonEmptyString" }
             }
-          }
-        }
+        },
+        "infrastructureAgreement": { "$ref": "#/$defs/infrastructureAgreement" }
+      }
       }
     },
     "quality": {
@@ -140,10 +142,35 @@
   },
   "$defs": {
     "releaseCycle": {
-      "type": "object", "additionalProperties": false, "required": ["phases"],
+      "type": "object", "additionalProperties": false, "required": ["channelPlan", "phases"],
       "properties": {
+        "channelPlan": { "$ref": "#/$defs/channelPlan" },
         "phases": { "type": "array", "minItems": 2, "items": { "$ref": "#/$defs/releasePhase" } }
       }
+    },
+    "channelPlan": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "omitAlpha": { "type": "boolean", "default": false },
+        "omitBeta": { "type": "boolean", "default": false, "description": "May be true only when omitAlpha is true." },
+        "extraCanaryBeforeStable": { "type": "boolean", "default": false, "description": "Opt-in repository-local extra Canary immediately before Stable." }
+      }
+    },
+    "infrastructureAgreement": {
+      "type": "object", "additionalProperties": false,
+      "required": ["state", "buildMethod", "testEnvironments", "releaseDestinations", "agreedBy", "evidence"],
+      "properties": {
+        "state": { "enum": ["unresolved", "agreed"] },
+        "buildMethod": { "$ref": "#/$defs/nonEmptyString" },
+        "testEnvironments": { "allOf": [{ "$ref": "#/$defs/strings" }], "minItems": 1 },
+        "releaseDestinations": { "$ref": "#/$defs/strings" },
+        "agreedBy": { "type": "array", "items": { "$ref": "#/$defs/agreementParty" } },
+        "evidence": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "agreementParty": {
+      "type": "object", "additionalProperties": false, "required": ["role", "id"],
+      "properties": { "role": { "enum": ["human-pm", "agent-dev"] }, "id": { "$ref": "#/$defs/nonEmptyString" } }
     },
     "releasePhase": {
       "type": "object", "additionalProperties": false,
@@ -151,6 +178,7 @@
       "properties": {
         "id": { "$ref": "#/$defs/nonEmptyString" },
         "kind": { "enum": ["development", "stabilization", "production"] },
+        "channel": { "enum": ["Canary", "Alpha", "Beta", "Stable"] },
         "branch": { "$ref": "#/$defs/nonEmptyString" },
         "environments": { "allOf": [{ "$ref": "#/$defs/strings" }], "minItems": 1, "description": "Names of existing release.environments entries; references are checked by profile validation." },
         "approvalPhrase": { "$ref": "#/$defs/nonEmptyString" },

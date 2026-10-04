@@ -55,7 +55,10 @@
     }
   ],
   "automationLimits": [
-    "QA waiting and incoming pickup remain In Progress on the same active Issue; only the PM may request On Hold.",
+    "The canonical standard has three active semantic states: In Progress, Pending Review and In Review. This current example has no verified native Pending Review option, so circulating handoffs are blocked until an exact Project mapping is supplied; only the PM may request On Hold.",
+    "When no Issue is active and the PM has not named one, recommend up to three ready Backlog Issues and wait for explicit PM selection; never auto-select the next Issue.",
+    "Implementation uses a feature branch and linked PR; the PR-ready candidate receives the full Showcase, PM feedback/fixes stay on that candidate, and only exact approval authorizes merge and Issue closure. A later Issue requires an explicit PM call.",
+    "Release cycles use repository-local Canary/Alpha/Beta/Stable channel configuration: Stable is mandatory, every included phase runs its full Dev Pipeline and PM approval, and no direct write enters Stable. Build method, QA environments and release destinations require explicit PM/Agent agreement; phase names never infer infrastructure.",
     "The Issue evidence records ordered QA turns, current and next owner/environment, exact candidate, suite and PM state, and cleanup. Assignee follows the current baton owner; do not infer owner from OS.",
     "QA completion never auto-closes an Issue. All configured release and PM completion gates remain required.",
     "Agents discover field and option identifiers at runtime instead of hard-coding GraphQL IDs.",

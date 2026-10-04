@@ -16,12 +16,60 @@ function branch(value) {
     !/[\s~^:?*\[\\]/.test(value) && !value.includes('..') && !value.includes('@{') && value !== '@' &&
     value.split('/').every(part => part && !part.startsWith('.') && !part.endsWith('.lock'));
 }
+
+export function releaseChannelPath({ omitAlpha = false, omitBeta = false, extraCanaryBeforeStable = false } = {}) {
+  if (typeof omitAlpha !== 'boolean' || typeof omitBeta !== 'boolean' || typeof extraCanaryBeforeStable !== 'boolean') {
+    throw new Error('release channel options must be boolean');
+  }
+  if (omitBeta && !omitAlpha) throw new Error('Beta may be omitted only when Alpha is omitted');
+  const path = ['Canary'];
+  if (!omitAlpha) path.push('Alpha', 'Canary');
+  if (!omitBeta) path.push('Beta');
+  if (extraCanaryBeforeStable) path.push('Canary');
+  path.push('Stable');
+  return path;
+}
+
+export function infrastructureReadiness(profile, action = 'plan') {
+  if (!['plan', 'build', 'deploy'].includes(action)) throw new Error('unknown infrastructure action');
+  if (action === 'plan') return { ready: true, reason: 'Planning does not require an infrastructure agreement.' };
+  const agreement = profile?.workflow?.infrastructureAgreement;
+  if (!agreement || agreement.state !== 'agreed') {
+    return { ready: false, reason: 'Explicit Human PM and Agent Dev infrastructure agreement required before build or deploy.' };
+  }
+  if (action === 'build' && (!nonempty(agreement.buildMethod) || !Array.isArray(agreement.testEnvironments) || agreement.testEnvironments.length === 0)) {
+    return { ready: false, reason: 'Agreed build method and test environments are required before build.' };
+  }
+  if (action === 'deploy' && (!Array.isArray(agreement.releaseDestinations) || agreement.releaseDestinations.length === 0)) {
+    return { ready: false, reason: 'An agreed release destination is required before deploy.' };
+  }
+  return { ready: true, reason: 'Infrastructure agreement is explicit and repository-local.' };
+}
+
+function validateChannelPlan(cycle, phases) {
+  if (cycle.channelPlan === undefined) return;
+  if (!cycle.channelPlan || typeof cycle.channelPlan !== 'object' || Array.isArray(cycle.channelPlan)) {
+    throw new Error('release channel plan must be an object');
+  }
+  const expected = releaseChannelPath(cycle.channelPlan);
+  const actual = phases.map(phase => phase.channel);
+  if (actual.some(channel => !['Canary', 'Alpha', 'Beta', 'Stable'].includes(channel))) {
+    throw new Error('release channel plan requires every phase to name Canary, Alpha, Beta or Stable');
+  }
+  if (actual.length !== expected.length || actual.some((channel, index) => channel !== expected[index])) {
+    throw new Error(`release channel order must be ${expected.join(' -> ')}`);
+  }
+  if (actual.at(-1) !== 'Stable') throw new Error('Stable is mandatory and must be the final release channel');
+}
+
 export function validateCycle(profile) {
   const cycle = profile.release?.cycle;
   if (cycle === undefined) return;
   requirePairedQA(profile.qa);
   if (!cycle || !Array.isArray(cycle.phases) || cycle.phases.length < 2) throw new Error('release cycle needs at least two ordered phases');
+  if (cycle.channelPlan === undefined) throw new Error('release cycle channelPlan is required; configure the repository-local Canary/Alpha/Beta/Stable path explicitly');
   const phases = cycle.phases;
+  validateChannelPlan(cycle, phases);
   strings(phases.map(p => p?.id), 'phase IDs', 2);
   strings(phases.map(p => p?.branch), 'phase branches', 2);
   if (phases[0].kind !== 'development' || phases.at(-1).kind !== 'production' || phases.slice(0, -1).some(p => p.kind === 'production')) throw new Error('cycle must run development through final production');

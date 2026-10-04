@@ -49,21 +49,22 @@
       }
     ],
     "cycle": {
+      "channelPlan": { "omitAlpha": true },
       "phases": [
         {
-          "id": "development", "kind": "development", "branch": "develop", "environments": ["Development"],
+          "id": "development", "kind": "development", "channel": "Canary", "branch": "develop", "environments": ["Development"],
           "approvalPhrase": "Approved",
           "readiness": ["Release scope Issues are verified", "All QA turns and PMs approve the aggregate candidate", "Release scope is frozen"],
           "promotion": "source", "forwardPortTo": []
         },
         {
-          "id": "beta", "kind": "stabilization", "branch": "beta", "environments": ["Beta"],
+          "id": "beta", "kind": "stabilization", "channel": "Beta", "branch": "beta", "environments": ["Beta"],
           "approvalPhrase": "Approved",
           "readiness": ["Frozen release scope has no unresolved blockers", "All QA turns and PMs approve the aggregate candidate", "Beta fixes are integrated and verified in development", "Rollback target is verified"],
           "promotion": "distinct-artifact", "forwardPortTo": ["development"]
         },
         {
-          "id": "production", "kind": "production", "branch": "main", "environments": ["Production"],
+          "id": "production", "kind": "production", "channel": "Stable", "branch": "main", "environments": ["Production"],
           "approvalPhrase": "Approved",
           "readiness": ["Approved Beta artifact is promoted without rebuilding", "Production identity and runtime are verified", "All QA turns and PMs accept the aggregate release"],
           "promotion": "same-artifact", "forwardPortTo": []

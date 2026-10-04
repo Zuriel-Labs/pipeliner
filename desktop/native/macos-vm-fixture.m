@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <limits.h>
+#include <signal.h>
 
 // Native qualification only. No host shares, network, clipboard, USB or provider sessions.
 static void report(NSDictionary *value) {
@@ -26,11 +27,25 @@ static BOOL writePrivate(NSData *data, NSURL *url) {
 @property NSDate *began;
 @property BOOL finishing;
 @property BOOL bootDeadlineExceeded;
+@property (strong) dispatch_source_t termination;
 - (void)install;
 - (void)boot;
+- (void)armTermination;
 @end
 
 @implementation MacQualification
+- (void)armTermination {
+  signal(SIGTERM, SIG_IGN);
+  self.termination = dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL, SIGTERM, 0, dispatch_get_main_queue());
+  dispatch_source_set_event_handler(self.termination, ^{
+    report(@{@"ownedCancellationReceived": @YES});
+    if (self.installer) [self.installer.progress cancel];
+    else if (self.vm) [self stop];
+    else fail(@"cancel-before-vm-start", nil);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ fail(@"owned-cancellation-unverified", nil); });
+  });
+  dispatch_resume(self.termination);
+}
 - (VZVirtualMachineConfiguration *)configuration:(VZMacPlatformConfiguration *)platform {
   NSError *error = nil;
   VZVirtualMachineConfiguration *configuration = [VZVirtualMachineConfiguration new];
@@ -70,7 +85,7 @@ static BOOL writePrivate(NSData *data, NSURL *url) {
         || requirements.minimumSupportedCPUCount > 2 || requirements.minimumSupportedMemorySize > 4ULL * 1024 * 1024 * 1024) fail(@"restore-image-configuration", loadError);
       int fd = open(childURL(self.root, @"Disk.img").fileSystemRepresentation, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
       if (fd < 0) fail(@"owned-disk-create", nil);
-      BOOL sized = ftruncate(fd, 32ULL * 1024 * 1024 * 1024) == 0; close(fd); if (!sized) fail(@"owned-disk-size", nil);
+      BOOL sized = ftruncate(fd, 64ULL * 1024 * 1024 * 1024) == 0; close(fd); if (!sized) fail(@"owned-disk-size", nil);
       VZMacPlatformConfiguration *platform = [[VZMacPlatformConfiguration alloc] init];
       platform.hardwareModel = requirements.hardwareModel; platform.machineIdentifier = [VZMacMachineIdentifier new];
       if (!writePrivate(platform.hardwareModel.dataRepresentation, childURL(self.root, @"HardwareModel"))
@@ -154,7 +169,7 @@ int main(int argc, const char *argv[]) {
     if (![root.lastPathComponent hasPrefix:@"pipeliner-54-macos-worker-"] || ![root isAbsolutePath]
       || !realpath(root.fileSystemRepresentation, actual) || strcmp(root.fileSystemRepresentation, actual) != 0 || lstat(root.fileSystemRepresentation, &info) != 0
       || !S_ISDIR(info.st_mode) || info.st_uid != getuid() || (info.st_mode & 077) != 0) { report(@{@"failed": @"owned-root-validation"}); return 2; }
-    MacQualification *probe = [MacQualification new]; probe.root = root;
+    MacQualification *probe = [MacQualification new]; probe.root = root; [probe armTermination];
     if ([mode isEqualToString:@"--install"]) { [probe install]; CFRunLoopRun(); }
     else if ([mode isEqualToString:@"--boot"]) { [probe boot]; [NSApp run]; }
     else return 2;

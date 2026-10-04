@@ -31,7 +31,7 @@ async function readText(filePath, errors, label = filePath) {
   }
 }
 
-const REQUIRED_SKILLS = ['adopt', 'audit-backlog', 'close-issue', 'create-issue', 'maintain', 'monitor-updates', 'pipeline-health', 'release-candidate', 'release-production', 'review-issue', 'update', 'work-issue'].map(name => `pipeliner-${name}`);
+const REQUIRED_SKILLS = ['adopt', 'audit-backlog', 'close-issue', 'configure', 'create-issue', 'maintain', 'monitor-updates', 'pipeline-health', 'release-candidate', 'release-production', 'review-issue', 'update', 'work-issue'].map(name => `pipeliner-${name}`);
 
 // Detect known superseded directives after reconciliation, not arbitrary natural-language semantics.
 export function validateOperationalText(text) {
@@ -203,7 +203,8 @@ export function compareProjectSnapshot(blueprint, snapshot, profile) {
   }
 
   const fields = new Map(snapshot.fields.map((field) => [field.name, field]));
-  const expectedFields = [{ name: profile.project.statusField, options: ['backlog', 'onHold', 'inProgress', 'inReview', 'done'].map(key => profile.project.statuses[key]) }, ...Object.values(profile.project.metadataFields)];
+  const statusKeys = ['backlog', 'onHold', 'inProgress', ...(profile.project.statuses.pendingReview ? ['pendingReview'] : []), 'inReview', 'done'];
+  const expectedFields = [{ name: profile.project.statusField, options: statusKeys.map(key => profile.project.statuses[key]) }, ...Object.values(profile.project.metadataFields)];
   for (const expected of expectedFields) {
     const actual = fields.get(expected.name);
     if (!actual) errors.push(`field missing: ${expected.name}`);

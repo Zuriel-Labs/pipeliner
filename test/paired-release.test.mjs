@@ -37,10 +37,12 @@ function record(id, candidate = c1, round = 1, scope = 'issue') {
 function profile() {
   return { repository: { owner: 'Example', name: 'app', defaultBranch: 'main' }, qa: qa(), release: {
     candidateIdentity: ['sourceCommit', 'gitTree'], environments: [{ name: 'preview' }, { name: 'production' }],
-    cycle: { phases: [
-      { id: 'alpha', kind: 'development', branch: 'develop', environments: ['preview'], approvalPhrase: 'Approved', readiness: ['scope complete'], promotion: 'source', forwardPortTo: [] },
-      { id: 'beta', kind: 'stabilization', branch: 'release/1.0', environments: ['preview'], approvalPhrase: 'Approved', readiness: ['no blockers'], promotion: 'same-artifact', forwardPortTo: ['alpha'] },
-      { id: 'stable', kind: 'production', branch: 'main', environments: ['production'], approvalPhrase: 'Approved', readiness: ['verified'], promotion: 'same-artifact', forwardPortTo: [] }
+    cycle: { channelPlan: {}, phases: [
+      { id: 'canary-1', kind: 'development', channel: 'Canary', branch: 'canary', environments: ['preview'], approvalPhrase: 'Approved', readiness: ['scope complete'], promotion: 'source', forwardPortTo: [] },
+      { id: 'alpha', kind: 'development', channel: 'Alpha', branch: 'develop', environments: ['preview'], approvalPhrase: 'Approved', readiness: ['scope complete'], promotion: 'source', forwardPortTo: [] },
+      { id: 'canary-2', kind: 'development', channel: 'Canary', branch: 'canary/alpha', environments: ['preview'], approvalPhrase: 'Approved', readiness: ['no blockers'], promotion: 'source', forwardPortTo: [] },
+      { id: 'beta', kind: 'stabilization', channel: 'Beta', branch: 'release/1.0', environments: ['preview'], approvalPhrase: 'Approved', readiness: ['no blockers'], promotion: 'same-artifact', forwardPortTo: ['alpha'] },
+      { id: 'stable', kind: 'production', channel: 'Stable', branch: 'main', environments: ['production'], approvalPhrase: 'Approved', readiness: ['verified'], promotion: 'same-artifact', forwardPortTo: [] }
     ] } } };
 }
 test('native capability never changes message-only indefinite waiting', () => {
@@ -108,7 +110,7 @@ test('home follows installed canonical path and verifies Git fetch and push iden
 });
 test('cycle rejects unknown environment, branch collisions and forward-port targets', () => {
   assert.doesNotThrow(() => validateCycle(profile()));
-  for (const mutate of [p => { p.release.cycle.phases[1].branch = 'develop'; }, p => { p.release.cycle.phases[0].environments = ['unknown']; },
+  for (const mutate of [p => { p.release.cycle.phases[1].branch = 'canary'; }, p => { p.release.cycle.phases[0].environments = ['unknown']; },
     p => { p.release.cycle.phases[1].forwardPortTo = ['stable']; }]) {
     const p = profile(); mutate(p); assert.throws(() => validateCycle(p));
   }
@@ -176,7 +178,7 @@ test('approvals bind the actual Issue number and every phase environment', () =>
   const r = record('a'); r.pm.phrase = r.showcase.approvalPhrase = 'Approve Issue #9';
   assert.equal(evaluateQA(q, c1, [r], { issue: 9, currentTurn: 'a' }).state, 'complete');
   assert.notEqual(evaluateQA(q, c1, [r], { issue: 10, currentTurn: 'a' }).state, 'complete');
-  const p = profile(); p.release.cycle.phases[0].approvalPhrase = 'Ready Issue #{number}';
+  const p = profile(); p.release.cycle.phases[1].approvalPhrase = 'Ready Issue #{number}';
   const s = phaseState(); s.approvals.forEach(a => { a.phrase = 'Ready Issue #9'; });
   assert.equal(evaluatePhase(p, s).state, 'ready');
   s.verification.environments = [];
@@ -196,7 +198,7 @@ test('stabilization requires verified forward-port and approved identical artifa
   mismatch.approvals.forEach(a => { a.artifactDigest = 'sha256:new'; });
   assert.equal(evaluatePhase(p, mismatch).state, 'waiting');
   s.artifact.previousDigest = 'sha256:other'; assert.equal(evaluatePhase(p, s).state, 'waiting');
-  p.release.cycle.phases[1].promotion = 'distinct-artifact';
+  p.release.cycle.phases[3].promotion = 'distinct-artifact';
   assert.equal(evaluatePhase(p, s).state, 'waiting');
   s.artifact.channelInputs = 'reviewed beta channel inputs'; assert.equal(evaluatePhase(p, s).state, 'ready');
   s.approvals[0].artifactDigest = 'other'; assert.equal(evaluatePhase(p, s).state, 'waiting');
@@ -216,7 +218,7 @@ test('malformed nested release evidence fails closed with a decision', () => {
   }
 });
 test('immutable strategy cannot configure distinct Production artifact', () => {
-  const p = profile(); p.release.strategy = 'immutable-promotion'; p.release.cycle.phases[2].promotion = 'distinct-artifact';
+  const p = profile(); p.release.strategy = 'immutable-promotion'; p.release.cycle.phases[4].promotion = 'distinct-artifact';
   assert.throws(() => validateCycle(p), /same-artifact/);
 });
 test('later exact cleanup resolution preserves historical retained-resource record', () => {

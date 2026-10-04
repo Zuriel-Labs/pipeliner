@@ -1,0 +1,4 @@
+interface:
+  display_name: "Configure Repository Pipeline"
+  short_description: "Guide explicit local pipeline configuration"
+  default_prompt: "Use $pipeliner-configure to inventory this repository's local pipeline configuration, resolve only explicit Human PM and Agent Dev agreements, and report readiness gaps without cross-repository state or deployment actions."

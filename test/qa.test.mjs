@@ -64,6 +64,7 @@ test('QA requires complete ordered evidence, supports self and shared-OS pickup'
     assert.equal(state.state, mode === 'single' ? 'complete' : 'pickup');
     if (mode !== 'single') {
       assert.equal(state.current.developer, qa.turns[1].developer);
+      assert.equal(state.projectStatus, 'Pending Review');
       assert.equal(evaluateQA(qa, candidate, [first, evidence(qa, 1)]).state, 'complete');
     }
   }

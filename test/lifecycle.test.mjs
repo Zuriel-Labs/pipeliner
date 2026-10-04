@@ -1,16 +1,18 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
-import { selectWork, clarificationDecision, reviewRoute, releaseStages, identityKeys } from '../scripts/lib/lifecycle.mjs';
+import { activeStatusValues, handoffResumeDecision, selectWork, standardStatusReadiness, clarificationDecision, reviewRoute, releaseStages, identityKeys } from '../scripts/lib/lifecycle.mjs';
 import { validateProfile } from '../scripts/lib/config.mjs';
 
 const profile = JSON.parse(await readFile(new URL('../pipeliner.config.json', import.meta.url)));
-const issue = (number, priority = 'P1', status = 'Backlog') => ({ number, priority, status, state: 'OPEN', ready: true });
+const issue = (number, priority = 'P1', status = 'Backlog') => ({ number, priority, status, state: 'OPEN', ready: true, assignee: 'brimdor' });
 
-test('start selects ready priority then oldest Issue; explicit and active targets take precedence', () => {
+test('unrequested start returns top three recommendations; explicit and active targets take precedence', () => {
   const issues = [issue(9), issue(8), issue(10, 'P0'), { ...issue(11, 'P0'), ready: false }];
-  assert.equal(selectWork(profile, { issues }).issue.number, 10);
-  assert.equal(selectWork(profile, { issues: issues.slice(0, 2) }).issue.number, 8);
+  const recommendation = selectWork(profile, { issues });
+  assert.equal(recommendation.state, 'question');
+  assert.deepEqual(recommendation.recommendations.map(item => item.number), [10, 8, 9]);
+  assert.equal(selectWork(profile, { issues: issues.slice(0, 2), requested: 8 }).issue.number, 8);
   assert.equal(selectWork(profile, { issues, requested: 9 }).issue.number, 9);
   assert.equal(selectWork(profile, { issues: [...issues, issue(7, 'P2', 'In Review')] }).issue.number, 7);
   assert.equal(selectWork(profile, { issues: [...issues, issue(7, 'P2', 'In Review')], requested: 9 }).state, 'blocked');
@@ -24,6 +26,19 @@ test('selection fails closed on incomplete state, competing active Issues and On
   assert.equal(selectWork(profile, { issues: [issue(1)], intent: 'audit' }).state, 'read-only');
   assert.equal(selectWork(profile, { issues: [issue(1), { ...issue(2), status: undefined }] }).state, 'blocked');
   assert.equal(selectWork(profile, { issues: [issue(1), issue(1)] }).state, 'blocked');
+  assert.equal(selectWork(profile, { issues: [issue(1, 'P1', 'In Progress'), { ...issue(2, 'P1', 'In Review'), assignee: undefined }] }).state, 'blocked');
+});
+
+test('standard active states and baton return require exact Pending Review and assignment', () => {
+  assert.deepEqual(activeStatusValues(profile), ['In Progress', 'In Review']);
+  assert.deepEqual(standardStatusReadiness(profile).missing, ['pendingReview']);
+  const standardized = structuredClone(profile);
+  standardized.project.statuses.pendingReview = 'Pending Review';
+  assert.deepEqual(activeStatusValues(standardized), ['In Progress', 'Pending Review', 'In Review']);
+  assert.equal(standardStatusReadiness(standardized).ready, true);
+  assert.deepEqual(handoffResumeDecision({ status: 'In Progress', assignee: 'brimdor', dev: 'brimdor' }).state, 'read-only');
+  assert.deepEqual(handoffResumeDecision({ status: 'Pending Review', assignee: 'other', dev: 'brimdor' }).state, 'read-only');
+  assert.deepEqual(handoffResumeDecision({ status: 'Pending Review', assignee: 'brimdor', dev: 'brimdor' }), { state: 'resume' });
 });
 
 test('questions stay in messages regardless of native capability; silence never answers', () => {

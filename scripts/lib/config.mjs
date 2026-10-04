@@ -40,6 +40,27 @@ function validateProjectField(value, field) {
   requireStringArray(object.options, `${field}.options`, 1);
 }
 
+function validateInfrastructureAgreement(value) {
+  const field = 'workflow.infrastructureAgreement';
+  const agreement = requireObject(value, field);
+  if (!['unresolved', 'agreed'].includes(agreement.state)) throw new Error(`${field}.state must be unresolved or agreed`);
+  requireString(agreement.buildMethod, `${field}.buildMethod`);
+  requireStringArray(agreement.testEnvironments, `${field}.testEnvironments`, 1);
+  requireStringArray(agreement.releaseDestinations, `${field}.releaseDestinations`, 0);
+  if (!Array.isArray(agreement.agreedBy)) throw new Error(`${field}.agreedBy must be an array`);
+  const roles = agreement.agreedBy.map((item, index) => {
+    const entry = requireObject(item, `${field}.agreedBy[${index}]`);
+    requireString(entry.id, `${field}.agreedBy[${index}].id`);
+    if (!['human-pm', 'agent-dev'].includes(entry.role)) throw new Error(`${field}.agreedBy[${index}].role must be human-pm or agent-dev`);
+    return entry.role;
+  });
+  if (new Set(agreement.agreedBy.map(item => item.id)).size !== agreement.agreedBy.length) throw new Error(`${field}.agreedBy must not contain duplicate identities`);
+  requireString(agreement.evidence, `${field}.evidence`);
+  if (agreement.state === 'agreed' && (!roles.includes('human-pm') || !roles.includes('agent-dev'))) {
+    throw new Error(`${field}.agreed requires explicit Human PM and Agent Dev agreement`);
+  }
+}
+
 function validateEnvironment(environment, index) {
   const field = `release.environments[${index}]`;
   const object = requireObject(environment, field);
@@ -82,6 +103,10 @@ export function validateProfile(profile) {
   const statusValues = ["backlog", "onHold", "inProgress", "inReview", "done"].map((name) =>
     requireString(statuses[name], `project.statuses.${name}`),
   );
+  if (statuses.pendingReview !== undefined) {
+    requireString(statuses.pendingReview, "project.statuses.pendingReview");
+    statusValues.push(statuses.pendingReview);
+  }
   if (new Set(statusValues).size !== statusValues.length) {
     throw new Error("project.statuses values must be unique");
   }
@@ -108,6 +133,7 @@ export function validateProfile(profile) {
     if (!pmTesting.terms.includes(term)) throw new Error(`workflow.pmTesting.terms must include ${term}`);
   }
   requireStringArray(pmTesting.requiredSections, "workflow.pmTesting.requiredSections", 5);
+  if (workflow.infrastructureAgreement !== undefined) validateInfrastructureAgreement(workflow.infrastructureAgreement);
 
   const quality = requireObject(root.quality, "quality");
   requireStringArray(quality.commands, "quality.commands", 1);

@@ -79,7 +79,14 @@ export function evaluateQA(qa, candidate, records, options = {}) {
   if (new Set(ids).size !== ids.length || ids.some(id => !qa.turns.some(turn => turn.id === id))) throw new Error('duplicate or unknown QA turn evidence');
   const baton = qa.developers.length > 1 || qa.environments.length > 1;
   for (const [index, turn] of qa.turns.entries()) {
-    const result = (state, reason) => ({ state, reason, baton, current: turn, next: qa.turns[index + 1] ?? null, projectStatus: 'In Progress' });
+    const result = (state, reason) => ({
+      state,
+      reason,
+      baton,
+      current: turn,
+      next: qa.turns[index + 1] ?? null,
+      projectStatus: baton && index > 0 ? 'Pending Review' : 'In Progress',
+    });
     const record = records.find(item => item.turn === turn.id);
     if (!record) return result('pickup', 'Incoming owner must verify candidate and pick up this turn.');
     if (!matches(qa.candidateIdentity, candidate, record.candidate)) return result('remediation', 'Candidate changed; all stale QA evidence and approvals require retesting.');
@@ -148,5 +155,11 @@ function evaluateCirculation(qa, candidate, records, { currentTurn, scope = 'iss
   if (!pending) return { state: 'complete', reason: 'Every required pair approved the latest candidate.', baton, current: null, next: null, projectStatus: 'In Review' };
   const current = qa.turns[start];
   if (pending.id !== current.id && latest.get(current.id)?.nextCandidateAvailable !== true) return { state: 'waiting', reason: 'Outgoing owner must prove next candidate availability.', baton, current, next: pending, projectStatus: 'In Progress' };
-  return { ...checks.get(pending.id), baton, current: pending, next: order.find(turn => turn.id !== pending.id && checks.get(turn.id)) ?? null, projectStatus: 'In Progress' };
+  return {
+    ...checks.get(pending.id),
+    baton,
+    current: pending,
+    next: order.find(turn => turn.id !== pending.id && checks.get(turn.id)) ?? null,
+    projectStatus: pending.id !== current.id ? 'Pending Review' : 'In Progress',
+  };
 }

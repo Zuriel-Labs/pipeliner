@@ -70,7 +70,7 @@ try {
   await rm(join(resources,'default_app.asar'));await mkdir(helpers,{mode:0o700});
   for(const name of ['LICENSE','LICENSES.chromium.html']){await access(join(runtime,name));await writeFile(join(resources,name),await readFile(join(runtime,name)),{flag:'wx',mode:0o600});}
   await createPackageWithOptions(stage,archive,{});
-  const headerSha256=hash(getRawHeader(archive).headerString), archiveFiles=listPackage(archive).filter(file=>!('files' in statFile(archive,file,false))).map(file=>file.slice(1)).sort();
+  const headerSha256=hash(getRawHeader(archive).headerString), archiveFiles=listPackage(archive).map(file=>file.slice(1)).filter(file=>!('files' in statFile(archive,file,false))).sort();
   if(JSON.stringify(archiveFiles)!==JSON.stringify(inputs.map(v=>v.path).sort()))throw new Error('package-archive-content-unexpected');
   for(const input of inputs){const value=statFile(archive,input.path,false);if(value.unpacked||value.link||value.integrity?.algorithm!=='SHA256'||hash(extractFile(archive,input.path,false))!==input.sha256)throw new Error('package-archive-input-unverified');}
   const plist=join(contents,'Info.plist');

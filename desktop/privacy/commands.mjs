@@ -6,6 +6,7 @@ export const privacyShapes = Object.freeze({ view: [[], ['scope']], diagnostics:
 export function privacyCommand(text) {
   if (typeof text !== 'string' || text.length > 2000 || containsSecret(text) || /["`<>\n\r]/.test(text)) return null;
   const input = text.trim().replace(/[.!?]$/, ''); let match;
+  if (/^what (?:local )?data do you (?:keep|store)$|^show (?:the |my )?installation data(?: inventory)?$/i.test(input)) return { operation: 'view' };
   if (/^(?:show|inspect|manage) (?:privacy|local data|data inventory|data destinations)$/i.test(input)) return { operation: 'view' };
   if (/^(?:show|inspect) (?:redacted )?diagnostics$/i.test(input)) return { operation: 'diagnostics' };
   if (/^export (?:redacted )?diagnostics$/i.test(input)) return { operation: 'export', kind: 'diagnostics' };

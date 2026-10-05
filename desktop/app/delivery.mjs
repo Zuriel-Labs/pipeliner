@@ -19,10 +19,11 @@ export async function initDelivery({ el, message, show, editRelease }) {
   }
   function artifactPreview(p, suffix = '') {
     const card = el('article', undefined, 'setup-preview'); card.id = 'artifact-preview' + suffix;
-    const action = { pin: 'Pin artifact', unpin: 'Remove artifact pin', recovery: 'Choose recovery target', retain: 'Remove older artifacts' }[p.action];
+    const action = { pin: 'Pin artifact', unpin: 'Remove artifact pin', recovery: 'Choose recovery target', retain: 'Remove older artifacts', discard: 'Discard interrupted allocation' }[p.action];
     card.append(el('h3', action), el('p', 'Repository: ' + state.repository.name + '. Applies to these exact retained bytes.', 'small'));
     if (p.name) card.append(el('p', p.name));
     if (p.action === 'recovery') card.append(el('p', 'Verify the stored bytes, then replace this repository’s prior recovery designation. Native validation provenance remains visible.'));
+    if (p.action === 'discard') card.append(el('p', p.disposition.kind === 'absent' ? 'The exact allocation file is absent. Clear its reservation after readback; keep a minimal receipt. No file will be removed.' : 'Remove only this unchanged, owned interrupted allocation after verifying its recorded ciphertext digest. Removal cannot be undone. Source files, pins, active artifacts and recovery targets remain.'), el('p', 'The recorded command will stay blocked from automatic replay. A new build requires a deliberate new run.', 'small'));
     if (p.action === 'retain') {
       card.append(el('p', p.remove.length + ' eligible artifacts in this batch (up to 50). Latest, pinned, active and recovery artifacts remain protected. Removal cannot be undone.'));
       for (const name of p.names) card.append(el('p', name, 'small'));
@@ -60,7 +61,7 @@ export async function initDelivery({ el, message, show, editRelease }) {
           const details = el('details'); details.append(el('summary', 'Artifact evidence'), el('p', 'Source: ' + item.manifest.sourceCommit, 'small'), el('p', 'Tree: ' + item.manifest.gitTree, 'small'), el('p', 'Checksum: ' + item.manifest.sha256, 'small'), el('p', 'Validation: ' + item.manifest.validation.protocol + ' · ' + item.manifest.validation.result, 'small'), el('p', 'Host: macOS ' + item.manifest.host.version + ' · ' + item.manifest.host.architecture + '. Size: ' + item.manifest.bytes + ' bytes.', 'small')); card.append(details);
           if (item.state === 'verified') {
             card.append(button(item.pinned ? 'Review unpin' : 'Review pin', 'artifact', { action: item.pinned ? 'unpin' : 'pin', id: item.id }, 'artifact-pin-' + item.id), button('Review recovery target', 'artifact', { action: 'recovery', id: item.id }, 'artifact-recovery-' + item.id));
-          } else card.append(el('p', 'Held for recovery; automatic replay and retention are blocked.', 'availability'));
+          } else { card.append(el('p', 'Held for recovery; automatic replay and retention are blocked.', 'availability')); if (!item.active && !item.pinned && !item.recovery) card.append(button('Review interrupted allocation', 'artifact', { action: 'discard', id: item.id }, 'artifact-discard-' + item.id)); }
           inventory.append(card);
         }
         inventory.append(button('Review safe retention', 'artifact', { action: 'retain' }, 'artifact-retain'));

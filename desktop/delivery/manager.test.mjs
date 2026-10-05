@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, realpathSync, rmSync, existsSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync, existsSync, writeFileSync, readFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -47,6 +47,14 @@ test('artifact chat and controls use actual custody, invalidate stale targets an
     await assert.rejects(manager.dispatch({ operation: 'artifacts', after: 'wrong-page' })); assert.equal(manager.status().artifacts.unavailable, undefined);
     const url = 'pipeliner://app/index.html', frame = { url, parent: null }, contents = { mainFrame: frame, isDestroyed: () => false }, channel = createDeliveryControlChannel(manager, { contents, url, context: () => ({ revision: manager.status().revision }) });
     assert.throws(() => channel.dispatch({ sender: {}, senderFrame: frame }, { operation: 'artifact', action: 'unpin', id: receipt.id, contextRevision: manager.status().revision }));
+    const cancelledBytes = Buffer.alloc(2 * 1024 ** 2, 7), interruptedName = 'cancelled.dmg', interruptedHash = createHash('sha256').update(cancelledBytes).digest('hex'), controller = new AbortController();
+    writeFileSync(join(source, interruptedName), cancelledBytes, { mode: 0o600 });
+    const operation = artifacts.capture({ repository: selected, commandId: randomUUID(), sourceDirectory: source, signal: controller.signal, manifest: { ...receipt.manifest, name: interruptedName, bytes: cancelledBytes.length, sha256: interruptedHash } });
+    while (artifacts.inventory(selected).items.length < 2) await new Promise(resolve => setImmediate(resolve)); controller.abort(); await assert.rejects(operation, /interrupted/); manager.sync();
+    await manager.dispatch({ operation: 'chat', text: 'Discard the interrupted artifact allocation' }); const recovery = manager.status().artifactPreview; assert.equal(recovery.action, 'discard');
+    await manager.dispatch({ operation: 'cancel' }); assert.equal(artifacts.summary(selected).held, 2);
+    await manager.dispatch({ operation: 'chat', text: 'Discard the interrupted artifact allocation' }); await manager.dispatch({ operation: 'chat', text: 'Apply this artifact change' });
+    assert.equal(artifacts.inventory(selected).items.length, 1); assert.equal(artifacts.summary(selected).receipts, 1); assert.equal(readFileSync(join(source, interruptedName)).length, cancelledBytes.length);
     assert.equal(manager.status().installer, null); assert.equal(manager.status().buildQualified, false);
   } finally { await manager.close(); await artifacts.close(); policy.close(); vault.close(); rmSync(root, { recursive: true }); rmSync(source, { recursive: true }); assert.equal(existsSync(root), false); assert.equal(existsSync(source), false); }
 });

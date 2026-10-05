@@ -11,6 +11,7 @@ export function deliveryCommand(text) {
   if ((match = /^(pin|unpin) (?:the |my )?latest artifact$/i.exec(input))) return { operation: 'artifact', action: match[1].toLowerCase(), id: 'latest' };
   if (/^make (?:the |my )?latest artifact (?:the |my )?recovery target$/i.test(input)) return { operation: 'artifact', action: 'recovery', id: 'latest' };
   if (/^clean up old artifacts$/i.test(input)) return { operation: 'artifact', action: 'retain' };
+  if (/^(?:discard|remove) (?:the |my )?interrupted artifact(?: allocation)?$/i.test(input)) return { operation: 'artifact', action: 'discard', id: 'interrupted' };
   if (/^(?:apply|save) (?:this |the )?artifact change$/i.test(input)) return { operation: 'artifactApply' };
   if (/^(?:show|manage|open) (?:delivery|delivery and artifacts)(?: settings)?$|^where is (?:the |my )?installer$/i.test(input)) return { operation: 'view' };
   if (/^check (?:this |my )?Mac (?:for builds|build prerequisites)$/i.test(input)) return { operation: 'inspect' };

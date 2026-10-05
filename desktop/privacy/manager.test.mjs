@@ -11,7 +11,7 @@ import { createPrivacyManager } from './manager.mjs';
 import { privacyCommand } from './commands.mjs';
 import { createPrivacyControlChannel } from '../core/control.mjs';
 
-async function fixture() {
+async function fixture({ managedInventory, artifactSummary } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-privacy-manager-')));
   let vault, policy, records, manager, selected = 'first', clock = 1000, destination = join(root, 'export.json'), source = destination, select;
   async function close() { try { await manager?.close(); records?.close(); policy?.close(); vault?.close(); } finally { rmSync(root, { recursive: true }); assert.equal(existsSync(root), false); } }
@@ -22,6 +22,7 @@ async function fixture() {
       background: false, connections: [], developers: [], extensions: [] }) });
     records = openPrivacyStore(root, { vault, clock: () => clock });
     manager = createPrivacyManager({ records, policy, clock: () => clock, workspace: () => ({ id: selected, name: selected }),
+      ...(managedInventory ? { managedInventory } : {}), ...(artifactSummary ? { artifactSummary } : {}),
       chooseExport: async () => select ? select() : destination, chooseImport: async () => source, protectedPaths: [],
       diagnostics: () => ({ appVersion: '0.1.0', host: { platform: 'darwin', architecture: 'arm64', version: '27.0.1' }, storage: { protected: true, categories: { conversation: 0, log: 0, audit: 0 }, ciphertextBytes: 0 },
         connections: { github: 'disconnected', codex: 'disconnected', ollama: 'disconnected' }, recovery: { activeRuns: 0, uncertainEffects: 0, blockedRuns: 0 }, background: { configured: false, effective: false } }) });
@@ -29,6 +30,17 @@ async function fixture() {
   return { root, policy, records, manager, close, select: value => { selected = value; manager.sync(); }, path: value => { destination = value; }, input: value => { source = value; },
     pending: value => { select = value; }, advance: value => { clock += value; } };
 }
+test('installation metadata and scoped artifact inventory stay separate from conversation deletion and isolate failures', async () => {
+  let failed = false, target;
+  const f = await fixture({ managedInventory: () => { if (failed) throw Error('private inventory failure'); return [{ id: 'connections', label: 'Connections', state: 'present', count: 1, bytes: 1024 }]; },
+    artifactSummary: repository => { target = repository; if (failed) throw Error('private artifact failure'); return { count: 2, bytes: 2048, held: 1, receipts: 3 }; } });
+  try {
+    await f.manager.dispatch({ operation: 'chat', text: 'What data do you keep?' }); assert.equal(target, 'first'); assert.equal(f.manager.status().managedInventory[0].id, 'connections'); assert.equal(f.manager.status().artifacts.receipts, 3);
+    f.select('second'); assert.equal(target, 'second'); failed = true; const status = f.manager.status(); assert.equal(status.managedInventory, null); assert.equal(status.artifacts.unavailable, true); assert.equal(status.storageAvailable, true);
+    assert.equal(JSON.stringify(status).includes('private artifact failure'), false);
+    await f.manager.dispatch({ operation: 'prepare', changes: { 'privacy.logDays': 12 } }); await f.manager.dispatch({ operation: 'apply' }); assert.equal(f.policy.worker.read('second').values['privacy.logDays'].value, 12);
+  } finally { await f.close(); }
+});
 test('chat and Settings share exact retention proposals and stale context cannot apply them', async () => {
   const f = await fixture();
   try {

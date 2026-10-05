@@ -8,7 +8,7 @@ const maximum = 512 * 1024 ** 2, chunkSize = 64 * 1024, headerSize = 48, magic =
 const same = (a, b) => a.dev === b.dev && a.ino === b.ino;
 const regular = s => s.isFile() && !s.isSymbolicLink() && s.nlink === 1 && s.uid === process.getuid() && (s.mode & 0o777) === 0o600;
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value);
-function expected(store, version) { if (!['workspaces', 'development'].includes(store) || !Number.isSafeInteger(version) || version < 1 || version > 100) throw Error(); }
+function expected(store, version) { if (!['workspaces', 'development', 'artifacts'].includes(store) || !Number.isSafeInteger(version) || version < 1 || version > 100) throw Error(); }
 function location(path) {
   if (typeof path !== 'string' || resolve(path) !== path) throw Error();
   const parent = dirname(path), info = lstatSync(parent);

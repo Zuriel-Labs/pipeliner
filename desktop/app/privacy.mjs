@@ -80,9 +80,22 @@ export async function initPrivacy({ el, message, context, composer, history, sho
     else {
       const data = el('dl', undefined, 'connection-data');
       for (const key of ['conversation', 'log', 'audit']) { const row = state.inventory.find(item => item.category === key); data.append(el('dt', key === 'log' ? 'Verbose logs' : key === 'audit' ? 'Minimal audit' : 'Conversations'), el('dd', (row?.count ?? 0) + ' records · ' + (row?.bytes ?? 0).toLocaleString() + ' encrypted payload bytes')); }
-      head.append(data, el('p', 'This inventory covers the selected conversation store. Credentials, configuration, ownership and execution evidence have separate protected records. Purging here preserves those records, repository folders and external copies.', 'small'));
+      if (state.artifacts && !state.artifacts.unavailable) data.append(el('dt', 'Repository artifacts'), el('dd', state.artifacts.count + ' allocations · ' + state.artifacts.bytes.toLocaleString() + ' reserved bytes · ' + state.artifacts.held + ' protected or interrupted'), el('dt', 'Artifact receipts'), el('dd', state.artifacts.receipts + ' minimal command identities retained after archive removal'));
+      head.append(data, el('p', 'These counts belong to the selected repository. Conversation deletion preserves credentials, configuration, execution evidence, artifact receipts, repository folders and external copies. Artifact retention uses Delivery and Artifacts.', 'small'));
+      if (state.artifacts?.unavailable) head.append(el('p', 'Artifact inventory needs protected repair. Its existing bytes remain preserved; other data controls remain available.', 'availability'));
+      if (state.repository) { const manage = el('button', 'Manage artifact data', 'secondary'); manage.type = 'button'; manage.id = 'privacy-artifacts'; manage.addEventListener('click', () => { $('settings-nav').click(); $('settings-delivery').click(); }); head.append(manage); }
     }
     nodes.push(head);
+    const installation = el('article', undefined, 'connection-card'); installation.id = 'privacy-installation-inventory'; installation.append(el('h3', 'Installation data on this Mac'),
+      el('p', 'These stores are shared across repositories. This inventory reads bounded file metadata, not payload contents. Sizes include known database side files. External provider/GitHub copies and OS Keychain items are outside these local file counts.', 'small'));
+    if (!state.managedInventory) installation.append(el('p', 'Installation inventory unavailable. Existing data remains preserved.', 'availability'));
+    else for (const item of state.managedInventory) {
+      const details = el('details'), size = item.state === 'unavailable' ? 'not verified' : item.state === 'empty' ? 'no files yet' : (item.bytes / 1024 ** 2).toFixed(2) + ' MiB · ' + item.count + ' files';
+      details.dataset.category = item.id; details.append(el('summary', item.label + ' · ' + size), el('p', 'Destination: local installation. Scope: shared installation.', 'small'), el('p', 'Protection method: ' + item.protection + '.', 'small'), el('p', item.retention + '.', 'small'));
+      if (item.state === 'unavailable') details.append(el('p', 'Ownership or inventory bounds could not be verified. No payload contents were read or copied; no files were removed.', 'availability'));
+      installation.append(details);
+    }
+    nodes.push(installation);
     if (state.values) {
       const form = el('form', undefined, 'connection-card'); form.id = 'privacy-form'; form.append(el('h3', 'Keep the records you need'));
       for (const key of state.scope === 'host' ? ['privacy.totalLogMiB'] : ['privacy.conversationDays', 'privacy.logDays', 'privacy.auditDays', 'privacy.runLogMiB']) {

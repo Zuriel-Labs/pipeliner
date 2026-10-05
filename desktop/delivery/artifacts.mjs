@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { protectedFile } from '../core/storage.mjs';
 import { canonicalJSON, record } from '../core/settings.mjs';
 import { createRecordCodec } from '../privacy/records.mjs';
+import { createProtectedBackup } from '../privacy/backup.mjs';
 
 const chunkSize = 64 * 1024, metadataRoom = 64 * 1024, maximumRecords = 10000;
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -55,8 +56,8 @@ export async function openArtifactStore(directory, { vault, limits }) {
     if (!Number.isInteger(pageSize) || pageSize < 512 || pageSize > 65536) throw Error();
     if (db.prepare('PRAGMA max_page_count=' + Math.floor(16 * 1024 ** 2 / pageSize)).get().max_page_count * pageSize > 16 * 1024 ** 2) throw Error();
     const version = db.prepare('PRAGMA user_version').get().user_version;
-    if (version !== 0 && version !== 1) throw Error();
-    db.exec('CREATE TABLE IF NOT EXISTS artifacts(id TEXT PRIMARY KEY,payload BLOB NOT NULL); PRAGMA user_version=1;');
+    if (![0, 1, 2].includes(version)) throw Error();
+    if (!version) db.exec('CREATE TABLE artifacts(id TEXT PRIMARY KEY,payload BLOB NOT NULL); PRAGMA user_version=2;');
     if (db.prepare('PRAGMA quick_check').get().quick_check !== 'ok' || db.prepare('PRAGMA auto_vacuum').get().auto_vacuum !== 1) throw Error();
     let closed = false, busy = null, generation = 1; const session = randomUUID();
     const ready = () => { if (closed) throw Error('Artifact storage unavailable'); location(); };
@@ -71,9 +72,10 @@ export async function openArtifactStore(directory, { vault, limits }) {
         record(row, ['id', 'repository', 'commandId', 'fingerprint', 'manifest', 'state', 'pinned', 'recovery', 'active', 'created', 'reserved', 'owner', 'cipherHash']);
         manifest(row.manifest);
         if (row.id !== result.id || !repositoryId(row.repository) || !uuid(row.commandId) || row.fingerprint !== hash(canonicalJSON({ repository: row.repository, manifest: row.manifest }))
-          || !['capturing', 'verified', 'interrupted', 'deleting'].includes(row.state) || ![row.pinned, row.recovery, row.active].every(x => typeof x === 'boolean')
-          || !Number.isSafeInteger(row.created) || row.created < 1 || row.reserved !== archiveSize(row.manifest)
+          || !['capturing', 'verified', 'interrupted', 'deleting', 'discarded'].includes(row.state) || ![row.pinned, row.recovery, row.active].every(x => typeof x === 'boolean')
+          || !Number.isSafeInteger(row.created) || row.created < 1 || row.reserved !== (row.state === 'discarded' ? 0 : archiveSize(row.manifest))
           || row.cipherHash !== null && !/^[a-f0-9]{64}$/.test(row.cipherHash) || row.state === 'verified' && (!row.owner || !row.cipherHash)) throw Error('Artifact inventory unavailable');
+        if (row.state === 'discarded' && (row.owner !== null || row.cipherHash !== null || row.active || row.pinned || row.recovery)) throw Error('Artifact receipt invalid');
         if (row.owner !== null) { record(row.owner, ['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs']); if (!Object.values(row.owner).every(Number.isFinite) || row.owner.size < 0 || row.owner.size > row.reserved) throw Error(); }
         return row;
       });
@@ -104,13 +106,36 @@ export async function openArtifactStore(directory, { vault, limits }) {
     }
     function inventory(repository, { after = null, limit = 50 } = {}) {
       if (!repositoryId(repository) || after !== null && !uuid(after) || !Number.isInteger(limit) || limit < 1 || limit > 50) throw Error('Artifact scope invalid');
-      const all = rows(), values = configured(repository), usedBytes = allocated(all), selected = all.filter(row => row.repository === repository).sort((a, b) => b.created - a.created || b.id.localeCompare(a.id));
+      const all = rows(), values = configured(repository), usedBytes = allocated(all), selected = all.filter(row => row.repository === repository && row.state !== 'discarded').sort((a, b) => b.created - a.created || b.id.localeCompare(a.id));
       const start = after === null ? 0 : selected.findIndex(row => row.id === after) + 1; if (after && start === 0) throw Error('Artifact page changed');
       const items = selected.slice(start, start + limit).map(row => ({ id: row.id, manifest: structuredClone(row.manifest), state: row.state, pinned: row.pinned, recovery: row.recovery, active: row.active }));
       return { items, more: start + items.length < selected.length, after: items.at(-1)?.id ?? null, usedBytes, warning: usedBytes >= values.warningBytes,
         overCapacity: usedBytes >= values.capacityBytes, capacityBytes: values.capacityBytes, busy: Boolean(busy), revision: token(all, repository) };
     }
     function target(all, repository, id) { const row = all.find(x => x.repository === repository && x.id === id); if (!row || row.state !== 'verified') throw Error('Verified artifact unavailable'); return row; }
+    function interrupted(all, repository, id) {
+      const row = all.find(x => x.repository === repository && x.id === id);
+      if (!row || !['interrupted', 'deleting'].includes(row.state) || row.active || row.pinned || row.recovery) throw Error('Artifact recovery is protected or unavailable'); return row;
+    }
+    function disposition(row) {
+      location(); let info; try { info = lstatSync(filePath(row)); } catch (error) { if (error.code === 'ENOENT') return { kind: 'absent' }; throw error; }
+      if (!regular(info) || !row.owner || !stable(info, row.owner) || !row.cipherHash) throw Error('Artifact recovery ownership unavailable');
+      return { kind: 'owned', size: info.size, cipherHash: row.cipherHash };
+    }
+    async function ciphertextDigest(file, size, signal) {
+      const digest = createHash('sha256'); signal?.throwIfAborted();
+      for (let offset = 0; offset < size; offset += chunkSize) { signal?.throwIfAborted(); digest.update(await read(file, Math.min(chunkSize, size - offset), offset)); }
+      return digest.digest('hex');
+    }
+    async function inspectInterrupted(row, signal) {
+      let file;
+      try {
+        location(); file = await open(filePath(row), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); const before = await file.stat();
+        if (!regular(before) || !stable(before, row.owner) || before.size > archiveSize(row.manifest) || await ciphertextDigest(file, before.size, signal) !== row.cipherHash
+          || !stable(before, await file.stat()) || !regular(lstatSync(filePath(row))) || !stable(before, lstatSync(filePath(row)))) throw Error(); location();
+      } catch { throw Error('Interrupted artifact changed; bytes preserved for protected repair'); } finally { await file?.close(); }
+    }
+    const discarded = row => ({ ...row, state: 'discarded', active: false, pinned: false, recovery: false, reserved: 0, owner: null, cipherHash: null });
     async function inspect(row, signal) {
       let file;
       try {
@@ -130,23 +155,33 @@ export async function openArtifactStore(directory, { vault, limits }) {
     async function syncDirectory() { const file = await open(root, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW); try { if (!same(await file.stat(), rootInfo)) throw Error(); await file.sync(); } finally { await file.close(); } }
     function prepare(repository, action) {
       if (!repositoryId(repository) || busy) throw Error('Artifact scope busy or invalid'); record(action, ['action'], ['id']);
-      if (!['pin', 'unpin', 'recovery', 'retain'].includes(action.action) || action.action === 'retain' && action.id !== undefined) throw Error('Artifact action invalid');
-      const all = rows(), values = configured(repository), row = action.action === 'retain' ? null : target(all, repository, action.id);
+      if (!['pin', 'unpin', 'recovery', 'retain', 'discard'].includes(action.action) || action.action === 'retain' && action.id !== undefined) throw Error('Artifact action invalid');
+      const all = rows(), values = configured(repository), row = action.action === 'retain' ? null : action.action === 'discard' ? interrupted(all, repository, action.id) : target(all, repository, action.id);
       const keep = new Set(all.filter(x => x.repository === repository && x.state === 'verified').sort((a, b) => b.created - a.created || b.id.localeCompare(a.id)).slice(0, values.keepLatest).map(x => x.id));
-      const remove = action.action === 'retain' ? all.filter(x => x.repository === repository && x.state === 'verified' && !x.active && !x.pinned && !x.recovery && !keep.has(x.id)).map(x => x.id).sort().slice(0, 50) : [];
+      const remove = action.action === 'discard' ? [row.id] : action.action === 'retain' ? all.filter(x => x.repository === repository && x.state === 'verified' && !x.active && !x.pinned && !x.recovery && !keep.has(x.id)).map(x => x.id).sort().slice(0, 50) : [];
       const preview = { repository, action: action.action, id: row?.id ?? null, name: row?.manifest.name ?? null, revision: token(all, repository), remove,
-        names: remove.map(id => all.find(x => x.id === id).manifest.name), expiresAt: Date.now() + 15 * 60 * 1000 };
+        names: remove.map(id => all.find(x => x.id === id).manifest.name), disposition: action.action === 'discard' ? disposition(row) : null, expiresAt: Date.now() + 15 * 60 * 1000 };
       return { ...preview, hash: hash(canonicalJSON(preview)) };
     }
     async function apply(preview, { signal } = {}) {
-      ready(); if (busy) throw Error('Artifact storage busy'); record(preview, ['repository', 'action', 'id', 'name', 'revision', 'remove', 'names', 'expiresAt', 'hash']);
+      ready(); if (busy) throw Error('Artifact storage busy'); record(preview, ['repository', 'action', 'id', 'name', 'revision', 'remove', 'names', 'disposition', 'expiresAt', 'hash']);
       const { hash: supplied, ...base } = preview, all = rows();
       if (supplied !== hash(canonicalJSON(base)) || preview.revision !== token(all, preview.repository) || !Number.isSafeInteger(preview.expiresAt) || preview.expiresAt < Date.now()) throw Error('Artifact preview changed');
       const expected = prepare(preview.repository, preview.action === 'retain' ? { action: 'retain' } : { action: preview.action, id: preview.id });
-      if (canonicalJSON(expected.remove) !== canonicalJSON(preview.remove) || canonicalJSON(expected.names) !== canonicalJSON(preview.names) || expected.name !== preview.name) throw Error('Artifact preview changed');
+      if (canonicalJSON(expected.remove) !== canonicalJSON(preview.remove) || canonicalJSON(expected.names) !== canonicalJSON(preview.names) || canonicalJSON(expected.disposition) !== canonicalJSON(preview.disposition) || expected.name !== preview.name) throw Error('Artifact preview changed');
       const controller = new AbortController(), abort = () => controller.abort(); signal?.addEventListener('abort', abort, { once: true }); if (signal?.aborted) controller.abort();
       const operation = { controller }, boundLimits = canonicalJSON(configured(preview.repository)); busy = operation;
       operation.done = (async () => {
+        if (preview.action === 'discard') {
+          const row = interrupted(rows(), preview.repository, preview.id);
+          if (preview.disposition.kind === 'owned') await inspectInterrupted(row, controller.signal);
+          controller.signal.throwIfAborted(); if (boundLimits !== canonicalJSON(configured(preview.repository))) throw Error('Artifact preview changed');
+          save({ ...row, state: 'deleting' });
+          if (canonicalJSON(disposition(row)) !== canonicalJSON(preview.disposition)) throw Error('Artifact changed; recovery stopped');
+          if (preview.disposition.kind === 'owned') await unlink(filePath(row));
+          await syncDirectory(); if (disposition({ ...row, owner: null, cipherHash: null }).kind !== 'absent') throw Error('Artifact removal needs reconciliation');
+          save(discarded(row)); return { removed: preview.disposition.kind === 'owned' ? 1 : 0, reconciled: true };
+        }
         if (preview.action !== 'retain') {
           const row = target(all, preview.repository, preview.id);
           if (preview.action === 'recovery') await inspect(row, controller.signal);
@@ -165,7 +200,8 @@ export async function openArtifactStore(directory, { vault, limits }) {
           if (boundLimits !== canonicalJSON(configured(preview.repository))) throw Error('Artifact limits changed; cleanup stopped');
           // Persist destructive intent. An interrupted delete is held for deliberate reconciliation.
           save({ ...row, state: 'deleting' }); location(); const current = lstatSync(filePath(row)); if (!regular(current) || !stable(current, row.owner)) throw Error('Artifact changed; cleanup stopped');
-          await unlink(filePath(row)); await syncDirectory(); db.prepare('DELETE FROM artifacts WHERE id=?').run(id); generation++; removed++;
+          await unlink(filePath(row)); await syncDirectory(); if (disposition({ ...row, owner: null, cipherHash: null }).kind !== 'absent') throw Error('Artifact removal needs reconciliation');
+          save(discarded(row)); removed++;
         }
         return { removed };
       })();
@@ -177,7 +213,7 @@ export async function openArtifactStore(directory, { vault, limits }) {
         record(input, ['repository', 'commandId', 'sourceDirectory', 'manifest'], ['signal']); manifest(input.manifest);
         if (!repositoryId(input.repository) || !uuid(input.commandId) || input.manifest.host.os !== process.platform || input.manifest.host.architecture !== process.arch) throw Error('Artifact host or scope invalid');
         const fingerprint = hash(canonicalJSON({ repository: input.repository, manifest: input.manifest })), all = rows(), prior = all.find(x => x.commandId === input.commandId);
-        if (prior) { if (prior.fingerprint !== fingerprint) throw Error('Artifact command changed'); if (prior.state !== 'verified') throw Error('Artifact command needs recovery'); await inspect(prior, controller.signal); return structuredClone(prior); }
+        if (prior) { if (prior.fingerprint !== fingerprint) throw Error('Artifact command changed'); if (prior.state === 'discarded') throw Error('Artifact command was removed; automatic reallocation is blocked'); if (prior.state !== 'verified') throw Error('Artifact command needs recovery'); await inspect(prior, controller.signal); return structuredClone(prior); }
         if (all.length >= maximumRecords) throw Error('Artifact inventory capacity reached');
         const parent = input.sourceDirectory;
         if (typeof parent !== 'string' || resolve(parent) !== parent || realpathSync(parent) !== parent) throw Error('Artifact source invalid');
@@ -203,16 +239,34 @@ export async function openArtifactStore(directory, { vault, limits }) {
         row.state = 'verified'; row.active = false; save(row); return structuredClone(row);
       } catch (error) {
         if (row) {
-          if (created && output) row.owner = identity(await output.stat());
+          if (created && output) {
+            try {
+              await output.sync(); const before = await output.stat(), current = lstatSync(filePath(row));
+              if (!regular(current) || !row.owner || !same(before, row.owner) || !stable(before, current) || before.size > row.reserved) throw Error();
+              const digest = await ciphertextDigest(output, before.size);
+              if (!stable(before, await output.stat()) || !stable(before, lstatSync(filePath(row)))) throw Error();
+              row.owner = identity(before); row.cipherHash = digest;
+            } catch { row.cipherHash = null; }
+          }
           await output?.close(); output = null; await source?.close(); source = null;
           save({ ...row, state: 'interrupted', active: false }); throw Error('Artifact capture interrupted; preserved for deliberate recovery');
         }
-        throw Error(['Artifact command changed', 'Artifact command needs recovery', 'Artifact inventory capacity reached', 'Artifact capacity reached; retain safely or change the host limit', 'Artifact free space unavailable'].includes(error.message) ? error.message : 'Artifact capture unavailable; source preserved');
+        throw Error(['Artifact command changed', 'Artifact command needs recovery', 'Artifact command was removed; automatic reallocation is blocked', 'Artifact inventory capacity reached', 'Artifact capacity reached; retain safely or change the host limit', 'Artifact free space unavailable'].includes(error.message) ? error.message : 'Artifact capture unavailable; source preserved');
       } finally { await output?.close(); await source?.close(); }
     }
-    const initial = rows(); for (const row of initial.filter(x => x.state === 'capturing')) save({ ...row, state: 'interrupted', active: false });
+    const initial = rows();
+    if (version === 1) {
+      db.exec('BEGIN EXCLUSIVE');
+      try { createProtectedBackup(database, { vault, store: 'artifacts', version: 1 }); db.exec('PRAGMA user_version=2; COMMIT'); }
+      catch (error) { db.exec('ROLLBACK'); throw error; }
+    }
+    for (const row of initial.filter(x => x.state === 'capturing')) save({ ...row, state: 'interrupted', active: false });
     allocated(rows());
     return Object.freeze({ inventory, prepare, apply,
+      summary(repository) {
+        if (!repositoryId(repository)) throw Error('Artifact scope invalid'); const all = rows(), selected = all.filter(row => row.repository === repository), kept = selected.filter(row => row.state !== 'discarded');
+        allocated(all); return { count: kept.length, bytes: kept.reduce((sum, row) => sum + row.reserved, 0), held: kept.filter(row => row.state !== 'verified' || row.active || row.pinned || row.recovery).length, receipts: selected.length - kept.length };
+      },
       capture(input) {
         ready(); if (busy) return Promise.reject(Error('Artifact storage busy'));
         const controller = new AbortController(), operation = { controller }; const abort = () => controller.abort();

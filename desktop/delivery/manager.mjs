@@ -70,9 +70,10 @@ export function createDeliveryManager({ policy, artifacts = null, workspace = ()
       if (!artifacts || !workspace()?.id || artifactView()?.unavailable) throw Error('Choose a repository with available protected artifact storage');
       if (payload.operation === 'artifacts') { artifacts.inventory(workspace().id, { after: payload.after ?? null }); artifactAfter = payload.after ?? null; revision++; message = 'Retained artifacts belong to ' + workspace().name + '. Validation provenance is shown with each artifact.'; publish(); return { snapshot: status() }; }
       if (payload.operation === 'artifact') {
-        invalidate(); const id = payload.id === 'latest' ? artifactView()?.items.find(item => item.state === 'verified')?.id : payload.id;
-        artifactPreview = artifacts.prepare(workspace().id, { action: payload.action, ...(id !== undefined ? { id } : {}) });
-        revision++; message = payload.action === 'retain' ? 'Review removal of ' + artifactPreview.remove.length + ' older artifacts. Latest, pinned, active and recovery artifacts remain protected.' : 'Review the artifact change for ' + workspace().name + '. No bytes or protection flags have changed.';
+        invalidate(); const id = payload.id === 'latest' ? artifactView()?.items.find(item => item.state === 'verified')?.id : payload.id === 'interrupted' ? artifactView()?.items.find(item => ['interrupted', 'deleting'].includes(item.state))?.id : payload.id;
+        try { artifactPreview = artifacts.prepare(workspace().id, { action: payload.action, ...(id !== undefined ? { id } : {}) }); }
+        catch { revision++; message = 'Artifact preview unavailable. Choose the exact artifact and inspect its protection. Unverified or changed allocations stay preserved for protected repair.'; publish(); throw Error('Artifact preview unavailable; existing bytes preserved'); }
+        revision++; message = payload.action === 'retain' ? 'Review removal of ' + artifactPreview.remove.length + ' older artifacts. Latest, pinned, active and recovery artifacts remain protected.' : payload.action === 'discard' ? 'Review discard of this exact interrupted allocation. Source files and protected artifacts remain. A minimal command receipt prevents automatic replay.' : 'Review the artifact change for ' + workspace().name + '. No bytes or protection flags have changed.';
         publish(); return { snapshot: status() };
       }
       if (!artifactPreview) { if (applied && (!payload.hash || applied === payload.hash)) return { snapshot: status(), applied: false }; throw Error('Artifact preview unavailable'); }
@@ -83,7 +84,7 @@ export function createDeliveryManager({ policy, artifacts = null, workspace = ()
       catch { artifactPreview = null; message = 'Artifact action interrupted. Inspect retained artifacts; completed removals stay recorded and uncertain bytes remain held for recovery.'; throw Error('Artifact action interrupted; inspect retained artifacts'); }
       finally { changing = null; revision++; if (!closed) publish(); }
       artifactPreview = null; applied = p.hash; observed = context(); revision++;
-      message = p.action === 'retain' ? result.removed + ' older artifacts removed with ownership and checksum verification. Protected artifacts remain.' : 'Artifact protection saved for ' + workspace().name + '.';
+      message = p.action === 'retain' ? result.removed + ' older artifacts removed with ownership and checksum verification. Protected artifacts remain.' : p.action === 'discard' ? 'Interrupted allocation reconciled. Its reservation is released; source files and a minimal command receipt remain. No build was replayed.' : 'Artifact protection saved for ' + workspace().name + '.';
       publish(); return { snapshot: status(), applied: true };
     }
     if (payload.operation === 'help') {

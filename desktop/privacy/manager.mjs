@@ -12,9 +12,9 @@ const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}(?:-[a-f0-9]{4})
 export const privacyKeys = Object.freeze(['privacy.conversationDays', 'privacy.logDays', 'privacy.auditDays', 'privacy.runLogMiB', 'privacy.totalLogMiB',
   'privacy.telemetry', 'privacy.automaticUpload', 'privacy.crossRepositoryReuse']);
 
-export function createPrivacyManager({ records, policy, workspace = () => null, chooseExport, chooseImport, diagnostics, protectedPaths = [],
+export function createPrivacyManager({ records, policy, workspace = () => null, chooseExport, chooseImport, diagnostics, managedInventory = () => [], artifactSummary = () => null, protectedPaths = [],
   initialRevision = 1, clock = Date.now, onChange = () => {}, onApplied = () => {} }) {
-  if (!Number.isSafeInteger(initialRevision) || initialRevision < 1 || ![workspace, clock, onChange, onApplied].every(value => typeof value === 'function')) throw new Error('Privacy host controls unavailable');
+  if (!Number.isSafeInteger(initialRevision) || initialRevision < 1 || ![workspace, managedInventory, artifactSummary, clock, onChange, onApplied].every(value => typeof value === 'function')) throw new Error('Privacy host controls unavailable');
   let revision = initialRevision, scope = workspace()?.id ? 'repository' : 'global', observed, preview = null, applied = null,
     busy = false, pending = null, closed = false, message = null, diagnosticView = null, errorCode = null, finalStatus;
   const tokens = new Map(), receipts = new Map(), inFlight = new Set();
@@ -39,11 +39,14 @@ export function createPrivacyManager({ records, policy, workspace = () => null, 
   function status() {
     if (closed) return finalStatus; sync();
     const current = workspace(), target = scope === 'repository' ? current?.id ?? null : null, view = policy?.worker.read(target);
+    let managed, artifacts;
+    try { managed = managedInventory(); } catch { managed = null; }
+    try { artifacts = current?.id ? artifactSummary(current.id) : null; } catch { artifacts = { unavailable: true }; }
     return { revision, repository: current?.id ?? null, repositoryLabel: current?.name ?? null, scope, busy, storageAvailable: Boolean(records && policy),
       conversationToken: records && policy ? token() : null,
       values: view ? Object.fromEntries(privacyKeys.map(key => [key, view.values[key]])) : null,
       inventory: records?.inventory().categories.filter(row => row.repository === (current?.id ?? null)) ?? [],
-      preview: preview ? structuredClone(preview.visible) : null, diagnostics: diagnosticView ? structuredClone(diagnosticView) : null, errorCode, message };
+      managedInventory: managed, artifacts, preview: preview ? structuredClone(preview.visible) : null, diagnostics: diagnosticView ? structuredClone(diagnosticView) : null, errorCode, message };
   }
   const publish = () => { if (!closed) onChange(status()); };
   function ready() { sync(); if (closed || !records || !policy) throw new Error('Privacy protected storage unavailable'); }

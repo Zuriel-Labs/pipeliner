@@ -63,6 +63,7 @@ app.whenReady().then(async () => {
   const { createSkillControlChannel } = await moduleAt('../core/control.mjs');
   const { createToolControlChannel } = await moduleAt('../core/control.mjs');
   const { createPrivacyControlChannel } = await moduleAt('../core/control.mjs');
+  const { inspectManagedData } = await moduleAt('../privacy/inventory.mjs');
   const { createAppearanceControlChannel } = await moduleAt('../core/control.mjs');
   const { createAppearanceManager } = await moduleAt('../appearance/manager.mjs');
   const { createDeliveryControlChannel } = await moduleAt('../core/control.mjs');
@@ -163,6 +164,7 @@ app.whenReady().then(async () => {
     for (const effect of workspaceStore?.pending() ?? []) if (effect.binding.repository) recoveryHolds.add(effect.binding.repository);
   };
   const makePrivacy = initialRevision => createPrivacyManager({ records: privacyRecords, policy, initialRevision, onChange: publishPrivacy,
+    managedInventory: () => inspectManagedData(directory), artifactSummary: repository => artifacts ? artifacts.summary(repository) : { unavailable: true },
     workspace: () => { const id = workspaceStore?.selected(); const item = workspaceStore?.workspaces().find(value => value.id === id);
       return item ? { id, name: item.name, issue: workspaceStore.issueContext(id)?.selected ?? null } : null; },
     protectedPaths: privatePaths, onApplied: () => { issues?.sync(); pipelines?.sync(); development?.sync(); scheduling?.sync(); background?.sync(); skills?.sync(); tools?.sync(); },

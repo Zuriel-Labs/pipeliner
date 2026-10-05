@@ -5,7 +5,7 @@ export { packagedCodexPath } from '../codex/executable.mjs';
 
 // Fixed reviewed runtime inputs. Repository docs, tests, launchers and home skills are never selected.
 const paths = [
-  'LICENSE', 'scripts/lib/project.mjs', 'desktop/authority/Dockerfile', 'desktop/prototype/style.css',
+  'LICENSE', ...['project','config','qa','showcase','release-cycle','cleanup'].map(n=>'scripts/lib/'+n+'.mjs'), 'desktop/authority/Dockerfile', 'desktop/prototype/style.css',
   ...['main.cjs','preload.cjs','index.html','app.css','app.mjs','background.mjs','development.mjs','issues.mjs','pipelines.mjs','scheduling.mjs','skills.mjs','tools.mjs','workspaces.mjs'].map(n=>'desktop/app/'+n),
   ...['commands.mjs','host.mjs','manager.mjs','native.mjs'].map(n=>'desktop/background/'+n),
   ...['commands.mjs','github.mjs','manager.mjs','native-entry.mjs','providers.mjs','vault.mjs'].map(n=>'desktop/connections/'+n),

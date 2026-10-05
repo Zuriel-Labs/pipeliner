@@ -3,7 +3,22 @@ import assert from 'node:assert/strict';
 import { mkdtemp, realpath, mkdir, writeFile, symlink, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { posix } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { runtimeInputs, readPackageInput, packagedCodexPath } from './inputs.mjs';
+
+test('Packaged host modules contain their complete repository-owned static import closure',async()=>{
+  const root=fileURLToPath(new URL('../../',import.meta.url));
+  const files=runtimeInputs(execFileSync('/usr/bin/git',['-C',root,'ls-files','-z'],{encoding:'utf8'}).split('\0').filter(Boolean)),selected=new Set(files);
+  for(const file of files.filter(v=>v.endsWith('.mjs')&&!v.startsWith('desktop/app/'))){
+    const source=await readFile(join(root,file),'utf8');
+    for(const match of source.matchAll(/(?:from\s+|\bimport\s*\()\s*['"]([^'"]+)['"]/g)){
+      if(!match[1].startsWith('.'))continue;
+      const target=posix.normalize(posix.join(posix.dirname(file),match[1]));assert.ok(selected.has(target),file+' requires '+target);
+    }
+  }
+});
 
 test('Package selection requires its runtime entry and excludes roadmap, fixtures, tests and developer assets', () => {
   const minimum = ['desktop/app/main.cjs', 'desktop/app/preload.cjs', 'desktop/app/index.html', 'desktop/prototype/style.css', 'desktop/development/starter.mjs', 'desktop/authority/Dockerfile', 'LICENSE'];

@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { openTestVault } from '../connections/test-vault.mjs';
 import assert from 'node:assert/strict';
 import { mkdtempSync, realpathSync, rmSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -11,8 +12,8 @@ import { openPolicyStore } from '../core/policy.mjs';
 import { createIssueManager } from './manager.mjs';
 import { issueFixture } from './fixture.mjs';
 
-function fixture() {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-38-intake-'))), store = openWorkspaceStore(root);
+async function fixture() {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-38-intake-'))), vault = await openTestVault(root), store = openWorkspaceStore(root, { vault });
   const fields = Object.fromEntries([['Status', ['Backlog', 'In Progress', 'In Review', 'Pending Review', 'Done']], ['Priority', ['P0', 'P1']], ['Impact', ['High']], ['Effort', ['M']]].map(([role, names]) => [role, { id: 'F_' + role, name: role, options: names.map((name, i) => ({ id: 'O_' + role + i, name })) }]));
   const workspace = { id: 'repo_fixture', repositoryId: 'R1', numericId: 1, slug: 'fixture/repo', name: 'Fixture / Repo', localKey: '1:2', path: root, private: true, project: { id: 'P1', owner: { id: 'ORG1' }, fields }, connections: { github: 'github', setup: null } };
   store.register(workspace); store.register({ ...workspace, id: 'repo_second', repositoryId: 'R2', slug: 'fixture/second', localKey: '1:3' }); store.select(workspace.id);
@@ -35,14 +36,14 @@ function fixture() {
   return { root, store, policy, workspace, values, remote, edit, get manager() { return manager; },
     disconnect: () => { epoch++; disconnected = true; }, reconnect: () => { disconnected = false; },
     async restart() { await manager.close(); manager = createIssueManager(options); },
-    async close() { await manager.close(); policy.close(); store.close(); rmSync(root, { recursive: true, force: true }); } };
+    async close() { await manager.close(); policy.close(); store.close(); vault.close(); rmSync(root, { recursive: true, force: true }); } };
 }
 async function preview(f) {
   f.manager.dispatch({ operation: 'begin', values: f.values }); f.manager.dispatch({ operation: 'prepare' }); await f.manager.idle();
   assert.equal(f.manager.status().draft.state, 'preview'); return f.manager.status().draft.preview.hash;
 }
 test('PM intake creates exactly once with complete metadata and dependencies, without assignment or Ready', async () => {
-  const f = fixture();
+  const f = await fixture();
   try {
     const hash = await preview(f); assert.throws(() => f.manager.dispatch({ operation: 'create', hash: 'wrong' }), /issue-changed/);
     f.manager.dispatch({ operation: 'create', hash }); await f.manager.idle();
@@ -53,7 +54,7 @@ test('PM intake creates exactly once with complete metadata and dependencies, wi
   } finally { await f.close(); }
 });
 test('all active statuses block PM Ready removal at the host; outside label changes remain visible drift', async () => {
-  const f = fixture();
+  const f = await fixture();
   try {
     f.manager.dispatch({ operation: 'ready', number: 7, enabled: true }); await f.manager.idle(); assert.equal(f.remote.issues[0].ready, true);
     for (const status of ['In Progress', 'In Review', 'Pending Review']) {
@@ -69,7 +70,7 @@ test('all active statuses block PM Ready removal at the host; outside label chan
 });
 test('known lost replies reconcile without repeating creation, Project link or field write; unknown creation never replays after restart', async () => {
   for (const step of ['create-known', 'project', 'field-Priority', 'create-unknown']) {
-    const f = fixture();
+    const f = await fixture();
     try {
       await preview(f); f.remote.lose(step); f.manager.dispatch({ operation: 'create' }); await f.manager.idle();
       assert.equal(f.manager.status().draft.state, 'uncertain'); await f.restart();
@@ -82,7 +83,7 @@ test('known lost replies reconcile without repeating creation, Project link or f
   }
 });
 test('a switched repository aborts old work and preserves its draft without mutating either repository', async () => {
-  const f = fixture();
+  const f = await fixture();
   try {
     await preview(f); let release; f.remote.delay(() => new Promise(resolve => { release = resolve; }));
     f.manager.dispatch({ operation: 'create' }); await new Promise(resolve => setImmediate(resolve));
@@ -93,7 +94,7 @@ test('a switched repository aborts old work and preserves its draft without muta
   } finally { await f.close(); }
 });
 test('unclassified tracked Issues block readiness; a changed PM policy stops the next write and requires a fresh remaining-change preview', async () => {
-  const f = fixture();
+  const f = await fixture();
   try {
     f.remote.issues[0].status = null; f.manager.dispatch({ operation: 'ready', number: 7, enabled: true }); await f.manager.idle();
     assert.equal(f.manager.status().error, 'issue-state-incomplete'); assert.equal(f.remote.writes.length, 0);
@@ -107,7 +108,7 @@ test('unclassified tracked Issues block readiness; a changed PM policy stops the
   } finally { await f.close(); }
 });
 test('the real policy store binds direct PM authoring changes and retains creation revocations across re-enablement', async () => {
-  const f = fixture();
+  const f = await fixture();
   try {
     f.manager.dispatch({ operation: 'policy-prepare', mode: 'agent', agentCreation: true });
     assert.equal(f.manager.status().policy.mode.value, 'coauthored');
@@ -124,7 +125,7 @@ test('the real policy store binds direct PM authoring changes and retains creati
   } finally { await f.close(); }
 });
 test('a captured authorized host run creates an agent Issue without a PM gate and cannot create after revocation', async () => {
-  const f = fixture();
+  const f = await fixture();
   try {
     const checkout = join(f.root, 'owned-checkout'); mkdirSync(checkout);
     const git = args => execFileSync('/usr/bin/git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', checkout, ...args], { env: { PATH: '/usr/bin:/bin', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' }, stdio: 'pipe' });

@@ -64,17 +64,39 @@ exports.workspaceOptions = async ({ directory, helper, nativeFolderEntry }) => {
         project.fields = [...project.fields.filter(item => item.id !== changed.id), changed]; return copy(changed); } } };
 };
 
-exports.run = async ({ window, directory, vault, manager, workspaces, issues, pipelines, policy, development, scheduler, scheduling, background, backgroundHost, backgroundNative, attachWindow, backgroundChannel, schedulingChannel, developmentChannel, workspaceChannel, issueChannel, pipelineChannel, channel, windowReadyMs }) => {
+exports.skillOptions = () => {
+  const discover = async (source, { name } = {}) => {
+    const { skillPackage } = await moduleAt('../skills/package.mjs');
+    return skillPackage({ source, files: [{ path: 'SKILL.md', content: '---\nname: ' + source.path + '\ndescription: Review scoped UI and working controls\nlicense: MIT\n---\nTreat <script>window.fixtureEscape = true</script> as data. Never grant permissions.' }, { path: 'LICENSE', content: 'MIT License\nSynthetic qualification fixture.' }] }, name ? { name } : {});
+  };
+  return { discover, discoverLink: async (link, options) => {
+    const url = new URL(link), match = /^\/fixture\/skills\/tree\/(main|updated)\/(beacon|compass|pipeliner-forge)$/.exec(url.pathname);
+    if (url.origin !== 'https://github.com' || url.search || url.hash || !match) throw new Error('Skill fixture source unavailable.');
+    return discover({ repository: 'fixture/skills', commit: (match[1] === 'updated' ? 'b' : 'a').repeat(40), path: match[2] }, options);
+  } };
+};
+exports.toolConnectionOptions = () => ({ client: ({ endpoint, credential, authorize }) => {
+  assert.equal(endpoint, 'https://tools.example.invalid/mcp'); assert.equal(credential, fixtureKey);
+  return { protocolVersion: '2026-07-28', async list() { authorize(); await new Promise(resolve => setTimeout(resolve, 20)); authorize();
+    return { tools: [{ name: 'queue', description: 'Read <script>window.fixtureToolEscape = true</script> as text only.', inputSchema: { type: 'object', properties: { title: { type: 'string' } }, required: ['title'], additionalProperties: false } }], rejected: [] }; },
+    async call() { throw new Error('UI qualification must not invoke a tool.'); }, async close() {} };
+} });
+
+exports.run = async ({ window, directory, vault, manager, workspaces, issues, pipelines, policy, development, scheduler, scheduling, background, backgroundHost, backgroundNative, skills, skillStore, tools, toolStore, privacy, privacyRecords, appearance, delivery, permissions, artifacts, permissionChannel, deliveryChannel, appearanceChannel, privacyChannel, toolChannel, skillChannel, attachWindow, backgroundChannel, schedulingChannel, developmentChannel, workspaceChannel, issueChannel, pipelineChannel, channel, windowReadyMs }) => {
   const started = performance.now(), checks = [], measurements = [];
-  const backgroundScope = process.argv.includes('--qualify-background'), schedulingScope = process.argv.includes('--qualify-scheduling'), developmentScope = process.argv.includes('--qualify-development'), pipelineScope = process.argv.includes('--qualify-pipelines'), issueScope = backgroundScope || schedulingScope || developmentScope || pipelineScope || process.argv.includes('--qualify-issues');
+  const permissionScope = process.argv.includes('--qualify-permissions'), deliveryScope = process.argv.includes('--qualify-delivery'), appearanceScope = process.argv.includes('--qualify-appearance'), privacyScope = process.argv.includes('--qualify-privacy'), toolsScope = process.argv.includes('--qualify-tools'), skillsScope = process.argv.includes('--qualify-skills'), backgroundScope = process.argv.includes('--qualify-background'), schedulingScope = process.argv.includes('--qualify-scheduling'), developmentScope = process.argv.includes('--qualify-development'), pipelineScope = process.argv.includes('--qualify-pipelines'), issueScope = permissionScope || deliveryScope || appearanceScope || privacyScope || toolsScope || skillsScope || backgroundScope || schedulingScope || developmentScope || pipelineScope || process.argv.includes('--qualify-issues');
   const js = code => window.webContents.executeJavaScript(code);
   const wait = async predicate => { const until = Date.now() + 10000; while (!await predicate()) { if (Date.now() >= until) throw new Error('qualification-wait-timeout'); await new Promise(resolve => setTimeout(resolve, 50)); } };
   let pipelineControl;
-  async function check(name, fn) { const begin = performance.now(); try { await fn(); checks.push({ name, passed: true, milliseconds: Math.round(performance.now() - begin) }); } catch (error) { checks.push({ name, passed: false, category: error.code === 'ERR_ASSERTION' ? 'assertion' : 'native-failure', failureLine: Number(/qualify\.cjs:(\d+)/.exec(error.stack)?.[1]) || null, ...(name.startsWith('pipeline-') ? { control: pipelineControl, publicError: pipelines.status().error } : {}) }); throw error; } }
+  async function check(name, fn) { const begin = performance.now(); try { await fn(); checks.push({ name, passed: true, milliseconds: Math.round(performance.now() - begin) }); } catch (error) { checks.push({ name, passed: false, category: error.code === 'ERR_ASSERTION' ? 'assertion' : 'native-failure', failureLine: Number(/qualify(?:-[a-z]+)?\.cjs:(\d+)/.exec(error.stack)?.[1]) || null, ...(name.startsWith('privacy-') ? { publicMessage: privacy.status().message, publicCode: privacy.status().errorCode, privacyBusy: privacy.status().busy, previewKind: privacy.status().preview?.kind ?? null } : {}), ...(name.startsWith('pipeline-') ? { control: pipelineControl, publicError: pipelines.status().error } : {}), ...(name.startsWith('tools-') ? { publicError: tools.status().error, publicMessage: tools.status().message, toolBusy: tools.status().busy, catalogPresent: Boolean(tools.status().catalog), pipelineError: pipelines.status().error } : {}) }); throw error; } }
   let capture, nativeEvidence, workspaceStage = null, workspaceEvidence = null;
   try {
     await wait(() => js("Boolean(document.getElementById('connection-list').children.length)"));
     await check('actual-macos-protected-key', async () => { assert(vault); assert.equal(await safeStorage.isAsyncEncryptionAvailable(), true); assert.equal(existsSync(path.join(directory, 'connections.sqlite')), true); });
+    if (privacyScope) await check('actual-macos-protected-legacy-workspace-development-migration', async () => {
+      const { qualifyProtectedMigration } = await moduleAt('../privacy/qualify-migration.mjs');
+      const result = qualifyProtectedMigration(directory, vault); assert.deepEqual(result.schemas, { workspaces: 5, development: 2 }); assert.equal(result.replayedEffects, 0);
+    });
     await check('renderer-restrictions', async () => { assert.equal(await js("typeof require + ':' + typeof process"), 'undefined:undefined'); assert.equal(await js("fetch('https://example.com').then(()=>false,()=>true)"), true); assert.equal(await js("document.querySelectorAll('iframe,webview').length"), 0); });
     await check('registered-frame-and-stale-context', async () => {
       const frame = window.webContents.mainFrame, sender = window.webContents, payload = { operation: 'connect', connection: 'github', contextRevision: manager.status().revision };
@@ -173,7 +195,7 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
       assert.equal(JSON.stringify(workspaces.status()).includes('ghu_synthetic_fixture'), false);
     });
     await check('actual-workspace-store-reopen-without-replay', async () => {
-      const { openWorkspaceStore } = await moduleAt('../repositories/store.mjs'), reopened = openWorkspaceStore(directory);
+      const { openWorkspaceStore } = await moduleAt('../repositories/store.mjs'), reopened = openWorkspaceStore(directory, { vault });
       try { assert.equal(reopened.workspaces()[0].project.fields.Status.options.find(option => option.name === 'Pending Review').name, 'Pending Review');
         assert.equal(reopened.selected(), workspaces.status().selected); assert.equal(reopened.pending().length, 0); assert.equal(workspaceFixture.writes, 4); }
       finally { reopened.close(); }
@@ -224,7 +246,7 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
       const first = workspaces.status().workspaces[0], before = issues.status(), secondPath = path.join(workspaceFixture.path, 'second'); mkdirSync(secondPath, { mode: 0o700 });
       workspaceFixture.git(['-C', secondPath, 'init', '-b', 'main']); workspaceFixture.git(['-C', secondPath, 'remote', 'add', 'origin', 'https://github.com/fixture/second.git']);
       const { inspectLocal } = await moduleAt('../repositories/local.mjs'); const inspected = await inspectLocal(secondPath, { repository: 'repo_qualification_second', owner: 'fixture', name: 'second' });
-      const { openWorkspaceStore } = await moduleAt('../repositories/store.mjs'), reopened = openWorkspaceStore(directory);
+      const { openWorkspaceStore } = await moduleAt('../repositories/store.mjs'), reopened = openWorkspaceStore(directory, { vault });
       try { reopened.register({ ...first, id: 'repo_qualification_second', repositoryId: 'R2', numericId: 4, slug: 'fixture/second', name: 'fixture/second', path: secondPath, localKey: inspected.identity.localKey, commonPath: inspected.identity.commonPath }); }
       finally { reopened.close(); }
       workspaces.dispatch({ operation: 'select', workspace: 'repo_qualification_second' }); await wait(() => js("document.getElementById('chat-title').textContent==='fixture/second'"));
@@ -294,7 +316,7 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
       await check('pipeline-durable-drafts-inheritance-stale-base-and-repository-switch', async () => {
         await pipelineChat('Edit global Release pipeline'); await pipelineChat('Rename step 1 to Build on the compatible host'); await pipelineChat('Review this pipeline'); await pipelineChat('Apply this pipeline');
         await pipelineChat('Edit repository Release pipeline'); assert.equal(pipelines.status().current.source, 'global'); await pipelineChat('Rename step 1 to Repository build');
-        const { openWorkspaceStore } = await moduleAt('../repositories/store.mjs'), reopened = openWorkspaceStore(directory);
+        const { openWorkspaceStore } = await moduleAt('../repositories/store.mjs'), reopened = openWorkspaceStore(directory, { vault });
         try { assert.equal(reopened.pipelineDraft(pipelines.status().workspaceId, 'release').definition.steps[0].label, 'Repository build'); }
         finally { reopened.close(); }
         const { openPolicyStore } = await moduleAt('../core/policy.mjs'); const ledger = openPolicyStore(directory, { catalog: () => policy.worker.read(null).bindings });
@@ -464,6 +486,153 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
         window.webContents.setZoomFactor(1); window.setSize(1180, 840);
       });
     }
+    if (skillsScope) {
+      const chat = async text => { await js(`document.getElementById('chat-nav').click();document.getElementById('prompt').value=${JSON.stringify(text)};document.getElementById('composer').requestSubmit()`); await wait(() => !skills.status().busy); };
+      const show = () => js("document.getElementById('settings-nav').click();document.getElementById('settings-skills').click()");
+      let firstPin, firstRevision;
+      await check('skills-frame-context-scope-and-defaults', async () => {
+        assert.equal(skills.status().inventory.length, 4); assert.equal(skills.status().inventory.every(item => item.enabled && item.available && item.permissions.length === 0), true);
+        const frame = window.webContents.mainFrame, event = { sender: window.webContents, senderFrame: frame }, payload = { operation: 'prepare', action: 'disable', name: 'pipeliner-motif', contextRevision: skills.status().revision };
+        assert.throws(() => skillChannel.dispatch({ ...event, sender: {} }, payload)); assert.throws(() => skillChannel.dispatch(event, { ...payload, contextRevision: 0 }));
+        assert.throws(() => skillChannel.dispatch(event, { ...payload, origin: 'pm' }));
+        await chat('"disable skill pipeliner-motif"'); assert.equal(skills.status().preview, null);
+      });
+      await check('skills-chat-preview-cancel-and-keyboard-disable', async () => {
+        await chat('disable skill pipeliner-motif'); await wait(() => Boolean(skills.status().preview)); assert.equal(skills.status().inventory.find(item => item.name === 'pipeliner-motif').enabled, true);
+        await chat('cancel this skill change'); await wait(() => !skills.status().preview);
+        await chat('disable skill pipeliner-motif'); await wait(() => Boolean(skills.status().preview)); await show();
+        await js("document.getElementById('skill-apply').focus()"); window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+        await wait(() => !skills.status().preview); assert.equal(skills.status().inventory.find(item => item.name === 'pipeliner-motif').enabled, false);
+        await chat('enable skill pipeliner-motif'); await wait(() => Boolean(skills.status().preview)); await chat('apply this skill change'); await wait(() => !skills.status().preview);
+      });
+      await check('skills-exact-source-and-install-permissions-without-runtime-gate', async () => {
+        await chat('add skill from https://github.com/fixture/skills/tree/main/compass'); await wait(() => Boolean(skills.status().preview));
+        const pin = skills.status().preview.item.id; assert.equal(skillStore.available(pin), false);
+        await show(); await js("document.getElementById('skill-authorize-source').click()"); await wait(() => skills.status().preview?.action === 'authorize');
+        await js("document.getElementById('skill-apply').click()"); await wait(() => !skills.status().preview); assert.equal(skillStore.available(pin), false);
+        await chat('allow host agent skill installs'); await wait(() => Boolean(skills.status().preview)); assert.equal(skills.status().preview.scope, 'host');
+        await chat('apply this skill change'); await wait(() => !skills.status().preview);
+        await chat('allow repository agent skill installs'); await wait(() => Boolean(skills.status().preview));
+        await chat('apply this skill change'); await wait(() => !skills.status().preview);
+        const workspace = skills.status().workspaceId, view = policy.worker.read(workspace), { installAuthorizedSkills } = await moduleAt('../skills/manager.mjs');
+        installAuthorizedSkills(skillStore, view, policy.worker.authority(workspace, view.revision)); skills.sync();
+        assert.equal(skillStore.available(pin), true); assert.equal(skills.status().preview, null);
+        await chat('deny repository agent skill installs'); await wait(() => Boolean(skills.status().preview)); await chat('apply this skill change'); await wait(() => !skills.status().preview);
+        assert.equal(policy.worker.authority(workspace, view.revision).capabilities.includes('extension.install'), false);
+      });
+      await check('skills-ordinary-link-exact-preview-install-and-text-security', async () => {
+        await show(); await js("document.getElementById('skill-link').value='https://github.com/fixture/skills/tree/main/beacon';document.getElementById('skill-source-form').requestSubmit()");
+        await wait(() => Boolean(skills.status().preview)); assert.equal(skillStore.list().some(item => item.name === 'beacon'), false);
+        assert.equal(skills.status().preview.item.source.commit, 'a'.repeat(40)); assert.equal(await js("document.getElementById('skill-preview').textContent.includes('Tools granted: none')"), true);
+        firstPin = skills.status().preview.item.id; await js("document.getElementById('skill-apply').click()"); await wait(() => !skills.status().preview);
+        assert.equal(skills.status().inventory.find(item => item.name === 'beacon').enabled, true); assert.equal(await js('typeof window.fixtureEscape'), 'undefined');
+        firstRevision = policy.worker.read(skills.status().workspaceId).revision;
+      });
+      await check('skills-update-future-pin-retains-captured-authority', async () => {
+        await chat('update skill from https://github.com/fixture/skills/tree/updated/beacon'); await wait(() => Boolean(skills.status().preview));
+        assert.equal(skills.status().preview.item.source.commit, 'b'.repeat(40)); await chat('apply this skill change'); await wait(() => !skills.status().preview);
+        const latest = skills.status().inventory.find(item => item.name === 'beacon'); assert.notEqual(latest.id, firstPin);
+        assert.equal(skillStore.get(firstPin).source.commit, 'a'.repeat(40)); assert.equal(policy.worker.authority(skills.status().workspaceId, firstRevision).extensions.includes(firstPin), true);
+      });
+      await check('skills-collision-single-word-choice-preserves-bundled-content', async () => {
+        await chat('add skill from https://github.com/fixture/skills/tree/main/pipeliner-forge'); await wait(() => Boolean(skills.status().collision));
+        const name = skills.status().collision.choices[0]; assert.match(name, /^[a-z]+$/); assert.equal(skills.status().preview, null);
+        await show(); await js(`document.getElementById('skill-choice-${name}').click()`); await wait(() => Boolean(skills.status().preview));
+        assert.equal(skills.status().preview.item.originalName, 'pipeliner-forge'); await js("document.getElementById('skill-apply').click()"); await wait(() => !skills.status().preview);
+        assert.equal(skillStore.list().filter(item => item.name === 'pipeliner-forge').length, 1); assert.equal(skillStore.list().some(item => item.name === name), true);
+      });
+      await check('skills-revocation-removal-and-protected-reopen', async () => {
+        await chat('disable skill beacon'); await wait(() => Boolean(skills.status().preview)); await chat('apply this skill change'); await wait(() => !skills.status().preview);
+        assert.equal(policy.worker.authority(skills.status().workspaceId, firstRevision).extensions.includes(firstPin), false);
+        await chat('remove skill beacon'); await wait(() => Boolean(skills.status().preview)); assert.match(skills.status().preview.timing, /every run/); await chat('apply this skill change'); await wait(() => !skills.status().preview);
+        assert.equal(skillStore.available(firstPin), false); const { openSkillStore } = await moduleAt('../skills/store.mjs'), reopened = openSkillStore(directory);
+        try { assert.equal(reopened.get(firstPin).source.commit, 'a'.repeat(40)); assert.equal(reopened.available(firstPin), false); } finally { reopened.close(); }
+      });
+      await check('skills-drafts-focus-labels-and-narrow-zoom', async () => {
+        await show(); await js("document.getElementById('skill-link').value='https://github.com/fixture/skills/tree/main/beacon';document.getElementById('skill-link').focus()");
+        await skills.dispatch({ operation: 'view' }); await new Promise(resolve => setTimeout(resolve, 50));
+        assert.equal(await js("document.getElementById('skill-link').value"), 'https://github.com/fixture/skills/tree/main/beacon'); assert.equal(await js('document.activeElement.id'), 'skill-link');
+        assert.equal(await js("Array.from(document.querySelectorAll('#skill-settings input,#skill-settings select')).every(input=>Array.from(document.querySelectorAll('#skill-settings label')).some(label=>label.htmlFor===input.id))"), true);
+        await js("document.getElementById('skill-install-permissions').open=true");
+        for (const zoom of [1, 2]) { window.setSize(420, 760); window.webContents.setZoomFactor(zoom); await new Promise(resolve => setTimeout(resolve, 100)); assert.equal(await js('document.documentElement.scrollWidth<=innerWidth'), true); }
+        window.webContents.setZoomFactor(1); window.setSize(1180, 840); await new Promise(resolve => setTimeout(resolve, 100));
+        assert.equal(await js("Array.from(document.querySelectorAll('#skill-settings button')).every(button=>button.getBoundingClientRect().height>=44)"), true);
+        nativeTheme.themeSource = 'dark'; await js('window.scrollTo(0,0)'); writeFileSync(path.join(directory, 'qa-capture.png'), (await window.webContents.capturePage()).toPNG(), { flag: 'wx', mode: 0o600 });
+      });
+    }
+    if (toolsScope) {
+      const show = () => js("document.getElementById('settings-nav').click();document.getElementById('settings-skills').click()");
+      const toolChat = async text => { await chat(text); await wait(() => !tools.status().busy); };
+      await check('tools-registered-frame-stale-context-and-secret-chat', async () => {
+        const frame = window.webContents.mainFrame, payload = { operation: 'view', contextRevision: tools.status().revision };
+        assert.throws(() => toolChannel.dispatch({ sender: {}, senderFrame: frame }, payload));
+        assert.throws(() => toolChannel.dispatch({ sender: window.webContents, senderFrame: frame }, { ...payload, contextRevision: payload.contextRevision - 1 }));
+        await toolChat('"disable tool queue"'); assert.equal(tools.status().preview, null);
+        await chat('Inspect tool server from https://tools.example.invalid/mcp with bearer secret-fixture');
+        assert.equal(await js("document.getElementById('transcript').textContent.includes('secret-fixture')"), false);
+      });
+      let originalPin;
+      await check('tools-chat-native-bearer-catalog-encryption-and-draft-preservation', async () => {
+        await toolChat('Inspect tool server from https://tools.example.invalid/mcp with a bearer credential'); await wait(() => Boolean(tools.status().catalog));
+        assert.equal(readFileSync(path.join(directory, 'connections.sqlite')).includes(fixtureKey), false);
+        assert.equal(JSON.stringify(tools.status()).includes(fixtureKey), false); assert.equal(toolStore.list().length, 0);
+        await show(); assert.equal(await js("document.getElementById('tool-catalog').textContent.includes('<script>')"), true);
+        assert.equal(await js('typeof window.fixtureToolEscape'), 'undefined');
+        await js("document.getElementById('chat-nav').click();document.getElementById('prompt').value='Inspect tool server from https://tools.example.invalid/mcp';document.getElementById('composer').requestSubmit();document.getElementById('prompt').value='Preserved next message'");
+        await wait(() => !tools.status().busy); assert.equal(await js("document.getElementById('prompt').value"), 'Preserved next message');
+      });
+      await check('tools-Settings-catalog-data-preview-keyboard-install-no-grant', async () => {
+        await show(); await js("document.getElementById('tool-select-queue').click()"); await wait(() => Boolean(tools.status().preview));
+        await js("document.getElementById('tool-preview-data').open=true;document.querySelector('#tool-preview-data input[value=\"issue.title\"]').checked=true;document.querySelector('#tool-preview-data form').requestSubmit()");
+        await wait(() => tools.status().preview.item.dataCategories.includes('issue.title')); originalPin = tools.status().preview.item.id;
+        await js("document.getElementById('tool-apply').focus()"); await wait(() => window.isFocused());
+        window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' }); await wait(() => !tools.status().preview);
+        assert.equal(tools.status().inventory.find(item => item.id === originalPin).enabled, true); assert.equal(tools.status().permissions.repository, false);
+        assert.equal(await js('typeof window.fixtureToolEscape'), 'undefined');
+      });
+      await check('tools-custom-pipeline-chat-binding-Settings-typed-input-and-preview', async () => {
+        await chat('Add an Extension step after step 2 called Read the queue'); await wait(() => pipelines.status().draft?.definition.steps.length === 7);
+        await chat('Use tool queue in step 3'); await wait(() => pipelines.status().draft.definition.steps[2].extension?.pin === originalPin);
+        await js("document.getElementById('settings-nav').click();document.getElementById('settings-pipelines').click();document.getElementById('pipeline-step-3').open=true;document.getElementById('pipeline-binding-3-path').value='title';document.getElementById('pipeline-binding-3-source').value='issue.title';document.getElementById('pipeline-binding-3-form').requestSubmit()");
+        await wait(() => pipelines.status().draft.definition.steps[2].extension.bindings.length === 1);
+        await chat('Review this pipeline'); await wait(() => Boolean(pipelines.status().preview));
+        assert.equal(pipelines.status().preview.after['pipelines.development'].value.steps[2].extension.pin, originalPin);
+        await chat('Apply this pipeline'); await wait(() => !pipelines.status().preview); assert.equal(pipelines.status().current.grantedPermissions.includes('extension.invoke'), false);
+        assert.equal(pipelines.status().current.definition.steps[2].retryLimit, 0);
+      });
+      await check('tools-permissions-separate-update-pin-and-immediate-disable', async () => {
+        await toolChat('Allow host tool calls'); await toolChat('Apply tool change'); await toolChat('Allow repository tool calls'); await toolChat('Apply tool change');
+        assert.equal(tools.status().permissions.host, true); assert.equal(tools.status().permissions.repository, true);
+        await toolChat('Set tool queue data to Issue title, PM supplied values'); await toolChat('Apply tool change');
+        assert.notEqual(tools.status().inventory.find(item => item.enabled).id, originalPin); assert.deepEqual(toolStore.get(originalPin).definition.dataCategories, ['issue.title']);
+        assert.equal(pipelines.status().current.definition.steps[2].extension.pin, originalPin);
+        await toolChat('Disable tool queue'); await toolChat('Apply tool change'); assert.equal(tools.status().inventory.some(item => item.enabled), false);
+        await toolChat('Enable tool queue'); await toolChat('Apply tool change');
+      });
+      await check('tools-advanced-command-shared-namespace-and-text-only-source', async () => {
+        await show(); await js("document.getElementById('tool-custom-command').open=true;document.getElementById('tool-command-name').value='pipeliner-forge';document.getElementById('tool-command-purpose').value='Check synthetic work';document.getElementById('tool-command-script').value='printf safe';document.getElementById('tool-command-script').form.requestSubmit()");
+        await wait(() => Boolean(tools.status().collision)); const name = tools.status().collision.choices[0]; assert.match(name, /^[a-z]+$/);
+        await js(`document.getElementById('tool-choice-${name}').click()`); await wait(() => Boolean(tools.status().preview));
+        await js("document.getElementById('tool-apply').click()"); await wait(() => !tools.status().preview);
+        assert.equal(skillStore.list().filter(item => item.name === 'pipeliner-forge').length, 1); assert.equal(toolStore.list().some(item => item.name === name), true);
+        assert.equal(development.status().run, null);
+      });
+      await check('tools-source-draft-focus-context-removal-and-reopen', async () => {
+        await show(); await js("document.getElementById('tool-endpoint').value='https://tools.example.invalid/mcp';document.getElementById('tool-endpoint').focus()");
+        await tools.dispatch({ operation: 'view' }); await new Promise(resolve => setTimeout(resolve, 50));
+        assert.equal(await js("document.getElementById('tool-endpoint').value"), 'https://tools.example.invalid/mcp'); assert.equal(await js('document.activeElement.id'), 'tool-endpoint');
+        await toolChat('Remove tool queue'); await toolChat('Apply tool change'); assert.equal(toolStore.available(originalPin), false);
+        const { openToolStore } = await moduleAt('../tools/store.mjs'), reopened = openToolStore(directory);
+        try { assert.equal(reopened.available(originalPin), false); assert.deepEqual(reopened.get(originalPin).definition.dataCategories, ['issue.title']); } finally { reopened.close(); }
+      });
+      await check('tools-labels-keyboard-narrow-zoom-and-native-capture', async () => {
+        await show(); await js("document.getElementById('tool-custom-command').open=true;document.getElementById('tool-permissions').open=true");
+        assert.equal(await js("Array.from(document.querySelectorAll('#tool-settings input,#tool-settings select,#tool-settings textarea')).every(input=>input.closest('label')||Array.from(document.querySelectorAll('#tool-settings label')).some(label=>label.htmlFor===input.id))"), true);
+        for (const zoom of [1, 2]) { window.setSize(420, 760); window.webContents.setZoomFactor(zoom); await new Promise(resolve => setTimeout(resolve, 100)); assert.equal(await js('document.documentElement.scrollWidth<=innerWidth'), true); }
+        window.webContents.setZoomFactor(1); window.setSize(1180, 840); nativeTheme.themeSource = 'dark'; await new Promise(resolve => setTimeout(resolve, 100));
+        await js("document.getElementById('tool-settings').scrollIntoView({block:'start'})"); writeFileSync(path.join(directory, 'qa-capture.png'), (await window.webContents.capturePage()).toPNG(), { flag: 'wx', mode: 0o600 });
+      });
+    }
     if (backgroundScope) {
       const chat = async text => { await js(`document.getElementById('chat-nav').click();document.getElementById('prompt').value=${JSON.stringify(text)};document.getElementById('composer').requestSubmit()`); await wait(() => !background.status().busy); };
       await check('background-frame-context-host-scope-fences', async () => {
@@ -519,6 +688,10 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
         window.webContents.setZoomFactor(1); window.setSize(1180, 840);
       });
     }
+    if (privacyScope) await require('./qualify-privacy.cjs').run({ window, directory, vault, privacy, records: privacyRecords, channel: privacyChannel, workspaces, policy, js, wait, check });
+    if (appearanceScope) await require('./qualify-appearance.cjs').run({ window, directory, appearance, channel: appearanceChannel, policy, js, wait, check });
+    if (deliveryScope) await require('./qualify-delivery.cjs').run({ window, directory, vault, privacy, delivery, artifacts, appearance, channel: deliveryChannel, policy, js, wait, check, measurements });
+    if (permissionScope) await require('./qualify-permissions.cjs').run({ window, directory, permissions, appearance, channel: permissionChannel, policy, js, wait, check, measurements });
     await check('themes-narrow-zoom-high-contrast-reduced-motion', async () => {
       if (developmentScope) await js("document.getElementById('settings-nav').click();document.getElementById('settings-agents').click()");
       for (const theme of ['light', 'dark']) for (const view of ['repositories', 'issues', 'settings']) { nativeTheme.themeSource = theme; await js(`document.getElementById('${view}-nav').click()`); assert.equal(await js('document.documentElement.scrollWidth<=innerWidth'), true); }
@@ -537,6 +710,12 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
       if (developmentScope) await js("document.getElementById('settings-nav').click();document.getElementById('settings-agents').click();document.getElementById('dev-starter-skills').open=true");
       if (schedulingScope) await js("document.getElementById('settings-nav').click();document.getElementById('settings-schedule').click();window.scrollTo(0,0)");
       if (backgroundScope) await js("document.getElementById('settings-nav').click();document.getElementById('settings-background').click();window.scrollTo(0,0)");
+      if (skillsScope) await js("document.getElementById('settings-nav').click();document.getElementById('settings-skills').click();window.scrollTo(0,0)");
+      if (toolsScope) await js("document.getElementById('settings-nav').click();document.getElementById('settings-skills').click();window.scrollTo(0,document.getElementById('tool-settings').offsetTop-100)");
+      if (privacyScope) await js("document.getElementById('settings-nav').click();document.getElementById('settings-privacy').click();window.scrollTo(0,0)");
+      if (appearanceScope) await js("document.getElementById('settings-nav').click();document.getElementById('settings-appearance').click();window.scrollTo(0,document.getElementById('appearance-form').offsetTop-100)");
+      if (deliveryScope) await js("document.getElementById('settings-nav').click();document.getElementById('settings-privacy').click();window.scrollTo(0,document.getElementById('privacy-installation-inventory').offsetTop-100)");
+      if (permissionScope) { await js("document.getElementById('settings-nav').click();document.getElementById('settings-permissions').click();document.getElementById('permission-form').scrollIntoView({block:'start'});window.scrollBy(0,-(document.querySelector('.app-head').getBoundingClientRect().height+(innerWidth<=720?document.querySelector('.app-nav').getBoundingClientRect().height:0)+10))"); assert.equal(await js("document.getElementById('permission-workspace-read').getBoundingClientRect().bottom<innerHeight"), true); }
       await js('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))'); await new Promise(resolve => setTimeout(resolve, 100));
       if (developmentScope) assert.equal(await js("!document.getElementById('settings-view').hidden && !document.getElementById('agent-settings').hidden && document.getElementById('settings-nav').getAttribute('aria-current')==='page'"), true);
       assert.equal(await js("getComputedStyle(document.body).backgroundColor==='rgb(16, 23, 34)'"), true);
@@ -555,9 +734,9 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
       assert.equal(folderCancelled, true);
     });
   } catch { const snapshot = workspaces.status(); workspaceEvidence = { checkpoint: workspaceStage, busy: snapshot.busy, state: snapshot.draft?.state, error: snapshot.draft?.error, folderSelected: Boolean(snapshot.draft?.folder), projectCount: snapshot.draft?.projects?.length ?? 0 }; process.exitCode = 1; }
-  const report = { desktopQualification: backgroundScope ? 'optional-background-host' : schedulingScope ? 'deterministic-scheduling' : developmentScope ? 'development-controls' : pipelineScope ? 'versioned-pipeline-editing' : 'protected-issue-intake', checks, passed: checks.length === (backgroundScope ? 25 : schedulingScope ? 23 : developmentScope ? 22 + (pipelineScope ? 6 : 0) : pipelineScope ? 24 : issueScope ? 18 : 21) && checks.every(c => c.passed), milliseconds: Math.round(performance.now() - started), windowReadyFromMainEntryMs: windowReadyMs, measurements,
+  const report = { desktopQualification: permissionScope ? 'permissions-and-local-testing-controls' : deliveryScope ? 'delivery-custody-recovery-and-installation-data-inventory' : appearanceScope ? 'appearance-and-accessibility-preferences' : privacyScope ? 'protected-local-privacy-and-recovery' : toolsScope ? 'scoped-tools-and-custom-pipelines' : skillsScope ? 'starter-skill-management' : backgroundScope ? 'optional-background-host' : schedulingScope ? 'deterministic-scheduling' : developmentScope ? 'development-controls' : pipelineScope ? 'versioned-pipeline-editing' : 'protected-issue-intake', checks, passed: checks.length === (permissionScope ? 24 : deliveryScope ? 26 : appearanceScope ? 23 : privacyScope ? 27 : toolsScope ? 26 : skillsScope ? 26 : backgroundScope ? 25 : schedulingScope ? 23 : developmentScope ? 22 + (pipelineScope ? 6 : 0) : pipelineScope ? 24 : issueScope ? 18 : 21) && checks.every(c => c.passed), milliseconds: Math.round(performance.now() - started), windowReadyFromMainEntryMs: windowReadyMs, measurements,
     versions: { electron: process.versions.electron, chromium: process.versions.chrome, node: process.versions.node, sqlite: process.versions.sqlite, os: process.platform, architecture: process.arch },
-    nativeEvidence, workspaceEvidence, folderFailure, folderCancelled, synthetic: 'Synthetic GitHub/model replies, first folder selection and optional background-service adapter; actual native secure field, folder-panel cancellation, protected storage, local Git and own window. Actual SMAppService/bootstrap is qualified separately.',
+    nativeEvidence, workspaceEvidence, folderFailure, folderCancelled, synthetic: 'Synthetic GitHub/model replies, first folder selection, optional tool catalog and background-service adapters; actual native secure fields, folder-panel cancellation, protected storage, local Git and own window. External tool compatibility and actual SMAppService/bootstrap are qualified separately.',
     notRun: issueScope ? ['Unchanged Codex unauthenticated discovery', 'Unchanged public GitHub App qualification', 'Unchanged invalid Cloud key probe'] : [],
     pending: ['Human native folder selection', 'Authenticated provider/GitHub PM journeys', 'Human task observation', 'Screen reader', 'Windows/Linux', 'Stable signed package storage identity'], captureAvailable: Boolean(capture),
     nativeCaptureAvailable: existsSync(path.join(directory, 'secure-field.png')), qaCaptureAvailable: existsSync(path.join(directory, 'qa-capture.png')) };

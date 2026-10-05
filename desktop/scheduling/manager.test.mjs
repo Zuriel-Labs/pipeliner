@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { openTestVault } from '../connections/test-vault.mjs';
 import assert from 'node:assert/strict';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -8,15 +9,15 @@ import { openPolicyStore } from '../core/policy.mjs';
 import { createSchedulingManager } from './manager.mjs';
 import { createSchedulingControlChannel } from '../core/control.mjs';
 
-test('PM schedule scope, inheritance, preview and control binding use the same durable policy', t => {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-schedule-pm-'))), store = openWorkspaceStore(root);
+test('PM schedule scope, inheritance, preview and control binding use the same durable policy', async t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-schedule-pm-'))), vault = await openTestVault(root), store = openWorkspaceStore(root, { vault });
   for (const [index, id] of ['R1', 'R2'].entries()) store.register({ id, name: id, repositoryId: 'REPO' + id, slug: 'fixture/' + id.toLowerCase(), localKey: '1:' + index, path: root, project: { id: 'P1' } });
   store.select('R1');
   const policy = openPolicyStore(root, { catalog: () => ({ repositories: ['R1', 'R2'], capabilities: [], maxConcurrency: 1, background: false, connections: [], developers: [], extensions: [] }) });
   let runs = 0;
   const scheduler = { busy: () => false, status: () => null, sync: async () => {}, check: async () => { runs++; } };
   const manager = createSchedulingManager({ store, policy, scheduler });
-  t.after(() => { manager.close(); policy.close(); store.close(); rmSync(root, { recursive: true }); });
+  t.after(() => { manager.close(); policy.close(); store.close(); vault.close(); rmSync(root, { recursive: true }); });
   const chat = text => manager.dispatch({ operation: 'chat', text });
   chat('Check every 45 minutes'); chat('Apply this schedule');
   chat('Schedule daily at 09:00'); assert.equal(manager.status().preview.after['scheduling.timezone'].value, Intl.DateTimeFormat().resolvedOptions().timeZone); chat('Cancel this schedule');

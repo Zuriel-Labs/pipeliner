@@ -9,6 +9,7 @@ import { openWorkspaceStore } from './store.mjs';
 import { inspectLocal } from './local.mjs';
 import { setupCommand } from './commands.mjs';
 import { createWorkspaceControlChannel } from '../core/control.mjs';
+import { openTestVault } from '../connections/test-vault.mjs';
 
 test('setup field additions preserve existing option IDs and detect post-preview drift', () => {
   const existing = [{ id: 'F1', name: 'Status', options: [
@@ -27,14 +28,14 @@ test('setup field additions preserve existing option IDs and detect post-preview
   actual[0].options[0].id = 'changed'; assert.throws(() => verifyFields(actual, plan), /readback-mismatch/);
 });
 
-test('workspace journal blocks duplicate or uncertain effects across restart and canonical aliases', () => {
+test('workspace journal blocks duplicate or uncertain effects across restart and canonical aliases', async () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-setup-store-'))); chmodSync(root, 0o700);
-  let store = openWorkspaceStore(root);
+  const vault = await openTestVault(root); let store = openWorkspaceStore(root, { vault });
   try {
     store.saveDraft({ id: 'draft-1', state: 'preview', target: 'fixture/repo' });
     const effect = store.prepare('draft-1', 'create-project', { owner: 'O1', title: 'Fixture' });
     assert.equal(store.dispatch(effect.id), true); assert.equal(store.dispatch(effect.id), false);
-    store.finish(effect.id, 'uncertain'); store.close(); store = openWorkspaceStore(root);
+    store.finish(effect.id, 'uncertain'); store.close(); store = openWorkspaceStore(root, { vault });
     assert.equal(store.effects('draft-1')[0].state, 'uncertain');
     assert.throws(() => store.prepare('draft-1', 'create-project', { owner: 'O1', title: 'Changed' }), /effect-conflict/);
     assert.equal(store.prepare('draft-1', 'create-project', { owner: 'O1', title: 'Fixture' }).state, 'uncertain');
@@ -43,7 +44,7 @@ test('workspace journal blocks duplicate or uncertain effects across restart and
     assert.throws(() => store.register({ ...workspace, id: 'repo-two', repositoryId: 'R2', slug: 'other/repo' }), /workspace-conflict/);
     assert.throws(() => store.register({ ...workspace, localKey: '3:4' }), /workspace-conflict/);
     assert.equal(store.workspaces().length, 1);
-  } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
+  } finally { store.close(); vault.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
 test('actual local inspection preserves dirty work, validates both origins, and canonicalizes worktrees', async () => {

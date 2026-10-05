@@ -4,6 +4,8 @@ import { protectedFile } from '../core/storage.mjs';
 import { canonicalJSON, immutable, record, validatePipeline } from '../core/settings.mjs';
 import { transact } from '../core/runtime.mjs';
 import { showcaseComplete } from '../../scripts/lib/showcase.mjs';
+import { createRecordCodec } from '../privacy/records.mjs';
+import { migrateProtectedStore, finishProtectedMigration } from '../privacy/migration.mjs';
 
 const hash = value => createHash('sha256').update(canonicalJSON(value)).digest('hex');
 const id = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(value);
@@ -50,32 +52,71 @@ export function validateDevelopmentOutput(value) {
 }
 
 // Only the trusted Development host receives this ledger. Policy/runtime own authority.
-export function openDevelopmentStore(directory, { clock = Date.now } = {}) {
+export function openDevelopmentStore(directory, { clock = Date.now, vault } = {}) {
+  const codec = createRecordCodec(vault, 'development');
   const db = new DatabaseSync(protectedFile(directory, 'development.sqlite'), { allowExtension: false, timeout: 1000 });
-  try {
-    const version = db.prepare('PRAGMA user_version').get().user_version;
-    if (![0, 1].includes(version)) throw new Error('Unsupported Development store');
-    db.exec('PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;');
-    if (!version) transact(db, () => {
-      if (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().length) throw new Error('Unrecognized Development store');
-      db.exec(`CREATE TABLE development_runs(id TEXT PRIMARY KEY, captured TEXT NOT NULL, captured_hash TEXT NOT NULL, state TEXT NOT NULL, state_hash TEXT NOT NULL);
-        CREATE TABLE development_requests(run TEXT NOT NULL REFERENCES development_runs(id), id TEXT NOT NULL, document TEXT NOT NULL, hash TEXT NOT NULL, state TEXT NOT NULL, result TEXT, result_hash TEXT, PRIMARY KEY(run,id));
-        CREATE TABLE development_outputs(run TEXT NOT NULL REFERENCES development_runs(id), visit INTEGER NOT NULL, step TEXT NOT NULL, candidate TEXT NOT NULL, document TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY(run,visit));
-        CREATE TRIGGER immutable_development_binding BEFORE UPDATE OF captured,captured_hash ON development_runs BEGIN SELECT RAISE(ABORT,'Immutable Development binding'); END;
-        CREATE TRIGGER immutable_development_request BEFORE UPDATE OF run,id,document,hash ON development_requests BEGIN SELECT RAISE(ABORT,'Immutable Development request'); END;
-        CREATE TRIGGER immutable_development_output BEFORE UPDATE ON development_outputs BEGIN SELECT RAISE(ABORT,'Immutable Development output'); END;
-        PRAGMA user_version=1;`);
-    });
-    if (db.prepare('PRAGMA quick_check').get().quick_check !== 'ok') throw new Error('Development store integrity failed');
-  } catch (error) { db.close(); throw error; }
   let closed = false;
   const requireOpen = () => { if (closed) throw new Error('Development store closed'); };
-  function read(runId) {
+  const identity = (row, table, key) => ({ repository: row.repository ?? db.prepare('SELECT repository FROM development_runs WHERE id=?').get(row.run)?.repository, table, key });
+  const runMetadata = (row, field) => ({ id: row.id, hash: row[field + '_hash'], ...(field === 'state' ? { capturedHash: row.captured_hash } : {}) });
+  const runIdentity = (row, field) => identity(row, 'development_' + field, row.id);
+  const requestIdentity = (row, field) => identity(row, 'development_request_' + field, { run: row.run, id: row.id });
+  const requestMetadata = row => ({ hash: row.hash });
+  const requestControl = row => ({ state: row.state, resultHash: row.result_hash });
+  const sealControl = row => codec.encode(requestIdentity(row, 'control'), requestControl(row), requestMetadata(row));
+  const outputIdentity = row => identity(row, 'development_outputs', { run: row.run, visit: row.visit });
+  const outputMetadata = row => ({ step: row.step, candidate: row.candidate, hash: row.hash });
+  const immutableTriggers = `CREATE TRIGGER immutable_development_binding BEFORE UPDATE OF captured,captured_hash,repository ON development_runs BEGIN SELECT RAISE(ABORT,'Immutable Development binding'); END;
+    CREATE TRIGGER immutable_development_request BEFORE UPDATE OF run,id,document,hash ON development_requests BEGIN SELECT RAISE(ABORT,'Immutable Development request'); END;
+    CREATE TRIGGER immutable_development_output BEFORE UPDATE ON development_outputs BEGIN SELECT RAISE(ABORT,'Immutable Development output'); END;`;
+  function verify() {
+    for (const row of db.prepare('SELECT id FROM development_runs').iterate()) read(row.id);
+    for (const row of db.prepare('SELECT * FROM development_requests').iterate()) request(row);
+    for (const row of db.prepare('SELECT * FROM development_outputs').iterate()) output(row);
+    if (db.prepare('PRAGMA foreign_key_check').get()) throw Error('Development record integrity failed');
+    const expected = immutableTriggers.trim().split('\n').map(sql => sql.trim().replace(/;$/, ''));
+    const actual = db.prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND tbl_name IN ('development_runs','development_requests','development_outputs')").all().map(row => row.sql);
+    if (actual.length !== expected.length || expected.some(sql => !actual.some(value => value.replace(/\s+/g, ' ').trim() === sql.replace(/\s+/g, ' ')))) throw Error('Development immutable controls integrity failed');
+    return true;
+  }
+  try {
+    const version = db.prepare('PRAGMA user_version').get().user_version;
+    if (![0, 1, 2].includes(version)) throw new Error('Unsupported Development store');
+    db.exec('PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON; PRAGMA temp_store=MEMORY;');
+    if (!version) transact(db, () => {
+      if (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().length) throw new Error('Unrecognized Development store');
+      db.exec(`CREATE TABLE development_runs(id TEXT PRIMARY KEY, captured BLOB NOT NULL, captured_hash TEXT NOT NULL, state BLOB NOT NULL, state_hash TEXT NOT NULL, repository TEXT NOT NULL);
+        CREATE TABLE development_requests(run TEXT NOT NULL REFERENCES development_runs(id), id TEXT NOT NULL, document BLOB NOT NULL, hash TEXT NOT NULL, state TEXT NOT NULL, result BLOB, result_hash TEXT, control BLOB NOT NULL, PRIMARY KEY(run,id));
+        CREATE TABLE development_outputs(run TEXT NOT NULL REFERENCES development_runs(id), visit INTEGER NOT NULL, step TEXT NOT NULL, candidate TEXT NOT NULL, document BLOB NOT NULL, hash TEXT NOT NULL, PRIMARY KEY(run,visit));
+        ${immutableTriggers} PRAGMA user_version=2;`);
+    });
+    else if (version === 1) migrateProtectedStore(db, directory, 'development', { vault, from: 1, to: 2, verify, transform() {
+      db.exec('DROP TRIGGER immutable_development_binding; DROP TRIGGER immutable_development_request; DROP TRIGGER immutable_development_output; ALTER TABLE development_runs ADD COLUMN repository TEXT; ALTER TABLE development_requests ADD COLUMN control BLOB;');
+      for (const row of db.prepare('SELECT * FROM development_runs').iterate()) {
+        const value = read(row.id, true); row.repository = value.captured.run.repository;
+        if (!id(row.repository)) throw Error('Development record integrity failed');
+        db.prepare('UPDATE development_runs SET captured=?,state=?,repository=? WHERE id=?').run(codec.encode(runIdentity(row, 'captured'), value.captured, runMetadata(row, 'captured')), codec.encode(runIdentity(row, 'state'), value.state, runMetadata(row, 'state')), row.repository, row.id);
+      }
+      for (const row of db.prepare('SELECT * FROM development_requests').iterate()) {
+        const value = request(row, true), { state: _state, result, ...data } = value;
+        db.prepare('UPDATE development_requests SET document=?,result=?,control=? WHERE run=? AND id=?').run(codec.encode(requestIdentity(row, 'document'), data, requestMetadata(row)), result === null ? null : codec.encode(requestIdentity(row, 'result'), result, requestControl(row)), sealControl(row), row.run, row.id);
+      }
+      for (const row of db.prepare('SELECT * FROM development_outputs').iterate()) {
+        const value = output(row, true); db.prepare('UPDATE development_outputs SET document=? WHERE run=? AND visit=?').run(codec.encode(outputIdentity(row), value.output, outputMetadata(row)), row.run, row.visit);
+      }
+      db.exec(immutableTriggers);
+    } });
+    finishProtectedMigration(db, directory, 'development', { vault, verify }); verify();
+    if (db.prepare('PRAGMA quick_check').get().quick_check !== 'ok') throw new Error('Development store integrity failed');
+  } catch (error) { db.close(); throw error; }
+  function read(runId, legacy = false) {
     requireOpen(); if (!id(runId)) throw new Error('Invalid Development run');
     const row = db.prepare('SELECT * FROM development_runs WHERE id=?').get(runId);
     if (!row) throw new Error('Unknown Development run');
-    const captured = JSON.parse(row.captured), state = JSON.parse(row.state);
-    if (hash(captured) !== row.captured_hash || hash(state) !== row.state_hash || captured.run.id !== runId || state.runId !== runId) throw new Error('Development record integrity failed');
+    const captured = legacy ? JSON.parse(row.captured) : codec.decode(runIdentity(row, 'captured'), row.captured, runMetadata(row, 'captured'));
+    const state = legacy ? JSON.parse(row.state) : codec.decode(runIdentity(row, 'state'), row.state, runMetadata(row, 'state'));
+    if (hash(captured) !== row.captured_hash || hash(state) !== row.state_hash || captured.run.id !== runId || state.runId !== runId || !id(captured.run.repository)
+      || !Number.isSafeInteger(state.epoch) || state.epoch < 1 || !legacy && captured.run.repository !== row.repository) throw new Error('Development record integrity failed');
     return { captured, state };
   }
   function bound(binding) {
@@ -109,19 +150,33 @@ export function openDevelopmentStore(directory, { clock = Date.now } = {}) {
     if (state.turns >= captured.run.limits['limits.issueTurns'] || budget.entry.turns >= captured.run.limits['limits.stepTurns']) throw new Error('Captured Development turn limit exhausted');
     budget.entry.turns++; state.turns++; state.stepTurns = budget.entry.turns; state.budgetClock = budget.time;
   }
-  const write = state => { quota(state.runId, state, 0, true); db.prepare('UPDATE development_runs SET state=?,state_hash=? WHERE id=?').run(canonicalJSON(state), hash(state), state.runId); };
-  function request(row) {
+  const write = state => {
+    const row = db.prepare('SELECT * FROM development_runs WHERE id=?').get(state.runId); row.state_hash = hash(state);
+    const sealed = codec.encode(runIdentity(row, 'state'), state, runMetadata(row, 'state')); quota(state.runId, sealed.length, 0, true);
+    db.prepare('UPDATE development_runs SET state=?,state_hash=? WHERE id=?').run(sealed, row.state_hash, state.runId);
+  };
+  function request(row, legacy = false) {
     if (!row) throw new Error('Unknown Development request');
-    const data = JSON.parse(row.document), result = row.result ? JSON.parse(row.result) : null;
-    if (hash(data) !== row.hash || result && hash(result) !== row.result_hash || !['prepared', 'dispatched', 'uncertain', 'verified', 'denied'].includes(row.state)) throw new Error('Development request integrity failed');
+    const data = legacy ? JSON.parse(row.document) : codec.decode(requestIdentity(row, 'document'), row.document, requestMetadata(row));
+    const result = row.result === null ? null : legacy ? JSON.parse(row.result) : codec.decode(requestIdentity(row, 'result'), row.result, requestControl(row));
+    if (hash(data) !== row.hash || result && hash(result) !== row.result_hash || result === null && row.result_hash !== null || data.runId !== row.run || data.id !== row.id
+      || !Number.isSafeInteger(data.epoch) || data.epoch < 1 || !['prepared', 'dispatched', 'uncertain', 'verified', 'denied'].includes(row.state)
+      || !legacy && canonicalJSON(codec.decode(requestIdentity(row, 'control'), row.control, requestMetadata(row))) !== canonicalJSON(requestControl(row))) throw new Error('Development request integrity failed');
     return immutable({ ...data, state: row.state, result });
   }
-  const requests = runId => db.prepare('SELECT * FROM development_requests WHERE run=? ORDER BY rowid').all(runId).map(request);
-  function quota(runId, value, reservedBytes = 0, replacesState = false) {
-    const { captured, state } = read(runId);
-    const used = db.prepare('SELECT COALESCE(SUM(length(CAST(document AS BLOB))+COALESCE(length(CAST(result AS BLOB)),0)),0) AS bytes FROM development_requests WHERE run=?').get(runId).bytes
+  function output(row, legacy = false) {
+    const data = legacy ? JSON.parse(row.document) : codec.decode(outputIdentity(row), row.document, outputMetadata(row)), capturedCandidate = JSON.parse(row.candidate);
+    candidate(capturedCandidate); validateDevelopmentOutput(data);
+    if (hash(data) !== row.hash || !id(row.step) || !Number.isSafeInteger(row.visit) || row.visit < 1) throw Error('Development output integrity failed');
+    return immutable({ step: row.step, visit: row.visit, candidate: capturedCandidate, output: data });
+  }
+  const requests = runId => db.prepare('SELECT * FROM development_requests WHERE run=? ORDER BY rowid').all(runId).map(row => request(row));
+  function quota(runId, bytes, reservedBytes = 0, replacesState = false) {
+    const { captured } = read(runId);
+    const used = db.prepare('SELECT COALESCE(SUM(length(CAST(document AS BLOB))+COALESCE(length(CAST(result AS BLOB)),0)+length(control)),0) AS bytes FROM development_requests WHERE run=?').get(runId).bytes
       + db.prepare('SELECT COALESCE(SUM(length(CAST(document AS BLOB))),0) AS bytes FROM development_outputs WHERE run=?').get(runId).bytes;
-    if (used + (replacesState ? 0 : Buffer.byteLength(canonicalJSON(state))) + Buffer.byteLength(canonicalJSON(value)) + reservedBytes > captured.logBytes) throw new Error('Captured Development log limit exhausted');
+    const stateBytes = replacesState ? 0 : db.prepare('SELECT length(state) AS bytes FROM development_runs WHERE id=?').get(runId).bytes;
+    if (used + stateBytes + bytes + reservedBytes > captured.logBytes) throw new Error('Captured Development log limit exhausted');
   }
   function executing(binding) {
     const value = bound(binding);
@@ -130,12 +185,22 @@ export function openDevelopmentStore(directory, { clock = Date.now } = {}) {
   }
   return Object.freeze({
     create(run, settings) {
-      canonicalJSON(run); canonicalJSON(settings); record(settings, ['pipeline', 'source', 'developer', 'skillsHash', 'issueHash', 'checks', 'logBytes'], ['executionProfile', 'integrationMethod', 'fallbacks']);
+      canonicalJSON(run); canonicalJSON(settings); record(settings, ['pipeline', 'source', 'developer', 'skillsHash', 'issueHash', 'checks', 'logBytes'], ['executionProfile', 'integrationMethod', 'fallbacks', 'skillManifest', 'toolManifest', 'toolsHash']);
+      if (settings.skillManifest !== undefined && (!Array.isArray(settings.skillManifest) || !settings.skillManifest.length || settings.skillManifest.length > 64
+        || hash(settings.skillManifest) !== settings.skillsHash)) throw new Error('Invalid captured skill manifest');
+      if (settings.toolManifest !== undefined || settings.toolsHash !== undefined) {
+        if (!Array.isArray(settings.toolManifest) || settings.toolManifest.length > 64 || hash(settings.toolManifest) !== settings.toolsHash) throw new Error('Invalid captured tool manifest');
+      }
       if (settings.integrationMethod !== undefined && !['merge', 'squash'].includes(settings.integrationMethod)) throw new Error('Invalid captured integration method');
       if (settings.executionProfile) { record(settings.executionProfile, ['kind', 'version']);
         if (settings.executionProfile.kind !== 'pipeliner-desktop' || settings.executionProfile.version !== 1) throw new Error('Invalid Desktop execution profile'); }
       if (!settings.pipeline.steps.some(step => step.kind === 'pm-qa') && !settings.executionProfile) throw new Error('Ungated Development needs explicit Desktop profile migration');
       validatePipeline(settings.pipeline, true); candidate(settings.source);
+      for (const step of settings.pipeline.steps.filter(step => step.kind === 'extension')) {
+        const extension = step.extension;
+        if (!extension || !(extension.kind === 'skill' ? settings.skillManifest?.some(value => value.id === extension.pin)
+          : settings.toolManifest?.some(value => value.id === extension.pin && value.kind === extension.kind))) throw new Error('Captured Development extension pin unavailable');
+      }
       record(settings.developer, ['id', 'connection', 'model']);
       if (settings.developer.id !== run.dev || !['codex', 'ollama'].includes(settings.developer.connection) || !text(settings.developer.model, 160)) throw new Error('Invalid captured Development model');
       if (settings.fallbacks !== undefined) {
@@ -155,17 +220,24 @@ export function openDevelopmentStore(directory, { clock = Date.now } = {}) {
         const state = { runId: run.id, epoch: run.epoch, step: settings.pipeline.entry, state: 'ready', candidate: settings.source, visits: {}, retries: {}, visit: 0,
           turns: 0, stepTurns: 0, budgets: {}, attempts: {}, remediationCycles: 0, developer: run.dev, takeovers: [], budgetClock: 0,
           usage: { input: 0, output: 0, unavailable: false }, message: null };
-        db.prepare('INSERT INTO development_runs VALUES(?,?,?,?,?)').run(run.id, canonicalJSON(captured), hash(captured), canonicalJSON(state), hash(state));
+        const row = { id: run.id, repository: run.repository, captured_hash: hash(captured), state_hash: hash(state) };
+        db.prepare('INSERT INTO development_runs VALUES(?,?,?,?,?,?)').run(run.id, codec.encode(runIdentity(row, 'captured'), captured, runMetadata(row, 'captured')), row.captured_hash, codec.encode(runIdentity(row, 'state'), state, runMetadata(row, 'state')), row.state_hash, run.repository);
         return immutable(state);
       });
     },
     status: runId => immutable(read(runId).state),
     captured: runId => immutable(read(runId).captured),
+    recovery() {
+      requireOpen(); const rows = db.prepare('SELECT id FROM development_runs ORDER BY id LIMIT 10001').all();
+      if (rows.length > 10000) throw new Error('Development recovery inventory needs bounded archival');
+      return rows.map(row => {
+        const { captured, state } = read(row.id), uncertainEffects = requests(row.id).filter(value => ['dispatched', 'uncertain'].includes(value.state)).length;
+        return { runId: row.id, repository: captured.run.repository, state: state.state, uncertainEffects };
+      }).filter(row => row.state !== 'complete' || row.uncertainEffects > 0);
+    },
     evidence(binding) { bound(binding); return requests(binding.runId); },
     outputs(runId) {
-      read(runId); return db.prepare('SELECT * FROM development_outputs WHERE run=? ORDER BY visit').all(runId).map(row => {
-        const data = JSON.parse(row.document); if (hash(data) !== row.hash) throw new Error('Development output integrity failed'); return immutable({ step: row.step, visit: row.visit, candidate: JSON.parse(row.candidate), output: data });
-      });
+      read(runId); return db.prepare('SELECT * FROM development_outputs WHERE run=? ORDER BY visit').all(runId).map(row => output(row));
     },
     begin(binding) {
       return transact(db, () => {
@@ -174,7 +246,7 @@ export function openDevelopmentStore(directory, { clock = Date.now } = {}) {
         const step = captured.pipeline.steps.find(step => step.id === state.step);
         if (!step) throw new Error('Development reached an unsupported boundary');
         if (['pm-qa', 'pr-integration'].includes(step.kind)) { state.state = 'candidate'; write(state); return immutable(state); }
-        if (!['agent', 'check'].includes(step.kind)) throw new Error('Captured Development step capability unavailable');
+        if (!['agent', 'check', 'extension'].includes(step.kind)) throw new Error('Captured Development step capability unavailable');
         const visits = Object.hasOwn(state.visits, step.id) ? state.visits[step.id] : 0;
         if (visits >= step.visitLimit) throw new Error('Captured Development visit limit exhausted');
         const budget = stepBudget(captured, state);
@@ -213,15 +285,17 @@ export function openDevelopmentStore(directory, { clock = Date.now } = {}) {
       return transact(db, () => { const { state } = bound(binding); for (const key of ['input', 'output']) { if (value[key] === null) state.usage.unavailable = true; else { if (!Number.isSafeInteger(state.usage[key] + value[key])) throw new Error('Provider usage bounds exhausted'); state.usage[key] += value[key]; } } write(state); return immutable(state.usage); });
     },
     prepare(binding, requestId, kind, payload) {
-      if (!id(requestId) || !['provider', 'source', 'implementation', 'command', 'tests', 'review', 'publication'].includes(kind)) throw new Error('Invalid Development request kind');
+      if (!id(requestId) || !['provider', 'source', 'implementation', 'command', 'tests', 'review', 'publication', 'extension'].includes(kind)) throw new Error('Invalid Development request kind');
       canonicalJSON(payload);
       return transact(db, () => {
         const { state } = executing(binding), data = { id: requestId, runId: binding.runId, epoch: binding.epoch, step: state.step, visit: state.visit, kind, candidate: state.candidate, payload };
         const previous = db.prepare('SELECT * FROM development_requests WHERE run=? AND id=?').get(binding.runId, requestId);
         if (previous) { if (previous.hash !== hash(data)) throw new Error('Development request binding conflict'); return request(previous); }
         // Reserve the bounded reply before dispatch; a full log cannot strand a new effect.
-        quota(binding.runId, data, ['implementation', 'command', 'tests'].includes(kind) ? 131072 : 524288);
-        db.prepare("INSERT INTO development_requests VALUES(?,?,?,?,'prepared',NULL,NULL)").run(binding.runId, requestId, canonicalJSON(data), hash(data));
+        const row = { run: binding.runId, id: requestId, hash: hash(data), state: 'prepared', result_hash: null };
+        const sealed = codec.encode(requestIdentity(row, 'document'), data, requestMetadata(row)), control = sealControl(row);
+        quota(binding.runId, sealed.length + control.length, (['implementation', 'command', 'tests'].includes(kind) ? 131072 : 524288) + 512);
+        db.prepare("INSERT INTO development_requests VALUES(?,?,?,?,'prepared',NULL,NULL,?)").run(binding.runId, requestId, sealed, row.hash, control);
         return request(db.prepare('SELECT * FROM development_requests WHERE run=? AND id=?').get(binding.runId, requestId));
       });
     },
@@ -231,7 +305,8 @@ export function openDevelopmentStore(directory, { clock = Date.now } = {}) {
         if (value.epoch !== binding.epoch || value.step !== state.step || value.visit !== state.visit) throw new Error('Stale Development request epoch or step');
         if (value.state !== 'prepared') return false;
         if (requests(binding.runId).some(other => other.id !== requestId && ['dispatched', 'uncertain'].includes(other.state))) throw new Error('Pending Development request needs recovery');
-        return db.prepare("UPDATE development_requests SET state='dispatched' WHERE run=? AND id=? AND state='prepared'").run(binding.runId, requestId).changes === 1;
+        const row = db.prepare('SELECT * FROM development_requests WHERE run=? AND id=?').get(binding.runId, requestId); row.state = 'dispatched';
+        return db.prepare("UPDATE development_requests SET state='dispatched',control=? WHERE run=? AND id=? AND state='prepared'").run(sealControl(row), binding.runId, requestId).changes === 1;
       });
     },
     finish(binding, requestId, value, state = 'verified') {
@@ -241,8 +316,10 @@ export function openDevelopmentStore(directory, { clock = Date.now } = {}) {
         const current = bound(binding), before = request(db.prepare('SELECT * FROM development_requests WHERE run=? AND id=?').get(binding.runId, requestId));
         if (before.epoch !== binding.epoch || !['dispatched', 'uncertain'].includes(before.state)) throw new Error('Development request epoch or state conflict');
         if (canonicalJSON(value.candidate) !== canonicalJSON(current.state.candidate)) throw new Error('Development result candidate changed');
-        quota(binding.runId, value);
-        db.prepare('UPDATE development_requests SET state=?,result=?,result_hash=? WHERE run=? AND id=?').run(state, canonicalJSON(value), hash(value), binding.runId, requestId);
+        const row = db.prepare('SELECT * FROM development_requests WHERE run=? AND id=?').get(binding.runId, requestId); row.state = state; row.result_hash = hash(value);
+        const sealed = codec.encode(requestIdentity(row, 'result'), value, requestControl(row)), control = sealControl(row);
+        quota(binding.runId, sealed.length + control.length);
+        db.prepare('UPDATE development_requests SET state=?,result=?,result_hash=?,control=? WHERE run=? AND id=?').run(state, sealed, row.result_hash, control, binding.runId, requestId);
         return request(db.prepare('SELECT * FROM development_requests WHERE run=? AND id=?').get(binding.runId, requestId));
       });
     },
@@ -323,8 +400,9 @@ export function openDevelopmentStore(directory, { clock = Date.now } = {}) {
             if (!evidence.some(value => value.kind === 'tests' && value.result.result?.name === check.name && value.result.result.command === check.command && value.result.result.exitCode === 0)) throw new Error('Repository check has no passing test evidence');
           }
         }
-        quota(binding.runId, result);
-        db.prepare('INSERT INTO development_outputs VALUES(?,?,?,?,?,?)').run(binding.runId, state.visit, state.step, canonicalJSON(state.candidate), canonicalJSON(result), hash(result));
+        const row = { run: binding.runId, visit: state.visit, step: state.step, candidate: canonicalJSON(state.candidate), hash: hash(result) };
+        const sealed = codec.encode(outputIdentity(row), result, outputMetadata(row)); quota(binding.runId, sealed.length);
+        db.prepare('INSERT INTO development_outputs VALUES(?,?,?,?,?,?)').run(binding.runId, state.visit, state.step, row.candidate, sealed, row.hash);
         seal(state);
         const retries = Object.hasOwn(state.retries, state.step) ? state.retries[state.step] : 0;
         const exhausted = result.outcome !== 'success' && (state.remediationCycles ?? 0) >= (captured.run.limits['limits.remediationCycles'] ?? 3);

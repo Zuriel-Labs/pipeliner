@@ -3,10 +3,10 @@ import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { AppServer, CLI, isolatedEnv, isAllowedAuthUrl } from '../codex/qualify.mjs';
-import { catalog, chat, broker } from '../ollama/qualify.mjs';
+import { AppServer, CLI, isolatedEnv, isAllowedAuthUrl } from '../codex/client.mjs';
+import { catalog, chat, broker } from '../ollama/client.mjs';
 
-export const codexVersion = 'codex-cli 0.159.2';
+export const codexVersion = 'codex-cli 0.160.0';
 const exec = promisify(execFile);
 const modelId = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,159}$/.test(value);
 const config = 'cli_auth_credentials_store = "keyring"\nforced_login_method = "chatgpt"\n';

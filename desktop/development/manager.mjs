@@ -14,10 +14,15 @@ import { buildDevelopmentShowcase, readAutonomousBranch, readIntegrationMethod, 
 import { containsSecret } from '../connections/commands.mjs';
 import { developmentShapes, developmentCommand } from './commands.mjs';
 import { developmentIssueHash } from './state.mjs';
+import { installAuthorizedSkills } from '../skills/manager.mjs';
+import { qualifyToolPackage } from '../tools/package.mjs';
+import { validateToolBinding } from '../tools/bindings.mjs';
+import { verifyMCPCatalog } from '../tools/invoke.mjs';
+import { installAuthorizedTools } from '../tools/manager.mjs';
 export { developmentShapes, developmentCommand } from './commands.mjs';
 
 export const developmentPermissions = Object.freeze(['workspace.read', 'workspace.write', 'worker.exec', 'provider.turn', 'github.read', 'github.issue.write', 'github.project.write', 'git.push', 'github.pr.write']);
-const safeError = error => typeof error?.message === 'string' && error.message.length < 240 && /^(Development |Captured Development |Current candidate |Research specification |Hard provider metric |Repository checks |http-\d{3}$|connection-(changed|unavailable)$|capability-unverified$)/.test(error.message)
+const safeError = error => typeof error?.message === 'string' && error.message.length < 240 && /^(Development |Captured Development |Captured skill |Skill |Selected skill |Current candidate |Research specification |Hard provider metric |Repository checks |http-\d{3}$|connection-(changed|unavailable)$|capability-unverified$)/.test(error.message)
   ? error.message : 'Development could not continue safely. Work and recorded results remain preserved.';
 
 export function executionProfile(source, workspace) {
@@ -32,7 +37,7 @@ export function executionProfile(source, workspace) {
 }
 
 // The registered PM frame gets dispatch. Execution agents never receive this manager.
-export function createDevelopmentManager({ store, policy, ledger, connections, supervisor, onChange = () => {}, initialRevision = 1, api = github, openCandidate, hostAuthority = () => true }) {
+export function createDevelopmentManager({ store, policy, ledger, connections, supervisor, skills, tools, connectMCP, toolEpoch, onChange = () => {}, initialRevision = 1, api = github, openCandidate, hostAuthority = () => true }) {
   let selected = store?.selected() ?? null, revision = initialRevision, conversation = randomUUID(), preview = null, closed = false, closing = false, lastSnapshot;
   const tasks = new Map(), controls = new Map(), messages = new Map(), errors = new Map();
   const observations = new Map();
@@ -57,7 +62,10 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     return lastSnapshot = { revision, workspaceId: selected, repositoryLabel: target?.name ?? null, storageAvailable: available,
       configuredDev: view?.values['agents.dev'] ?? null, developers: connections.developers(),
       permissions: view ? { host: view.values['permissions.ceiling'], repository: view.values['permissions.grants'], required: developmentPermissions } : null,
-      skills: starterSkills.map(({ instructions: _instructions, ...skill }) => ({ ...skill, scope: selected, enabled: view?.values['skills.bundledEnabled'].value ?? false })),
+      skills: (skills?.list() ?? starterSkills).map(({ instructions: _instructions, files: _files, ...skill }) => ({ ...skill, scope: selected,
+        source: typeof skill.source === 'string' ? skill.source : skill.source.repository + ' @ ' + skill.source.commit,
+        enabled: Boolean(selected && view && !view.values['skills.disabled'].value.includes(skill.id)
+          && (skill.kind === 'external' ? view.values['skills.extensions'].value.includes(skill.id) : view.values['skills.bundledEnabled'].value)) })),
       busy: tasks.has(selected) || controls.has(selected), run, runDeveloper, stepLabel, development, execution: execution ? { worker: execution.worker, pending: execution.pending, error: execution.error } : null,
       preview, publication, qa: development?.qa ?? null, integrationReady, message: messages.get(selected) ?? null, error: errors.get(selected) ?? null,
       pending: store?.pending('development').filter(effect => effect.binding.repository === selected).map(({ step, state }) => ({ step, state })) ?? [],
@@ -142,7 +150,7 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     let binding = { runId: run.id, epoch: run.epoch };
     const identity = inspectWorkspace(target.path, { repository: target.id, owner: target.slug.split('/')[0], name: target.slug.split('/')[1] });
     if (workspaceData(identity).localKey !== target.localKey) throw new Error('Development local workspace changed.');
-    const engine = createDevelopmentEngine({ ledger, policy, supervisor, connections, onChange: publish, hostAuthority });
+    const engine = createDevelopmentEngine({ ledger, policy, supervisor, connections, skills, tools, connectMCP, toolEpoch, onChange: publish, hostAuthority });
     let state;
     for (;;) {
       await supervisor.start(identity, binding, { candidate: snapshot.candidate, program: developmentWorkerProgram, allowedPath: 'development-result' });
@@ -193,16 +201,45 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     const scheduleAuthority = () => { if (scheduled && (view.hash !== scheduled.hash || scheduled.automatic && (!view.values['scheduling.enabled'].value || view.values['intake.trigger'].value !== 'schedule'))) throw new Error('Development scheduled start authority changed.'); };
     scheduleAuthority();
     const fallbacks = grant.takeover ? view.values['agents.fallbacks'].value.map(id => connections.developers().find(dev => dev.id === id && grant.fallbacks.includes(id))) : [];
-    if (!dev || developmentPermissions.some(permission => !grant.capabilities.includes(permission)) || !grant.connections.includes('github') || !grant.connections.includes(dev.connection) || !grant.bundledSkills) throw new Error('Development needs a qualified assigned Dev and both host and repository permissions.');
+    if (!dev || developmentPermissions.some(permission => !grant.capabilities.includes(permission)) || !grant.connections.includes('github') || !grant.connections.includes(dev.connection) || !skills && !grant.bundledSkills) throw new Error('Development needs a qualified assigned Dev and both host and repository permissions.');
+    if (skills) installAuthorizedSkills(skills, view, grant, () => { signal.throwIfAborted(); if (!hostAuthority() || policy.worker.read(target.id).hash !== view.hash) throw new Error('Skill installation authority changed.'); });
+    if (tools) await installAuthorizedTools(tools, view, grant, () => { signal.throwIfAborted(); if (!hostAuthority() || policy.worker.read(target.id).hash !== view.hash) throw new Error('Development tool installation authority changed.'); });
+    const selectedSkills = skills?.capture(view), skillsRevision = skills?.revision();
+    if (selectedSkills) skills.prompt(selectedSkills.manifest, selectedSkills.hash, grant);
+    if (!tools && view.values['tools.extensions']?.value.length) throw new Error('Development selected tool storage is unavailable.');
+    const selectedTools = tools?.capture(view, { epoch: toolEpoch }), toolsRevision = tools?.revision();
     const identity = inspectWorkspace(target.path, { repository: target.id, owner: target.slug.split('/')[0], name: target.slug.split('/')[1] });
     if (workspaceData(identity).localKey !== target.localKey) throw new Error('Development local workspace changed.');
     const snapshot = snapshotWorkspace(identity), profile = executionProfile(snapshot.files, target), held = await acquire(target, signal); let issue, integrationMethod;
-    const unchangedPolicy = () => { signal.throwIfAborted(); if (!hostAuthority()) throw new Error('Development host execution is unavailable.'); scheduleAuthority(); if (policy.worker.read(target.id).hash !== view.hash) throw new Error('Development configuration changed during preflight.'); };
+    const unchangedPolicy = () => { signal.throwIfAborted(); if (!hostAuthority()) throw new Error('Development host execution is unavailable.'); scheduleAuthority(); if (policy.worker.read(target.id).hash !== view.hash || skills && skills.revision() !== skillsRevision || tools && tools.revision() !== toolsRevision) throw new Error('Development configuration changed during preflight.');
+      if (selectedTools) tools.assertCaptured(selectedTools.manifest, selectedTools.hash, grant, { epoch: toolEpoch }); };
     try {
       const pipeline = view.values['pipelines.development'].value, ungated = !pipeline.steps.some(step => step.kind === 'pm-qa');
-      if (profile.release.strategy !== 'none' || profile.release.cycle || pipeline.steps.some(step => !['agent', 'check', 'pm-qa', 'pr-integration'].includes(step.kind)
+      if (profile.release.strategy !== 'none' || profile.release.cycle || pipeline.steps.some(step => !['agent', 'check', 'extension', 'pm-qa', 'pr-integration'].includes(step.kind)
         || step.kind === 'pr-integration' && step.routes.success !== 'complete')) throw new Error('Development configured delivery or post-integration steps need a qualified path before execution.');
       if (pipeline.steps.some(step => step.permissions.some(permission => !grant.capabilities.includes(permission)))) throw new Error('Development captured step permissions are unavailable before execution.');
+      try {
+        const capturedTools = selectedTools ? tools.assertCaptured(selectedTools.manifest, selectedTools.hash, grant, { epoch: toolEpoch }) : [];
+        for (const step of pipeline.steps.filter(step => step.kind === 'extension')) {
+          unchangedPolicy(); const extension = step.extension;
+          if (!extension) throw new Error('Unbound custom step.');
+          if (extension.kind === 'skill') {
+            const manifest = selectedSkills?.manifest.filter(value => value.id === extension.pin);
+            if (!manifest?.length || manifest.length !== 1) throw new Error('Missing custom skill.');
+            // The full captured skill manifest was already verified against current permissions above.
+            continue;
+          }
+          const pack = capturedTools.find(value => value.id === extension.pin && value.kind === extension.kind);
+          if (!pack) throw new Error('Missing custom tool.');
+          validateToolBinding(extension, pack); const { id: _id, ...document } = pack; await qualifyToolPackage(document, { signal }); unchangedPolicy();
+          if (pack.kind === 'mcp') {
+            if (!connectMCP) throw new Error('Missing MCP connection.');
+            let client;
+            try { client = await connectMCP(pack, { signal, authorize: unchangedPolicy }); await verifyMCPCatalog(pack, client, { signal, authorize: unchangedPolicy }); }
+            finally { await client?.close(); }
+          }
+        }
+      } catch { throw new Error('Development custom step is unavailable or unqualified. Review its selected pin, input data, permissions and connection in Skills and Tools.'); }
       if (view.values['limits.tokens'].value !== null || view.values['limits.costUsd'].value !== null) throw new Error('Development hard provider metric is unavailable before execution.');
       if (ungated && !['pm-autonomous', 'scheduled-autonomous', 'custom'].includes(view.values['autonomy.scenario'].value)) throw new Error('Development ungated execution needs explicit PM selection of the Desktop workflow.');
       if (ungated && !dev.noPrompts) throw new Error('Development provider prompt-free execution is unqualified.');
@@ -241,7 +278,9 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     } finally { release(held); }
     unchangedPolicy();
     const reservation = await policy.runtime.reserve(identity, { commandId: randomUUID(), issue: number, pipeline: 'development', policyHash: view.hash }), run = reservation.run;
-    ledger.create(run, { pipeline: view.values['pipelines.development'].value, source: snapshot.candidate, developer: { id: dev.id, connection: dev.connection, model: dev.model }, skillsHash: starterHash, issueHash: developmentIssueHash({ number: issue.number, title: issue.title, body: issue.body }),
+    ledger.create(run, { pipeline: view.values['pipelines.development'].value, source: snapshot.candidate, developer: { id: dev.id, connection: dev.connection, model: dev.model }, skillsHash: selectedSkills?.hash ?? starterHash,
+      ...(selectedSkills ? { skillManifest: selectedSkills.manifest } : {}), issueHash: developmentIssueHash({ number: issue.number, title: issue.title, body: issue.body }),
+      ...(selectedTools ? { toolManifest: selectedTools.manifest, toolsHash: selectedTools.hash } : {}),
       executionProfile: { kind: 'pipeliner-desktop', version: 1 }, integrationMethod, fallbacks: fallbacks.map(({ id, connection, model }) => ({ id, connection, model })),
       checks: profile.quality.commands.map((command, index) => ({ name: 'Repository check ' + (index + 1), command })), logBytes: Math.min(50, view.values['privacy.runLogMiB'].value) * 1024 * 1024 });
     scheduled?.reserved(run);
@@ -323,8 +362,8 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
           if (developmentIssueHash({ number: issue.number, title: issue.title, body: issue.body }) !== captured.issueHash) throw new Error('Development captured Issue changed before resume.');
           await execute(target, next, snapshot, executionProfile(snapshot.files, target), issue, signal);
         });
-      } else { supervisor.control(binding, operation); await supervisor.settle(target.id); ledger.suspend(binding); messages.set(target.id, 'Development ' + operation + ' verified. Work and the repository claim remain preserved.'); }
-    })().catch(error => { errors.set(target.id, safeError(error)); messages.set(target.id, safeError(error)); }).finally(() => { controls.delete(target.id); publish(); });
+      } else { supervisor.control(binding, operation); await supervisor.settle(target.id); ledger.suspend(binding); messages.set(target.id, 'Development ' + operation + ' verified. Work and the repository claim remain preserved.'); return true; }
+    })().catch(error => { errors.set(target.id, safeError(error)); messages.set(target.id, safeError(error)); return false; }).finally(() => { controls.delete(target.id); publish(); });
     controls.set(target.id, work); publish(); return { accepted: true, snapshot: status() };
   }
   async function inspectIntegration(action) {
@@ -492,6 +531,23 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     return control(target, payload.operation);
   }
   return Object.freeze({ status, dispatch, observe, inspectIntegration, inspectContinuity,
+    async permissionsChanged(repositories) {
+      if (closed || closing || !policy || !store || !Array.isArray(repositories) || new Set(repositories).size !== repositories.length) throw Error('Development permission verification unavailable.');
+      const targets = repositories.map(workspace); let failed = false;
+      for (const target of targets) {
+        try {
+          if (controls.has(target.id)) await controls.get(target.id);
+          const run = policy.runtime.status(target.id);
+          if (!run) { const task = tasks.get(target.id); if (task) { task.controller.abort(); await task.done; } continue; }
+          if (['paused', 'stopped'].includes(run.control)) continue;
+          const captured = policy.worker.read(target.id, run.policyRevision), grant = policy.worker.authority(target.id, run.policyRevision);
+          const rights = captured.values['permissions.grants'].configuredValue.filter(capability => captured.values['permissions.ceiling'].configuredValue.includes(capability) && captured.bindings.capabilities.includes(capability));
+          if (rights.every(capability => grant.capabilities.includes(capability)) && captured.values['permissions.resources'].configuredValue.every(ref => grant.resources.includes(ref))) continue;
+          control(target, 'pause'); if (await controls.get(target.id) !== true || policy.runtime.status(target.id)?.control !== 'paused') throw Error('Development permission termination verification pending.');
+        } catch { failed = true; } // Attempt every affected repository; one uncertain pause cannot leave later revoked work running.
+      }
+      if (failed) throw Error('Development permission termination verification pending.');
+    },
     availability(repository) {
       const target = workspace(repository), view = policy.worker.read(target.id), grant = policy.worker.authority(target.id, view.revision), dev = connections.developers().find(value => value.id === grant.dev);
       return { run: policy.runtime.status(target.id), busy: tasks.has(target.id) || controls.has(target.id), qualified: Boolean(supervisor && dev && grant.bundledSkills && grant.connections.includes('github') && grant.connections.includes(dev.connection)

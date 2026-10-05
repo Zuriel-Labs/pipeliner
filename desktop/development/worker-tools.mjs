@@ -1,4 +1,5 @@
-import { record } from '../core/settings.mjs';
+import { record, canonicalJSON } from '../core/settings.mjs';
+import { checkedJSON } from '../tools/schema.mjs';
 import { sourceLimits, sourcePath, sourceSecretPattern, checkedFiles } from './source.mjs';
 
 export const developmentWorkerProgram = 'exec sleep 604800';
@@ -13,7 +14,7 @@ async function workerTool() {
   if (request.runId !== process.env.PIPELINER_RUN_ID || request.epoch !== Number(process.env.PIPELINER_EPOCH) || !Number.isSafeInteger(request.epoch)) throw new Error('Tool epoch binding');
   const shapes = { seed: ['files'], list: [], read: ['path'], write: ['path', 'content', 'mode', 'beforeHash'], run: ['command', 'timeoutMs'], export: [] };
   if (!Object.hasOwn(shapes, request.operation)) throw new Error('Tool unavailable');
-  record(request, ['operation', 'runId', 'epoch', ...shapes[request.operation]]);
+  record(request, ['operation', 'runId', 'epoch', ...shapes[request.operation]], request.operation === 'run' ? ['input'] : []);
   const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
   const environment = { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: '/tmp', LANG: 'C', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0' };
   function target(relative, writing = false, create = false) {
@@ -92,6 +93,14 @@ async function workerTool() {
   else {
     if (typeof request.command !== 'string' || !request.command.trim() || request.command.length > 4096 || request.command.includes('\0')
       || !Number.isSafeInteger(request.timeoutMs) || request.timeoutMs < 100 || request.timeoutMs > 300000) throw new Error('Tool command bounds');
+    let inputDirectory;
+    try {
+    if (Object.hasOwn(request, 'input')) {
+      checkedJSON(request.input, 'data'); if (sourceSecretPattern.test(canonicalJSON(request.input))) throw new Error('Tool sensitive command input');
+      inputDirectory = fs.mkdtempSync('/tmp/pipeliner-step-'); fs.chmodSync(inputDirectory, 0o700);
+      environment.PIPELINER_STEP_INPUT_FILE = path.join(inputDirectory, 'input.json');
+      fs.writeFileSync(environment.PIPELINER_STEP_INPUT_FILE, canonicalJSON(request.input), { flag: 'wx', mode: 0o600 });
+    }
     result = await new Promise((resolve, reject) => {
       const child = spawn('/bin/sh', ['-c', request.command], { cwd: root, env: environment, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
       let output = '', length = 0, truncated = false, timedOut = false, force;
@@ -104,9 +113,10 @@ async function workerTool() {
       child.once('error', () => { clearTimeout(timer); clearTimeout(hard); clearTimeout(force); reject(new Error('Tool command unavailable')); });
       child.once('close', code => { kill('SIGKILL'); clearTimeout(timer); clearTimeout(hard); clearTimeout(force); resolve({ exitCode: truncated ? 125 : timedOut ? 124 : code ?? 1, output, truncated, timedOut }); });
     });
+    } finally { if (inputDirectory) fs.rmSync(inputDirectory, { recursive: true }); }
   }
   process.stdout.write(JSON.stringify({ ok: true, result }));
 }
 
 // Reuse the exact host validators inside the guest; no second path/schema implementation.
-export const workerToolProgram = `const sourceLimits=${JSON.stringify(sourceLimits)}; const record=${record.toString()}; const sourcePath=${sourcePath.toString()}; const sourceSecretPattern=${sourceSecretPattern.toString()}; const checkedFiles=${checkedFiles.toString()}; (${workerTool.toString()})().catch(()=>process.stdout.write(JSON.stringify({ok:false,error:'tool-denied-or-incomplete'})));`;
+export const workerToolProgram = `const sourceLimits=${JSON.stringify(sourceLimits)}; const record=${record.toString()}; const canonicalJSON=${canonicalJSON.toString()}; const checkedJSON=${checkedJSON.toString()}; const sourcePath=${sourcePath.toString()}; const sourceSecretPattern=${sourceSecretPattern.toString()}; const checkedFiles=${checkedFiles.toString()}; (${workerTool.toString()})().catch(()=>process.stdout.write(JSON.stringify({ok:false,error:'tool-denied-or-incomplete'})));`;

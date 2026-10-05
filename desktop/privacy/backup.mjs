@@ -1,7 +1,8 @@
-import { constants, lstatSync, fstatSync, openSync, closeSync, readSync, writeSync, fsyncSync, unlinkSync, existsSync, realpathSync } from 'node:fs';
+import { constants, lstatSync, fstatSync, openSync, closeSync, readSync, writeSync, fsyncSync, unlinkSync, existsSync, realpathSync, readdirSync } from 'node:fs';
 import { dirname, basename, join, resolve } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { canonicalJSON, record } from '../core/settings.mjs';
+import { DatabaseSync } from 'node:sqlite';
 
 const maximum = 512 * 1024 ** 2, chunkSize = 64 * 1024, headerSize = 48, magic = Buffer.from('PPLBKP01');
 const same = (a, b) => a.dev === b.dev && a.ino === b.ino;
@@ -42,7 +43,8 @@ export function createProtectedBackup(source, { vault, store, version }) {
   let input, output, path, owned, written = 0, parent; const outputHash = createHash('sha256');
   try {
     protection(vault); expected(store, version); parent = location(source);
-    if (basename(source) !== store + '.sqlite' || ['-wal', '-journal'].some(suffix => existsSync(source + suffix) && lstatSync(source + suffix).size > 0)) throw Error();
+    const legacyName = new RegExp(`^${store}-v${version}-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\\.sqlite$`);
+    if (basename(source) !== store + '.sqlite' && !legacyName.test(basename(source)) || ['-wal', '-journal'].some(suffix => existsSync(source + suffix) && lstatSync(source + suffix).size > 0)) throw Error();
     input = openSync(source, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); const before = fstatSync(input);
     if (!regular(before) || before.size < 100 || before.size > maximum) throw Error();
     const originalHeader = read(input, 100, 0);
@@ -80,6 +82,40 @@ export function createProtectedBackup(source, { vault, store, version }) {
     } catch (error) { preserved = error.code !== 'ENOENT'; }
     throw Error(preserved ? 'protected-backup-failed; altered archive preserved for recovery' : 'protected-backup-failed; original store preserved');
   } finally { if (output !== undefined) closeSync(output); if (input !== undefined) closeSync(input); }
+}
+
+// Only historical compatible snapshot names in this exact private store directory are eligible.
+// A verified encrypted original is retained before its unchanged plaintext snapshot is removed.
+export function protectLegacyBackups(directory, store, { vault, currentVersion }) {
+  let entries;
+  try {
+    expected(store, currentVersion); protection(vault); location(join(directory, store + '.sqlite'));
+    entries = readdirSync(directory).filter(name => new RegExp(`^${store}-v[1-9][0-9]*-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\\.sqlite$`).test(name));
+    if (entries.length > 128) throw Error();
+  } catch { throw Error('protected-backup-recovery-required'); }
+  const results = [];
+  for (const name of entries) {
+    const source = join(directory, name), version = Number(name.split('-v')[1].split('-')[0]); let db, fd, before, parent;
+    try {
+      if (version >= currentVersion) throw Error();
+      parent = location(source); fd = openSync(source, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); before = fstatSync(fd);
+      if (!regular(before) || !same(before, lstatSync(source)) || before.size < 100 || before.size > maximum
+        || ['-wal', '-journal', '-shm'].some(suffix => existsSync(source + suffix))) throw Error();
+      db = new DatabaseSync(source, { allowExtension: false, timeout: 1000 });
+      db.exec('PRAGMA trusted_schema=OFF; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; BEGIN EXCLUSIVE;');
+      if (db.prepare('PRAGMA user_version').get().user_version !== version || db.prepare('PRAGMA quick_check').get().quick_check !== 'ok') throw Error();
+      const backup = createProtectedBackup(source, { vault, store, version });
+      db.exec('COMMIT'); db.close(); db = undefined;
+      stable(source, fd, before, parent);
+      if (hashFile(fd, before.size) !== backup.sourceHash) throw Error();
+      unlinkSync(source); results.push(backup);
+      const dir = openSync(directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      try { if (!same(parent.info, fstatSync(dir))) throw Error(); fsyncSync(dir); } finally { closeSync(dir); }
+      if (existsSync(source)) throw Error();
+    } catch { throw Error('protected-backup-recovery-required; compatible snapshots preserved'); }
+    finally { if (db) db.close(); if (fd !== undefined) closeSync(fd); }
+  }
+  return results;
 }
 
 export function verifyProtectedBackup(path, { vault, store, version }) {

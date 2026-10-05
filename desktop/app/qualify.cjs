@@ -93,6 +93,10 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
   try {
     await wait(() => js("Boolean(document.getElementById('connection-list').children.length)"));
     await check('actual-macos-protected-key', async () => { assert(vault); assert.equal(await safeStorage.isAsyncEncryptionAvailable(), true); assert.equal(existsSync(path.join(directory, 'connections.sqlite')), true); });
+    if (privacyScope) await check('actual-macos-protected-legacy-workspace-development-migration', async () => {
+      const { qualifyProtectedMigration } = await moduleAt('../privacy/qualify-migration.mjs');
+      const result = qualifyProtectedMigration(directory, vault); assert.deepEqual(result.schemas, { workspaces: 5, development: 2 }); assert.equal(result.replayedEffects, 0);
+    });
     await check('renderer-restrictions', async () => { assert.equal(await js("typeof require + ':' + typeof process"), 'undefined:undefined'); assert.equal(await js("fetch('https://example.com').then(()=>false,()=>true)"), true); assert.equal(await js("document.querySelectorAll('iframe,webview').length"), 0); });
     await check('registered-frame-and-stale-context', async () => {
       const frame = window.webContents.mainFrame, sender = window.webContents, payload = { operation: 'connect', connection: 'github', contextRevision: manager.status().revision };
@@ -191,7 +195,7 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
       assert.equal(JSON.stringify(workspaces.status()).includes('ghu_synthetic_fixture'), false);
     });
     await check('actual-workspace-store-reopen-without-replay', async () => {
-      const { openWorkspaceStore } = await moduleAt('../repositories/store.mjs'), reopened = openWorkspaceStore(directory);
+      const { openWorkspaceStore } = await moduleAt('../repositories/store.mjs'), reopened = openWorkspaceStore(directory, { vault });
       try { assert.equal(reopened.workspaces()[0].project.fields.Status.options.find(option => option.name === 'Pending Review').name, 'Pending Review');
         assert.equal(reopened.selected(), workspaces.status().selected); assert.equal(reopened.pending().length, 0); assert.equal(workspaceFixture.writes, 4); }
       finally { reopened.close(); }
@@ -242,7 +246,7 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
       const first = workspaces.status().workspaces[0], before = issues.status(), secondPath = path.join(workspaceFixture.path, 'second'); mkdirSync(secondPath, { mode: 0o700 });
       workspaceFixture.git(['-C', secondPath, 'init', '-b', 'main']); workspaceFixture.git(['-C', secondPath, 'remote', 'add', 'origin', 'https://github.com/fixture/second.git']);
       const { inspectLocal } = await moduleAt('../repositories/local.mjs'); const inspected = await inspectLocal(secondPath, { repository: 'repo_qualification_second', owner: 'fixture', name: 'second' });
-      const { openWorkspaceStore } = await moduleAt('../repositories/store.mjs'), reopened = openWorkspaceStore(directory);
+      const { openWorkspaceStore } = await moduleAt('../repositories/store.mjs'), reopened = openWorkspaceStore(directory, { vault });
       try { reopened.register({ ...first, id: 'repo_qualification_second', repositoryId: 'R2', numericId: 4, slug: 'fixture/second', name: 'fixture/second', path: secondPath, localKey: inspected.identity.localKey, commonPath: inspected.identity.commonPath }); }
       finally { reopened.close(); }
       workspaces.dispatch({ operation: 'select', workspace: 'repo_qualification_second' }); await wait(() => js("document.getElementById('chat-title').textContent==='fixture/second'"));
@@ -312,7 +316,7 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
       await check('pipeline-durable-drafts-inheritance-stale-base-and-repository-switch', async () => {
         await pipelineChat('Edit global Release pipeline'); await pipelineChat('Rename step 1 to Build on the compatible host'); await pipelineChat('Review this pipeline'); await pipelineChat('Apply this pipeline');
         await pipelineChat('Edit repository Release pipeline'); assert.equal(pipelines.status().current.source, 'global'); await pipelineChat('Rename step 1 to Repository build');
-        const { openWorkspaceStore } = await moduleAt('../repositories/store.mjs'), reopened = openWorkspaceStore(directory);
+        const { openWorkspaceStore } = await moduleAt('../repositories/store.mjs'), reopened = openWorkspaceStore(directory, { vault });
         try { assert.equal(reopened.pipelineDraft(pipelines.status().workspaceId, 'release').definition.steps[0].label, 'Repository build'); }
         finally { reopened.close(); }
         const { openPolicyStore } = await moduleAt('../core/policy.mjs'); const ledger = openPolicyStore(directory, { catalog: () => policy.worker.read(null).bindings });
@@ -724,7 +728,7 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
       assert.equal(folderCancelled, true);
     });
   } catch { const snapshot = workspaces.status(); workspaceEvidence = { checkpoint: workspaceStage, busy: snapshot.busy, state: snapshot.draft?.state, error: snapshot.draft?.error, folderSelected: Boolean(snapshot.draft?.folder), projectCount: snapshot.draft?.projects?.length ?? 0 }; process.exitCode = 1; }
-  const report = { desktopQualification: privacyScope ? 'protected-local-privacy-and-recovery' : toolsScope ? 'scoped-tools-and-custom-pipelines' : skillsScope ? 'starter-skill-management' : backgroundScope ? 'optional-background-host' : schedulingScope ? 'deterministic-scheduling' : developmentScope ? 'development-controls' : pipelineScope ? 'versioned-pipeline-editing' : 'protected-issue-intake', checks, passed: checks.length === (privacyScope ? 26 : toolsScope ? 26 : skillsScope ? 26 : backgroundScope ? 25 : schedulingScope ? 23 : developmentScope ? 22 + (pipelineScope ? 6 : 0) : pipelineScope ? 24 : issueScope ? 18 : 21) && checks.every(c => c.passed), milliseconds: Math.round(performance.now() - started), windowReadyFromMainEntryMs: windowReadyMs, measurements,
+  const report = { desktopQualification: privacyScope ? 'protected-local-privacy-and-recovery' : toolsScope ? 'scoped-tools-and-custom-pipelines' : skillsScope ? 'starter-skill-management' : backgroundScope ? 'optional-background-host' : schedulingScope ? 'deterministic-scheduling' : developmentScope ? 'development-controls' : pipelineScope ? 'versioned-pipeline-editing' : 'protected-issue-intake', checks, passed: checks.length === (privacyScope ? 27 : toolsScope ? 26 : skillsScope ? 26 : backgroundScope ? 25 : schedulingScope ? 23 : developmentScope ? 22 + (pipelineScope ? 6 : 0) : pipelineScope ? 24 : issueScope ? 18 : 21) && checks.every(c => c.passed), milliseconds: Math.round(performance.now() - started), windowReadyFromMainEntryMs: windowReadyMs, measurements,
     versions: { electron: process.versions.electron, chromium: process.versions.chrome, node: process.versions.node, sqlite: process.versions.sqlite, os: process.platform, architecture: process.arch },
     nativeEvidence, workspaceEvidence, folderFailure, folderCancelled, synthetic: 'Synthetic GitHub/model replies, first folder selection, optional tool catalog and background-service adapters; actual native secure fields, folder-panel cancellation, protected storage, local Git and own window. External tool compatibility and actual SMAppService/bootstrap are qualified separately.',
     notRun: issueScope ? ['Unchanged Codex unauthenticated discovery', 'Unchanged public GitHub App qualification', 'Unchanged invalid Cloud key probe'] : [],

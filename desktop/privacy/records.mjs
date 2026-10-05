@@ -9,8 +9,9 @@ export function createRecordCodec(vault, purpose) {
   } catch { throw Error('protected-record-unavailable'); }
   function binding(identity) {
     record(identity, ['repository', 'table', 'key']);
-    if (typeof identity.table !== 'string' || !/^[a-z][a-z0-9_]{0,63}$/.test(identity.table) || Buffer.byteLength(canonicalJSON(identity)) > 1024) throw Error();
-    return { purpose, repository: identity.repository, id: 'record-' + createHash('sha256').update(canonicalJSON(identity)).digest('hex') };
+    if (identity.repository !== null && (typeof identity.repository !== 'string' || !/^[A-Za-z0-9_-]{1,180}$/.test(identity.repository))
+      || typeof identity.table !== 'string' || !/^[a-z][a-z0-9_]{0,63}$/.test(identity.table) || Buffer.byteLength(canonicalJSON(identity)) > 1024) throw Error();
+    return { purpose, repository: identity.repository === null ? null : createHash('sha256').update(identity.repository).digest('hex'), id: 'record-' + createHash('sha256').update(canonicalJSON(identity)).digest('hex') };
   }
   return Object.freeze({
     encode(identity, value, metadata = {}) {

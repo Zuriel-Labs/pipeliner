@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { openTestVault } from '../connections/test-vault.mjs';
 import assert from 'node:assert/strict';
 import { mkdtempSync, realpathSync, rmSync, existsSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -9,9 +10,9 @@ import { definitions, planFields, verifyFields } from './github.mjs';
 
 const completeFields = () => definitions.map((definition, i) => ({ id: 'F' + i, name: definition.role,
   options: definition.choices.map((name, n) => ({ id: 'O' + i + n, name, color: 'BLUE', description: '' })) }));
-function fixture() {
+async function fixture() {
   const base = existsSync(join(homedir(), 'Documents')) ? join(homedir(), 'Documents') : tmpdir();
-  const root = realpathSync(mkdtempSync(join(base, 'pipeliner-36-test-'))), store = openWorkspaceStore(root);
+  const root = realpathSync(mkdtempSync(join(base, 'pipeliner-36-test-'))), vault = await openTestVault(root), store = openWorkspaceStore(root, { vault });
   const owner = { id: 'ORG1', numericId: 2, login: 'fixture', type: 'Organization' };
   const repo = { id: 'R1', numericId: 3, owner, name: 'repo', slug: 'fixture/repo', displayName: 'fixture/repo', private: true, permissions: { pull: true } };
   let project = { id: 'P1', number: 1, title: 'Fixture', owner: { id: owner.id, login: owner.login }, public: false,
@@ -39,7 +40,7 @@ function fixture() {
   return { root, store, manager, repo, api, connections, get project() { return project; }, get writes() { return writes; },
     get clones() { return clones; }, connect: value => { connected = value; },
     drift: () => { project.title = 'Changed'; }, missing: () => { project.fields = project.fields.filter(field => field.name !== 'Effort'); },
-    lose: () => { lost = true; }, disconnect: () => { epoch++; }, async close() { await manager.close(); store.close(); rmSync(root, { recursive: true, force: true }); } };
+    lose: () => { lost = true; }, disconnect: () => { epoch++; }, async close() { await manager.close(); store.close(); vault.close(); rmSync(root, { recursive: true, force: true }); } };
 }
 async function preview(fixture) {
   const manager = fixture.manager;
@@ -52,7 +53,7 @@ async function preview(fixture) {
   return manager.status().draft.preview.hash;
 }
 test('exact PM setup imports once, preserves work and rejects remote drift or disconnected context', async () => {
-  const f = fixture();
+  const f = await fixture();
   try {
     const hash = await preview(f);
     assert.throws(() => f.manager.dispatch({ operation: 'apply', hash: 'wrong' }), /setup-changed/);
@@ -70,7 +71,7 @@ test('exact PM setup imports once, preserves work and rejects remote drift or di
   } finally { await f.close(); }
 });
 test('lost Project write blocks replay and remains uncertain after restart', async () => {
-  const f = fixture();
+  const f = await fixture();
   try {
     f.missing(); const hash = await preview(f); f.lose();
     f.manager.dispatch({ operation: 'apply', hash }); await f.manager.idle();
@@ -83,7 +84,7 @@ test('lost Project write blocks replay and remains uncertain after restart', asy
   } finally { await f.close(); }
 });
 test('explicit creation preserves its result through an installation block and continues without re-creation', async () => {
-  const f = fixture();
+  const f = await fixture();
   try {
     f.connect(false);
     f.manager.dispatch({ operation: 'begin', mode: 'create', values: { owner: 'fixture', name: 'repo', purpose: 'Synthetic creation test' } });
@@ -103,7 +104,7 @@ test('explicit creation preserves its result through an installation block and c
 });
 
 test('changing a source clears the old Project catalog and field mapping before any effect', async () => {
-  const f = fixture();
+  const f = await fixture();
   try {
     await preview(f); f.manager.dispatch({ operation: 'map', role: 'Status', field: 'F0' });
     f.manager.dispatch({ operation: 'choose', field: 'source', value: 'local' });
@@ -116,7 +117,7 @@ test('changing a source clears the old Project catalog and field mapping before 
 });
 
 test('a failure after verified remote creation retains exact recovery and blocks target edits', async () => {
-  const f = fixture();
+  const f = await fixture();
   try {
     f.api.readProject = async () => { throw new Error('http-503'); };
     f.manager.dispatch({ operation: 'begin', mode: 'create', values: { owner: 'fixture', name: 'repo', purpose: 'Synthetic recovery', visibility: 'private' } });
@@ -135,7 +136,7 @@ test('a failure after verified remote creation retains exact recovery and blocks
 });
 
 test('remote identity change during checkout blocks registration without repeating creation or clone', async () => {
-  const f = fixture();
+  const f = await fixture();
   try {
     f.api.readRepository = async () => ({ ...f.repo, id: f.clones ? 'replacement-repository' : f.repo.id });
     f.manager.dispatch({ operation: 'begin', mode: 'create', values: { owner: 'fixture', name: 'repo', purpose: 'Synthetic drift', visibility: 'private' } });

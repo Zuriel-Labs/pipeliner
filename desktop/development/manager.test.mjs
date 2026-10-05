@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { openTestVault } from '../connections/test-vault.mjs';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -52,7 +53,7 @@ test('Development preflight rejects incompatible paths before activation and cap
     git(['init', '-b', 'main']); git(['add', '--', '.']); git(['-c', 'user.name=Synthetic', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'Synthetic source']); git(['remote', 'add', 'origin', 'https://github.com/fixture/repo.git']);
     const identity = inspectWorkspace(checkout, { repository: 'repo-one', owner: 'fixture', name: 'repo' }), snapshot = snapshotWorkspace(identity);
     const workspace = { id: 'repo-one', repositoryId: 'R1', numericId: 1, slug: 'fixture/repo', name: 'Fixture', path: checkout, localKey: workspaceData(identity).localKey, connections: { setup: null }, project: { id: 'P1', number: 1, owner: { login: 'fixture' } } };
-    const store = openWorkspaceStore(root); store.register(workspace); store.select(workspace.id);
+    const vault = await openTestVault(root), store = openWorkspaceStore(root, { vault }); store.register(workspace); store.select(workspace.id);
     const fixture = issueFixture(workspace); fixture.issues[0].ready = true;
     const tools = custom ? openToolStore(root) : null;
     const pack = tools?.install(toolPackage({ name: 'check', purpose: 'Scoped fixture', version: '1', license: 'MIT', dataCategories: failure === 'tool-data' ? ['issue.body'] : ['issue.title'],
@@ -74,7 +75,7 @@ test('Development preflight rejects incompatible paths before activation and cap
       developers: [dev], connections: ['github', 'ollama'].map(id => ({ id, provider: id, repositories: [workspace.id], healthy: true })), extensions: [], ...(tools ? { tools: tools.catalog() } : {}) }),
       inspectors: { repository: async () => ({ repository: workspace.id, issue: 7, state: 'OPEN', status: 'In Progress', active: [{ issue: 7, status: 'In Progress' }], observedAt: Date.now() }), worker: async binding => ({ ...binding, state: 'stopped', observedAt: Date.now() }) } });
     let stopping;
-    const ledger = openDevelopmentStore(root), supervisor = { status: () => null, async prepare() { prepares++; if (!qualified) assert.fail('No worker before qualified preflight.'); },
+    const ledger = openDevelopmentStore(root, { vault }), supervisor = { status: () => null, async prepare() { prepares++; if (!qualified) assert.fail('No worker before qualified preflight.'); },
       async start() { throw new Error('Development synthetic worker deliberately stops after reservation qualification.'); },
       control(binding) { policy.runtime.requestControl(binding, 'pause'); stopping = policy.runtime.verifyControl(binding); }, async settle() { await stopping; }, async shutdown() {} };
     const manager = createDevelopmentManager({ store, policy, ledger, connections, supervisor, tools: failure === 'tool-missing' ? null : tools, api: fixture.api });
@@ -103,7 +104,7 @@ test('Development preflight rejects incompatible paths before activation and cap
       else { assert.equal(policy.runtime.status(workspace.id), null); assert.equal(prepares, 0); assert.deepEqual(fixture.writes, []); }
       assert.equal(providerCalls, ['provider', 'method', 'protected', 'base', 'schedule-qualified', 'tool-qualified', 'tool-revision'].includes(failure) ? 1 : 0); assert.equal(providerClosed, ['method', 'protected', 'base', 'schedule-qualified', 'tool-qualified', 'tool-revision'].includes(failure) ? 1 : 0);
       assert.equal(readFileSync(join(checkout, 'pipeliner.config.json'), 'utf8'), JSON.stringify(profile));
-    } finally { await manager.close(); ledger.close(); policy.close(); tools?.close(); store.close(); rmSync(root, { recursive: true }); }
+    } finally { await manager.close(); ledger.close(); vault.close(); policy.close(); tools?.close(); store.close(); rmSync(root, { recursive: true }); }
   }
 });
 
@@ -119,7 +120,7 @@ for (const mode of ['supervised', 'autonomous', 'takeover']) test(mode === 'take
   const identity = inspectWorkspace(checkout, { repository: 'repo-one', owner: 'fixture', name: 'repo' }), snapshot = snapshotWorkspace(identity);
   const workspace = { id: 'repo-one', repositoryId: 'R1', numericId: 1, slug: 'fixture/repo', name: 'Fixture', path: checkout, localKey: workspaceData(identity).localKey,
     connections: { setup: null }, project: { id: 'P1', number: 1, owner: { login: 'fixture' } } };
-  const store = openWorkspaceStore(root); store.register(workspace); store.select(workspace.id);
+  const vault = await openTestVault(root), store = openWorkspaceStore(root, { vault }); store.register(workspace); store.select(workspace.id);
   const fixture = issueFixture(workspace), issue = fixture.issues[0]; issue.ready = true; issue.status = 'Pending Review'; issue.metadata.Status = issue.status;
   const dev = { id: 'dev-one', connection: 'ollama', model: 'test-model', metrics: [] }, head = 'a'.repeat(40), merged = 'b'.repeat(40), candidate = { sourceCommit: head, gitTree: snapshot.candidate.gitTree };
   const fallback = { ...dev, id: 'dev-two' }, developers = takeover ? [dev, fallback] : [dev];
@@ -143,7 +144,7 @@ for (const mode of ['supervised', 'autonomous', 'takeover']) test(mode === 'take
   const policy = openPolicyStore(root, { catalog: () => ({ repositories: [workspace.id], capabilities: developmentPermissions, maxConcurrency: 1, background: false,
     developers, connections: ['github', 'ollama'].map(id => ({ id, provider: id, repositories: [workspace.id], healthy: true })), extensions: [] }),
     inspectors: { repository: value => manager.observe(value), effect: action => manager.inspectIntegration(action), worker: binding => ({ ...binding, state: 'stopped', observedAt: Date.now() }) } });
-  const ledger = openDevelopmentStore(root); let work;
+  const ledger = openDevelopmentStore(root, { vault }); let work;
   const supervisor = { status: () => ({ worker: 'stopped', pending: null, error: null }), attach() {}, control(binding, operation) {
     assert.equal(operation, 'pause'); policy.runtime.requestControl(binding, 'pause'); work = policy.runtime.verifyControl(binding); return { received: true }; },
     async settle() { await work; }, async cleanupRun() { if (cleanupFails) throw Error('Development owned cleanup failed.'); return { workspaceRemoved: true }; }, async shutdown() {} };
@@ -205,7 +206,7 @@ for (const mode of ['supervised', 'autonomous', 'takeover']) test(mode === 'take
     assert.equal(manager.status().error, null); assert.equal(policy.runtime.status(workspace.id), null); assert.equal(ledger.status(run.id).state, 'complete');
     assert.equal(issue.state, 'CLOSED'); assert.equal(issue.status, 'Done'); assert.equal(branch, false); assert.equal(store.pending('development').length, 0);
     assert.equal(mergeWrites, 1); assert.equal(closeWrites, 1); assert.equal(branchWrites, 1); assert.equal(readFileSync(join(checkout, 'app.mjs'), 'utf8'), 'export const value = 1;\n');
-  } finally { await manager.close(); ledger.close(); policy.close(); store.close(); rmSync(root, { recursive: true }); }
+  } finally { await manager.close(); ledger.close(); vault.close(); policy.close(); store.close(); rmSync(root, { recursive: true }); }
 });
 
 test('Dev and permission previews stay PM-controlled, scoped and stale-frame safe', async () => {
@@ -215,7 +216,7 @@ test('Dev and permission previews stay PM-controlled, scoped and stale-frame saf
   const store = { selected: () => workspace.id, workspaces: () => [workspace], pending: () => [], effects: () => [] };
   const policy = openPolicyStore(root, { catalog: () => ({ repositories: [workspace.id], capabilities: capabilityNames, maxConcurrency: 1, background: false,
     connections: [{ id: 'ollama', provider: 'ollama', repositories: [workspace.id], healthy: true }, { id: 'github', provider: 'github', repositories: [workspace.id], healthy: true }], developers: [dev], extensions: [] }) });
-  const ledger = openDevelopmentStore(root), manager = createDevelopmentManager({ store, policy, ledger, connections, supervisor: null });
+  const vault = await openTestVault(root), ledger = openDevelopmentStore(root, { vault }), manager = createDevelopmentManager({ store, policy, ledger, connections, supervisor: null });
   const frame = { parent: null, url: 'pipeliner://app/index.html' }, contents = { isDestroyed: () => false, mainFrame: frame }, event = { sender: contents, senderFrame: frame };
   const channel = createDevelopmentControlChannel(manager, { contents, url: frame.url, context: () => ({ revision: manager.status().revision }) });
   try {
@@ -235,5 +236,5 @@ test('Dev and permission previews stay PM-controlled, scoped and stale-frame saf
     assert.deepEqual(policy.worker.read(workspace.id).values['permissions.ceiling'].value, defaults['permissions.ceiling']);
     assert.throws(() => channel.dispatch(event, { operation: 'start', number: 1, Ready: true, contextRevision: manager.status().revision }));
     assert.equal(manager.status().run, null); assert.equal(manager.status().skills.every(skill => skill.license === 'MIT'), true);
-  } finally { await manager.close(); ledger.close(); policy.close(); rmSync(root, { recursive: true }); }
+  } finally { await manager.close(); ledger.close(); vault.close(); policy.close(); rmSync(root, { recursive: true }); }
 });

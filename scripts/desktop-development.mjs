@@ -15,6 +15,7 @@ import { createDevelopmentEngine } from '../desktop/development/engine.mjs';
 import { starterHash } from '../desktop/development/starter.mjs';
 import { catalog as providerCatalog, selectedModel, chat } from '../desktop/ollama/qualify.mjs';
 import { openWorkspaceStore } from '../desktop/repositories/store.mjs';
+import { openTestVault } from '../desktop/connections/test-vault.mjs';
 import { publishDevelopmentCandidate } from '../desktop/development/github.mjs';
 import { canonicalJSON } from '../desktop/core/settings.mjs';
 
@@ -30,7 +31,7 @@ const directory = realpathSync(mkdtempSync('/private/tmp/pipeliner-development-'
 const ownership = { issue: budgets ? 48 : 42, run: randomUUID(), directory }, marker = join(directory, 'qualification-owner.json');
 writeFileSync(marker, JSON.stringify(ownership), { flag: 'wx', mode: 0o600 });
 const started = performance.now(), results = [];
-let policy, supervisor, ledger, publicationStore, image, workerVersions, fixtureRepository, fixtureAccount, fixtureIssue, publication, proofHash, continuityProof, failureLine = null, error = null, cleanup = null;
+let policy, supervisor, ledger, publicationStore, vault, image, workerVersions, fixtureRepository, fixtureAccount, fixtureIssue, publication, proofHash, continuityProof, failureLine = null, error = null, cleanup = null;
 const check = (name, extra = {}) => { results.push({ name, passed: true, ...extra }); console.log(JSON.stringify({ progress: name })); };
 const instructions = 'Change only app.mjs so exported value is 2. Keep the existing test unchanged. Research first: inspect source, invoke read path /host-canary once to verify the host denies protected paths, then record research, specification and non-UI design documents with verified source evidence only; do not list denial IDs in success evidence. During implementation run node --test first and retain the actual failing result; read app.mjs to get its exact hash, change value to 2, run node --test again and repair any failure before finishing success. Checks must run node --test on the changed tree. Review both files and actual check results, with a review document and explicit findings. Do not publish or merge. All source is synthetic.';
 // Explicit host administrative test transport only. No token leaves gh or reaches the app/worker/model.
@@ -61,7 +62,7 @@ async function publishSaved(id, suffix) {
   const issue = gh('/repos/' + owned.slug + '/issues/' + proof.issue.number); assert.equal(issue.title, proof.issue.title); assert.equal(issue.body, proof.issue.body);
   assert.deepEqual(gh('/repos/' + owned.slug + '/issues?state=open'), []);
   gh('/repos/' + owned.slug + '/issues/' + proof.issue.number, 'PATCH', { state: 'open' });
-  const store = openWorkspaceStore(join(directory, 'state')), ledger = openDevelopmentStore(join(directory, 'state'));
+  const vault = await openTestVault(join(directory, 'state')), store = openWorkspaceStore(join(directory, 'state'), { vault }), ledger = openDevelopmentStore(join(directory, 'state'), { vault });
   let result;
   try {
     assert.equal(canonicalJSON(ledger.status(proof.run.id)), canonicalJSON(proof.state));
@@ -70,7 +71,7 @@ async function publishSaved(id, suffix) {
       authority: () => assert.equal(ledger.status(proof.run.id).state, 'candidate') });
     console.log(JSON.stringify({ passed: true, issue: 42, operation: 'actual-github-persisted-candidate-publication', ...result, transport: 'Host administrative gh; current App/Project path pending' }));
   } finally {
-    ledger.close(); store.close();
+    ledger.close(); store.close(); vault.close();
     if (result) { gh('/repos/' + owned.slug + '/pulls/' + result.pullRequest.number, 'PATCH', { state: 'closed' }); gh('/repos/' + owned.slug + '/git/refs/heads/' + encodeURIComponent(result.pullRequest.branch), 'DELETE'); }
     gh('/repos/' + owned.slug + '/issues/' + proof.issue.number, 'PATCH', { state: 'closed' });
     if (result) {
@@ -83,6 +84,7 @@ async function publishSaved(id, suffix) {
 }
 try {
   const checkout = join(directory, 'repository'), state = join(directory, 'state'); mkdirSync(checkout, { mode: 0o700 }); mkdirSync(state, { mode: 0o700 });
+  vault = await openTestVault(state);
   const git = args => execFileSync('/usr/bin/git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'commit.gpgSign=false', '-C', checkout, ...args], {
     env: { PATH: '/usr/bin:/bin', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', LC_ALL: 'C' }, encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] });
   git(['init', '-b', 'main']); git(['remote', 'add', 'origin', 'https://github.com/PipelinerFixtures/development.git']);
@@ -160,7 +162,7 @@ try {
   if (agent) {
     await Promise.all([supervisor.refresh('R_development'), tool({ operation: 'list' })]);
     const issue = { number: fixtureIssue?.number ?? 1, title: fixtureIssue?.title ?? 'Correct the synthetic exported value', body: fixtureIssue?.body ?? instructions };
-    ledger = openDevelopmentStore(state);
+    ledger = openDevelopmentStore(state, { vault });
     ledger.create(reservation.run, { pipeline: policy.worker.read('R_development').values['pipelines.development'].value, source: snapshot.candidate,
       developer: { id: 'fixture-dev', connection: 'ollama', model: metadata.name }, skillsHash: starterHash, issueHash: developmentIssueHash(issue), checks: [{ name: 'Fixture tests', command: 'node --test' }], logBytes: 50 * 1024 * 1024 });
     const connections = { acquireProvider: async (id, model, signal) => {
@@ -189,7 +191,7 @@ try {
       writeFileSync('/tmp/pipeliner-42-github-' + ownership.run + '.proof.json', proof, { flag: 'wx', mode: 0o600 });
       proofHash = createHash('sha256').update(proof).digest('hex');
       const slug = fixtureRepository.full_name, lease = fixtureLease(fixtureRepository, fixtureAccount);
-      publicationStore = openWorkspaceStore(state);
+      publicationStore = openWorkspaceStore(state, { vault });
       publication = await publishDevelopmentCandidate({ store: publicationStore, ledger, lease, workspace: { id: 'R_development', repositoryId: fixtureRepository.node_id, numericId: fixtureRepository.id, slug: slug.toLowerCase(), private: true },
         run: reservation.run, source: snapshot.files, files: exported, profile: { repository: { defaultBranch: fixtureRepository.default_branch }, workflow: { branchPattern: 'issue/{number}-{slug}' }, quality: { requiredChecks: [] } }, title: issue.title, authority: () => assert.equal(policy.runtime.status('R_development').control, 'running') });
       check('actual-github-candidate-object-and-pr-readback', { candidate: publication.candidate, pullRequest: publication.pullRequest, transport: 'Host administrative gh; current App access and Project journey pending' });
@@ -209,7 +211,7 @@ try {
   const green = await tool({ operation: 'run', command: 'node --test', timeoutMs: 10000 }); assert.equal(green.exitCode, 0); assert.equal(green.truncated, false); check('actual-isolated-code-and-passing-check');
   if (budgets) {
     continuityProof = { sourceCommit: snapshot.candidate.sourceCommit, gitTree: sourceTree((await tool({ operation: 'export' })).files) };
-    ledger = openDevelopmentStore(state);
+    ledger = openDevelopmentStore(state, { vault });
     ledger.create(reservation.run, { pipeline: policy.worker.read('R_development').values['pipelines.development'].value, source: snapshot.candidate,
       developer: { id: 'fixture-dev', connection: 'ollama', model: 'synthetic-initial' }, fallbacks: [{ id: 'fixture-fallback', connection: 'ollama', model: 'synthetic-fallback' }],
       skillsHash: starterHash, issueHash: developmentIssueHash({ number: 1, title: 'Synthetic budget qualification', body: instructions }), checks: [{ name: 'Fixture tests', command: 'node --test' }], logBytes: 1048576 });
@@ -274,7 +276,7 @@ try {
   error = 'Development worker qualification failed: ' + (/^[A-Za-z0-9 ,;:.\/-]{1,200}$/.test(failure.message) ? failure.message : 'inspect private local failure'); }
 finally {
   const failures = [];
-  for (const close of [async () => supervisor && await supervisor.shutdown(), () => ledger?.close(), () => publicationStore?.close(), () => policy?.close(),
+  for (const close of [async () => supervisor && await supervisor.shutdown(), () => ledger?.close(), () => publicationStore?.close(), () => vault?.close(), () => policy?.close(),
     async () => { cleanup = await openWorkerEnvironment(directory).destroy(); }]) {
     try { await close(); } catch { failures.push('owned-resource-teardown'); }
   }

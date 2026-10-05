@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { openTestVault } from '../connections/test-vault.mjs';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
@@ -10,7 +11,7 @@ import { publishDevelopmentCandidate } from './github.mjs';
 
 const objectHash = (kind, value) => { const bytes = Buffer.from(value); return createHash('sha1').update(`${kind} ${bytes.length}\0`).update(bytes).digest('hex'); };
 test('scoped publication reconciles a lost branch and PR reply without replay; wrong candidate readback blocks', async () => {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-development-github-'))), store = openWorkspaceStore(root);
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-development-github-'))), vault = await openTestVault(root), store = openWorkspaceStore(root, { vault });
   const source = [{ path: 'app.mjs', mode: '100644', content: Buffer.from('export const value = 1;\n').toString('base64') }], files = [{ ...source[0], content: Buffer.from('export const value = 2;\n').toString('base64') }];
   const workspace = { id: 'repo-one', repositoryId: 'R1', numericId: 1, slug: 'fixture/repo', private: true };
   const run = { id: 'run-one', repository: workspace.id, issue: 7, epoch: 1, createdAt: 1700000000000 };
@@ -69,5 +70,5 @@ test('scoped publication reconciles a lost branch and PR reply without replay; w
     await publishDevelopmentCandidate(input); assert.equal(branchWrites, 2); assert.equal(pullWrites, 2);
     wrong = true; await assert.rejects(publishDevelopmentCandidate(input), /readback|candidate/);
     assert.equal(branchWrites, 2); assert.equal(pullWrites, 2); assert.equal(store.effects(run.id).every(effect => effect.state === 'verified'), true);
-  } finally { store.close(); rmSync(root, { recursive: true }); }
+  } finally { store.close(); vault.close(); rmSync(root, { recursive: true }); }
 });

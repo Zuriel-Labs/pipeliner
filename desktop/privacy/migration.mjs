@@ -22,7 +22,7 @@ function state(db, store, vault) {
     if (!row) throw Error(); plain = vault.openPayload(binding(store), Buffer.from(row.payload));
     const value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(plain));
     record(value, ['version', 'store', 'from', 'to', 'backup']);
-    if (value.version !== 1 || value.store !== store || !Number.isSafeInteger(value.from) || value.from < 1 || value.to !== value.from + 1 || version(db) !== value.to) throw Error();
+    if (value.version !== 1 || value.store !== store || !Number.isSafeInteger(value.from) || value.from < 1 || !Number.isSafeInteger(value.to) || value.to <= value.from || value.to > 100 || version(db) !== value.to) throw Error();
     return value;
   } catch { throw Error('protected-migration-recovery-invalid'); } finally { plain?.fill(0); }
 }
@@ -47,7 +47,7 @@ export function finishProtectedMigration(db, directory, store, { vault, verify }
 export function migrateProtectedStore(db, directory, store, { vault, from, to, transform, verify }) {
   controls(store, vault, verify);
   target(db, directory, store);
-  if (!Number.isSafeInteger(from) || from < 1 || to !== from + 1 || version(db) !== from || typeof transform !== 'function') throw Error('protected-migration-unavailable');
+  if (!Number.isSafeInteger(from) || from < 1 || !Number.isSafeInteger(to) || to <= from || to > 100 || version(db) !== from || typeof transform !== 'function') throw Error('protected-migration-unavailable');
   let transaction = false, committed = false, backup;
   try {
     if (db.prepare('PRAGMA quick_check').get().quick_check !== 'ok') throw Error();

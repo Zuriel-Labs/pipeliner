@@ -265,7 +265,7 @@ app.whenReady().then(async () => {
     const initialRevision = manager.status().revision + 1;
     manager = createConnectionManager({ vault, adapters, onChange: publish, initialRevision }); publish(manager.status());
     const { openWorkspaceStore } = await moduleAt('../repositories/store.mjs');
-    workspaceStore = openWorkspaceStore(directory);
+    workspaceStore = openWorkspaceStore(directory, { vault });
     skillStore = openSkillStore(directory, { occupiedNames: () => toolStore?.names() ?? [] });
     toolStore = openToolStore(directory, { occupiedNames: () => skillStore.names() });
     toolConnections = createToolConnections({ vault, entry: (endpoint, signal) => nativeMCPEntry(helper, directory, endpoint, signal, qualifying && process.argv.includes('--qualify-tools')),
@@ -279,7 +279,7 @@ app.whenReady().then(async () => {
         effect: action => action.operation === 'github.pr.merge' ? development.inspectIntegration(action) : supervisor.inspectEffect(action) } });
     const { openDevelopmentStore } = await moduleAt('../development/state.mjs');
     const { openExecutionSupervisor } = await moduleAt('../core/execution.mjs');
-    developmentStore = openDevelopmentStore(directory);
+    developmentStore = openDevelopmentStore(directory, { vault });
     try { supervisor = openExecutionSupervisor(directory, { store: policy }); } catch { supervisor = null; }
     const developmentRevision = development.status().revision + 1; await development.close(); development = makeDevelopment(developmentRevision); publishDevelopment(development.status());
     const pipelineRevision = pipelines.status().revision + 1; pipelines.close(); pipelines = makePipelines(pipelineRevision); publishPipelines(pipelines.status());

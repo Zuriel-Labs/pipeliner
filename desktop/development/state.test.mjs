@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { openTestVault } from '../connections/test-vault.mjs';
 import assert from 'node:assert/strict';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -10,20 +11,21 @@ import { presetChanges } from '../pipelines/model.mjs';
 
 const hash = value => createHash('sha256').update(canonicalJSON(value)).digest('hex');
 const source = { sourceCommit: 'a'.repeat(40), gitTree: 'b'.repeat(40) };
-function fixture(edit = () => {}) {
+async function fixture(edit = () => {}) {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-development-state-')));
+  const vault = await openTestVault(directory);
   const pipeline = structuredClone(developmentTemplate);
   edit(pipeline);
   const run = { id: 'run-one', repository: 'repo-one', issue: 1, dev: 'dev-one', epoch: 1, policyRevision: 1,
     policyHash: 'c'.repeat(64), pipelineHash: hash(pipeline), limits: { 'limits.stepTurns': 3, 'limits.issueTurns': 5, 'limits.agentSeconds': 1800 } };
   const captured = { pipeline, source, executionProfile: { kind: 'pipeliner-desktop', version: 1 }, developer: { id: run.dev, connection: 'ollama', model: 'test-model' }, skillsHash: 'd'.repeat(64), issueHash: 'e'.repeat(64), checks: [{ name: 'Repository checks', command: 'node --test' }], logBytes: 1048576 };
-  let store = openDevelopmentStore(directory); store.create(run, captured);
-  return { run, captured, directory, binding: { runId: run.id, epoch: 1 }, get store() { return store; }, reopen() { store.close(); store = openDevelopmentStore(directory); }, cleanup() { store.close(); rmSync(directory, { recursive: true }); } };
+  let store = openDevelopmentStore(directory, { vault }); store.create(run, captured);
+  return { run, captured, directory, binding: { runId: run.id, epoch: 1 }, get store() { return store; }, reopen() { store.close(); store = openDevelopmentStore(directory, { vault }); }, cleanup() { store.close(); vault.close(); rmSync(directory, { recursive: true }); } };
 }
 const output = evidence => ({ outcome: 'success', summary: 'Verified source examined.', evidence, documents: [], findings: [] });
 
-test('step revisits and recovery retain the cumulative turn ceiling', () => {
-  const f = fixture(pipeline => { pipeline.steps[0].retryLimit = 2; });
+test('step revisits and recovery retain the cumulative turn ceiling', async () => {
+  const f = await fixture(pipeline => { pipeline.steps[0].retryLimit = 2; });
   try {
     f.store.begin(f.binding); f.store.turn(f.binding); f.store.turn(f.binding);
     f.store.advance(f.binding, { ...output([]), outcome: 'failure' });
@@ -34,26 +36,27 @@ test('step revisits and recovery retain the cumulative turn ceiling', () => {
   } finally { f.cleanup(); }
 });
 
-test('active step time and transient attempts remain durable across waiting and a new epoch', () => {
+test('active step time and transient attempts remain durable across waiting and a new epoch', async () => {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-development-budget-'))); let now = 1000;
-  let store = openDevelopmentStore(directory, { clock: () => now });
-  const f = fixture();
+  const vault = await openTestVault(directory);
+  let store = openDevelopmentStore(directory, { vault, clock: () => now });
+  const f = await fixture();
   try {
     const run = { ...f.run, limits: { ...f.run.limits, 'limits.agentSeconds': 2, 'limits.transientAttempts': 3 } };
     store.create(run, f.captured); store.begin(f.binding);
     now--; assert.throws(() => store.budget(f.binding), /backwards/); now++; store.attempt(f.binding, 'provider-one');
     now += 600; store.budget(f.binding); now--; assert.throws(() => store.budget(f.binding), /backwards/); now++;
-    store.suspend(f.binding); now += 10000; store.close(); store = openDevelopmentStore(directory, { clock: () => now });
+    store.suspend(f.binding); now += 10000; store.close(); store = openDevelopmentStore(directory, { vault, clock: () => now });
     store.rebind(run.id, 2); const next = { runId: run.id, epoch: 2 }; store.activate(next);
     assert.equal(store.budget(next).remainingMs, 1400); assert.equal(store.status(run.id).turns, 1);
     store.attempt(next, 'provider-one'); store.attempt(next, 'provider-one');
     assert.throws(() => store.attempt(next, 'provider-one'), /attempt/);
     now += 1400; assert.throws(() => store.budget(next), /deadline/);
-  } finally { store.close(); rmSync(directory, { recursive: true }); f.cleanup(); }
+  } finally { store.close(); vault.close(); rmSync(directory, { recursive: true }); f.cleanup(); }
 });
 
-test('remediation cannot exceed the captured Issue budget through graph retries', () => {
-  const f = fixture(pipeline => { pipeline.steps[0].retryLimit = 10; pipeline.steps[0].visitLimit = 10; });
+test('remediation cannot exceed the captured Issue budget through graph retries', async () => {
+  const f = await fixture(pipeline => { pipeline.steps[0].retryLimit = 10; pipeline.steps[0].visitLimit = 10; });
   try {
     for (let n = 0; n < 4; n++) { f.store.begin(f.binding); f.store.advance(f.binding, { ...output([]), outcome: 'failure' }); }
     assert.equal(f.store.status(f.run.id).state, 'blocked');
@@ -62,8 +65,8 @@ test('remediation cannot exceed the captured Issue budget through graph retries'
   } finally { f.cleanup(); }
 });
 
-test('step timeout overrides the inherited type deadline without changing the captured run', () => {
-  const f = fixture(pipeline => { pipeline.steps[0].timeoutSeconds = 7; });
+test('step timeout overrides the inherited type deadline without changing the captured run', async () => {
+  const f = await fixture(pipeline => { pipeline.steps[0].timeoutSeconds = 7; });
   try { f.store.begin(f.binding); assert.equal(f.store.budget(f.binding).remainingMs <= 7000, true);
     assert.equal(f.store.captured(f.run.id).run.limits['limits.agentSeconds'], 1800); }
   finally { f.cleanup(); }
@@ -83,8 +86,8 @@ function qaCandidate(f) {
     limitations: ['Synthetic unit test; no Human QA.'], nextOutcome: 'Integrate the exact source and close the Issue.', approvalPhrase: 'Approved', candidate: source };
 }
 
-test('captured ungated policy integrates without creating QA; candidate drift and gated bypass fail', () => {
-  const f = fixture(pipeline => Object.assign(pipeline, presetChanges('pm-autonomous')['pipelines.development']));
+test('captured ungated policy integrates without creating QA; candidate drift and gated bypass fail', async () => {
+  const f = await fixture(pipeline => Object.assign(pipeline, presetChanges('pm-autonomous')['pipelines.development']));
   const proof = { candidate: { ...source, sourceCommit: 'f'.repeat(40) }, source, resultHash: 'f'.repeat(64), pullRequest: 3 };
   try {
     qaCandidate(f); assert.equal(f.store.status(f.run.id).step, 'integrate');
@@ -92,17 +95,17 @@ test('captured ungated policy integrates without creating QA; candidate drift an
     assert.equal(f.store.status(f.run.id).state, 'complete'); assert.equal(f.store.status(f.run.id).qa, undefined);
     assert.equal(f.store.status(f.run.id).qaHistory, undefined);
   } finally { f.cleanup(); }
-  const gated = fixture();
+  const gated = await fixture();
   try { qaCandidate(gated); assert.throws(() => gated.store.recordIntegration(gated.binding, proof), /integration|candidate/i); }
   finally { gated.cleanup(); }
-  const drift = fixture(pipeline => Object.assign(pipeline, presetChanges('pm-autonomous')['pipelines.development']));
+  const drift = await fixture(pipeline => Object.assign(pipeline, presetChanges('pm-autonomous')['pipelines.development']));
   try { qaCandidate(drift); drift.store.setCandidate(drift.binding, { ...source, gitTree: 'e'.repeat(40) });
     assert.throws(() => drift.store.recordIntegration(drift.binding, proof), /integration|candidate/i); }
   finally { drift.cleanup(); }
 });
 
-test('legacy gated captures remain readable; ungated captures require the exact Desktop migration version', () => {
-  const f = fixture(), { executionProfile: _profile, ...legacy } = f.captured;
+test('legacy gated captures remain readable; ungated captures require the exact Desktop migration version', async () => {
+  const f = await fixture(), { executionProfile: _profile, ...legacy } = f.captured;
   try {
     const run = { ...f.run, id: 'legacy-run' }; f.store.create(run, legacy); f.reopen();
     assert.equal(f.store.captured(run.id).executionProfile, undefined);
@@ -113,8 +116,8 @@ test('legacy gated captures remain readable; ungated captures require the exact 
   } finally { f.cleanup(); }
 });
 
-test('PM QA decisions bind to the current Showcase; feedback preserves counters and invalidates approval', () => {
-  const f = fixture();
+test('PM QA decisions bind to the current Showcase; feedback preserves counters and invalidates approval', async () => {
+  const f = await fixture();
   try {
     const showcase = qaCandidate(f), qa = f.store.offerQA(f.binding, showcase), turns = f.store.status(f.run.id).turns;
     assert.throws(() => f.store.decideQA(f.binding, { inputId: 'wrong', hash: 'a'.repeat(64), decision: 'approve', text: 'Approved' }), /changed|Showcase/);
@@ -127,8 +130,8 @@ test('PM QA decisions bind to the current Showcase; feedback preserves counters 
   } finally { f.cleanup(); }
 });
 
-test('current direct approval advances only the captured integration route and cannot be replayed', () => {
-  const f = fixture();
+test('current direct approval advances only the captured integration route and cannot be replayed', async () => {
+  const f = await fixture();
   try {
     const qa = f.store.offerQA(f.binding, qaCandidate(f));
     f.store.decideQA(f.binding, { inputId: 'approval-one', hash: qa.hash, decision: 'approve', text: 'I approve this tested version.' });
@@ -140,8 +143,8 @@ test('current direct approval advances only the captured integration route and c
   } finally { f.cleanup(); }
 });
 
-test('persisted dispatch cannot replay after crash; stale epochs and forged evidence fail', () => {
-  const f = fixture();
+test('persisted dispatch cannot replay after crash; stale epochs and forged evidence fail', async () => {
+  const f = await fixture();
   try {
     f.store.begin(f.binding);
     const request = f.store.prepare(f.binding, 'source-read', 'source', { path: 'app.mjs' });
@@ -159,8 +162,8 @@ test('persisted dispatch cannot replay after crash; stale epochs and forged evid
   } finally { f.cleanup(); }
 });
 
-test('graph failure uses finite retries and visits; reopening never resets model budget', () => {
-  const f = fixture();
+test('graph failure uses finite retries and visits; reopening never resets model budget', async () => {
+  const f = await fixture();
   try {
     f.store.begin(f.binding); f.store.turn(f.binding); f.store.turn(f.binding); f.reopen();
     assert.equal(f.store.status('run-one').turns, 2);
@@ -172,8 +175,8 @@ test('graph failure uses finite retries and visits; reopening never resets model
   } finally { f.cleanup(); }
 });
 
-test('check outcomes and model success bind to actual evidence for the unchanged candidate', () => {
-  const f = fixture();
+test('check outcomes and model success bind to actual evidence for the unchanged candidate', async () => {
+  const f = await fixture();
   try {
     f.store.begin(f.binding);
     const old = f.store.prepare(f.binding, 'read', 'source', { path: 'app.mjs' });
@@ -195,8 +198,8 @@ test('check outcomes and model success bind to actual evidence for the unchanged
   } finally { f.cleanup(); }
 });
 
-test('agent output cannot add control fields or supply unsafe human HTML', () => {
-  const f = fixture();
+test('agent output cannot add control fields or supply unsafe human HTML', async () => {
+  const f = await fixture();
   try {
     f.store.begin(f.binding);
     assert.throws(() => f.store.advance(f.binding, { ...output([]), apply: { permissions: ['host.automation'] } }), /request/i);
@@ -207,8 +210,8 @@ test('agent output cannot add control fields or supply unsafe human HTML', () =>
   } finally { f.cleanup(); }
 });
 
-test('retry and visit limits remain finite for prototype-named graph steps across reopen and new epochs', () => {
-  const f = fixture(pipeline => {
+test('retry and visit limits remain finite for prototype-named graph steps across reopen and new epochs', async () => {
+  const f = await fixture(pipeline => {
     pipeline.entry = 'constructor'; pipeline.steps[0].id = 'constructor'; pipeline.steps[0].retryLimit = 1; pipeline.steps[0].visitLimit = 2;
     pipeline.steps[0].routes.feedback = 'constructor';
   });

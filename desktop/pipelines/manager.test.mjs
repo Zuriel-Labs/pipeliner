@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { openTestVault } from '../connections/test-vault.mjs';
 import assert from 'node:assert/strict';
 import { mkdtempSync, realpathSync, rmSync, existsSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -15,8 +16,8 @@ import { openSkillStore } from '../skills/store.mjs';
 import { toolPackage } from '../tools/package.mjs';
 import { capabilityNames } from '../core/settings.mjs';
 
-function fixture(t, withTools = false) {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-40-policy-'))), store = openWorkspaceStore(root);
+async function fixture(t, withTools = false) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-40-policy-'))), vault = await openTestVault(root), store = openWorkspaceStore(root, { vault });
   const repo = id => ({ id, repositoryId: 'R_' + id, slug: 'fixture/' + id, name: 'Fixture / ' + id, localKey: id === 'one' ? '1:2' : '1:3', path: root, project: { id: 'P1' } });
   store.register(repo('one')); store.register(repo('two')); store.select('one'); let now = 1000;
   const tools = withTools ? openToolStore(root) : null, skills = withTools ? openSkillStore(root) : null;
@@ -24,7 +25,7 @@ function fixture(t, withTools = false) {
     connections: [{ id: 'codex', provider: 'codex', repositories: ['one', 'two'] }], developers: [{ id: 'dev', connection: 'codex', metrics: [] }], extensions: skills?.catalog() ?? [], ...(tools ? { tools: tools.catalog() } : {}) }),
     inspectors: { repository: async ({ repository, issue }) => ({ repository, issue, state: 'OPEN', status: 'In Progress', active: [{ issue, status: 'In Progress' }], observedAt: now }) } });
   let manager = createPipelineManager({ store, policy, tools, skills });
-  t.after(() => { manager.close(); policy.close(); tools?.close(); skills?.close(); store.close(); rmSync(root, { recursive: true }); assert(!existsSync(root)); });
+  t.after(() => { manager.close(); policy.close(); tools?.close(); skills?.close(); store.close(); vault.close(); rmSync(root, { recursive: true }); assert(!existsSync(root)); });
   const apply = changes => {
     const input = policy.control.capture({ commandId: randomUUID(), conversationId: 'fixture-pm', target: 'one', text: 'Change scoped policy' });
     const p = policy.control.prepare({ inputId: input.id, requestId: randomUUID(), scope: 'repository', target: 'one', changes, reset: [] });
@@ -34,8 +35,8 @@ function fixture(t, withTools = false) {
 }
 function prepare(f) { f.manager.dispatch({ operation: 'prepare' }); const p = f.manager.status().preview; assert(p); return p.hash; }
 const chat = (f, text) => f.manager.dispatch({ operation: 'chat', text });
-test('chat and Settings share exact PM apply, correction/discard, duplicate prevention and durable versions', t => {
-  const f = fixture(t); chat(f, 'Edit Development pipeline');
+test('chat and Settings share exact PM apply, correction/discard, duplicate prevention and durable versions', async t => {
+  const f = await fixture(t); chat(f, 'Edit Development pipeline');
   chat(f, 'Rename step 1 to Research the bounded change'); const first = prepare(f);
   assert.equal(f.policy.worker.read('one').revision, 0);
   chat(f, 'Set step 1 outcome to Record the evidence'); assert.equal(f.manager.status().preview, null);
@@ -50,8 +51,8 @@ test('chat and Settings share exact PM apply, correction/discard, duplicate prev
   assert.throws(() => chat(f, 'Rename step 1 to ' + 'a'.repeat(64)), /Sensitive/);
   chat(f, 'Discard this pipeline draft'); assert.equal(f.manager.status().draft, null); assert.equal(f.policy.worker.read('one').revision, 1);
 });
-test('registered frame/context rejects actor, foreign target, quotes, secrets, expired or changed proposals', t => {
-  const f = fixture(t), frame = { parent: null, url: 'pipeliner://app/index.html' }, contents = { mainFrame: frame, isDestroyed: () => false };
+test('registered frame/context rejects actor, foreign target, quotes, secrets, expired or changed proposals', async t => {
+  const f = await fixture(t), frame = { parent: null, url: 'pipeliner://app/index.html' }, contents = { mainFrame: frame, isDestroyed: () => false };
   const channel = createPipelineControlChannel(f.manager, { contents, url: frame.url, context: () => ({ revision: f.manager.status().revision }) });
   const event = { sender: contents, senderFrame: frame }, dispatch = payload => channel.dispatch(event, { ...payload, contextRevision: f.manager.status().revision });
   assert.throws(() => channel.dispatch({ sender: {}, senderFrame: frame }, { operation: 'status' }));
@@ -64,8 +65,8 @@ test('registered frame/context rejects actor, foreign target, quotes, secrets, e
   prepare(f); f.apply({ 'privacy.conversationDays': 120 }); assert.throws(() => f.manager.dispatch({ operation: 'apply' }));
   assert.equal(f.policy.worker.read('one').revision, 1);
 });
-test('global inheritance, scoped restoration and a switched repository preserve drafts and unrelated policy', t => {
-  const f = fixture(t); chat(f, 'Edit global Development pipeline'); chat(f, 'Rename step 1 to Global research');
+test('global inheritance, scoped restoration and a switched repository preserve drafts and unrelated policy', async t => {
+  const f = await fixture(t); chat(f, 'Edit global Development pipeline'); chat(f, 'Rename step 1 to Global research');
   f.manager.dispatch({ operation: 'apply', hash: prepare(f) });
   assert.equal(f.policy.worker.read('two').values['pipelines.development'].source, 'global');
   chat(f, 'Edit repository Development pipeline'); chat(f, 'Rename step 1 to Repository research'); f.manager.dispatch({ operation: 'apply', hash: prepare(f) });
@@ -79,8 +80,8 @@ test('global inheritance, scoped restoration and a switched repository preserve 
   assert.throws(() => f.manager.dispatch({ operation: 'apply', hash: old })); assert(f.manager.status().revision > before);
   f.store.select('one'); f.manager.sync(); assert.equal(f.manager.status().draft.definition.steps[0].label, 'First repository draft'); assert.equal(f.manager.status().preview, null);
 });
-test('invalid routes/bounds cannot publish; saved draft requires rebase after an independent policy change', t => {
-  const f = fixture(t); chat(f, 'Edit Development pipeline'); chat(f, 'Set step 1 retries to 999');
+test('invalid routes/bounds cannot publish; saved draft requires rebase after an independent policy change', async t => {
+  const f = await fixture(t); chat(f, 'Edit Development pipeline'); chat(f, 'Set step 1 retries to 999');
   assert.throws(() => f.manager.dispatch({ operation: 'prepare' })); assert.equal(f.policy.worker.read('one').revision, 0);
   chat(f, 'Set step 1 retries to 2'); chat(f, 'Remove step 2'); assert.throws(() => f.manager.dispatch({ operation: 'prepare' }));
   chat(f, 'Send step 1 success to step 2'); chat(f, 'Send step 4 feedback to step 1'); f.apply({ 'privacy.conversationDays': 140 });
@@ -90,7 +91,7 @@ test('invalid routes/bounds cannot publish; saved draft requires rebase after an
   assert.equal(f.policy.worker.read('one').values['pipelines.development'].value.steps.length, 5);
 });
 test('a published graph never changes the actual captured run definition, revision or hash', async t => {
-  const f = fixture(t), checkout = join(f.root, 'checkout'); mkdirSync(checkout);
+  const f = await fixture(t), checkout = join(f.root, 'checkout'); mkdirSync(checkout);
   const git = args => execFileSync('/usr/bin/git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', checkout, ...args], { env: { PATH: '/usr/bin:/bin', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' }, stdio: 'pipe' });
   git(['init', '--initial-branch=main']); git(['remote', 'add', 'origin', 'https://github.com/fixture/one.git']);
   f.apply({ 'agents.dev': 'dev', 'connections.codex': 'codex' });
@@ -100,8 +101,8 @@ test('a published graph never changes the actual captured run definition, revisi
   assert(current.active.definition.steps.some(step => step.kind === 'pm-qa')); assert.equal(current.current.definition.steps.some(step => step.kind === 'pm-qa'), false);
   assert.equal(f.policy.runtime.status('one').id, run.id); assert.equal(f.manager.agent, undefined);
 });
-test('a matching draft creates no version; release inheritance resets only its graph and matching publication', t => {
-  const f = fixture(t); chat(f, 'Edit Development pipeline'); chat(f, 'Review this pipeline');
+test('a matching draft creates no version; release inheritance resets only its graph and matching publication', async t => {
+  const f = await fixture(t); chat(f, 'Edit Development pipeline'); chat(f, 'Review this pipeline');
   assert.equal(f.manager.status().preview, null); assert.equal(f.manager.status().draft, null); assert.equal(f.policy.worker.read('one').revision, 0);
   chat(f, 'Edit Release pipeline'); chat(f, 'Add Artifact publication after step 3 called Publish the verified artifact'); f.manager.dispatch({ operation: 'apply', hash: prepare(f) });
   assert.equal(f.manager.status().current.publication, true); f.apply({ 'privacy.conversationDays': 145 });
@@ -109,13 +110,13 @@ test('a matching draft creates no version; release inheritance resets only its g
   f.manager.dispatch({ operation: 'apply', hash: prepare(f) }); assert.equal(f.manager.status().current.publication, false);
   assert.equal(f.policy.worker.read('one').values['privacy.conversationDays'].value, 145);
 });
-test('registered workspace identities remain exact while human text remains protected', t => {
-  const f = fixture(t), id = 'repo_' + 'a'.repeat(24);
+test('registered workspace identities remain exact while human text remains protected', async t => {
+  const f = await fixture(t), id = 'repo_' + 'a'.repeat(24);
   f.store.register({ id, repositoryId: 'R3', slug: 'fixture/three', name: 'ghu_syntheticSecretOnly123', localKey: '1:4', path: f.root, project: { id: 'P1' } }); f.store.select(id);
   assert.equal(f.manager.status().workspaceId, id); assert.equal(f.manager.status().repositoryLabel, 'Sensitive text hidden');
 });
-test('plain PM pipeline bindings use only selected immutable tools and approved typed fields without granting permissions', t => {
-  const f = fixture(t, true), item = f.tools.install(toolPackage({ name: 'queue', purpose: 'Check synthetic queue', version: '1', license: 'MIT', dataCategories: ['issue.title', 'pm.supplied'],
+test('plain PM pipeline bindings use only selected immutable tools and approved typed fields without granting permissions', async t => {
+  const f = await fixture(t, true), item = f.tools.install(toolPackage({ name: 'queue', purpose: 'Check synthetic queue', version: '1', license: 'MIT', dataCategories: ['issue.title', 'pm.supplied'],
     command: { script: 'printf done', timeoutSeconds: 30, inputSchema: { type: 'object', properties: { title: { type: 'string' } }, required: ['title'] } } }), 0);
   f.apply({ 'tools.extensions': [item.id] }); chat(f, 'Add an Extension step after step 2 called Check the queue');
   chat(f, 'Use tool queue in step 3'); chat(f, 'Give step 3 Issue title as title');
@@ -131,8 +132,8 @@ test('plain PM pipeline bindings use only selected immutable tools and approved 
   f.tools.remove(item.name, f.tools.revision()); assert.throws(() => f.manager.dispatch({ operation: 'apply' }), /Pipeline preview/);
   assert.equal(f.manager.status().draft.definition.steps[2].extension.pin, item.id);
 });
-test('nested PM input replacement preserves neighboring values and rejects reserved or overlapping paths', t => {
-  const f = fixture(t, true), item = f.tools.install(toolPackage({ name: 'nested', purpose: 'Synthetic typed input', version: '1', license: 'MIT', dataCategories: ['pm.supplied', 'issue.title'],
+test('nested PM input replacement preserves neighboring values and rejects reserved or overlapping paths', async t => {
+  const f = await fixture(t, true), item = f.tools.install(toolPackage({ name: 'nested', purpose: 'Synthetic typed input', version: '1', license: 'MIT', dataCategories: ['pm.supplied', 'issue.title'],
     command: { script: 'printf done', timeoutSeconds: 30, inputSchema: { type: 'object' } } }), 0);
   f.apply({ 'tools.extensions': [item.id] }); chat(f, 'Use tool nested in step 2');
   chat(f, 'Set step 2 input label to text Preserved label'); chat(f, 'Set step 2 input options.name to text First');

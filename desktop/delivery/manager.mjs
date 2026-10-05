@@ -2,14 +2,18 @@ import { randomUUID } from 'node:crypto';
 import { canonicalJSON, record } from '../core/settings.mjs';
 import { deliveryKeys, deliveryShapes, deliveryCommand } from './commands.mjs';
 
-export function createDeliveryManager({ policy, workspace = () => null, inspect, openHelp, initialRevision = 1, onChange = () => {}, onApplied = () => {} }) {
+export function createDeliveryManager({ policy, artifacts = null, workspace = () => null, inspect, openHelp, initialRevision = 1, onChange = () => {}, onApplied = () => {} }) {
   if (!Number.isSafeInteger(initialRevision) || initialRevision < 1 || [workspace, onChange, onApplied].some(fn => typeof fn !== 'function')) throw Error('Delivery controls unavailable');
-  const conversation = randomUUID(); let revision = initialRevision, observed, scope = 'repository', preview = null, applied = null, closed = false, message = null, checking = null, prerequisites = null;
-  function invalidate() { if (preview) policy.control.invalidate(preview.inputId); preview = null; applied = null; }
-  function context() { return { target: workspace()?.id ?? null, policy: policy?.worker.read(null).revision ?? null }; }
+  const conversation = randomUUID(); let revision = initialRevision, observed, scope = 'repository', preview = null, artifactPreview = null, artifactAfter = null, applied = null, closed = false, message = null, checking = null, changing = null, prerequisites = null;
+  function invalidate() { if (preview) policy.control.invalidate(preview.inputId); preview = null; artifactPreview = null; applied = null; }
+  function artifactView(after = null) {
+    if (!artifacts || !workspace()?.id) return null;
+    try { return artifacts.inventory(workspace().id, { after }); } catch { return { unavailable: true, items: [], revision: 'unavailable' }; }
+  }
+  function context() { return { target: workspace()?.id ?? null, policy: policy?.worker.read(null).revision ?? null, artifacts: artifactView()?.revision ?? null }; }
   function sync() {
     if (closed) return; const current = context();
-    if (observed && canonicalJSON(current) !== canonicalJSON(observed)) { invalidate(); revision++; }
+    if (observed && canonicalJSON(current) !== canonicalJSON(observed)) { invalidate(); artifactAfter = null; revision++; }
     observed = current; if (scope === 'repository' && !current.target) scope = 'global';
   }
   function select(value) {
@@ -22,7 +26,8 @@ export function createDeliveryManager({ policy, workspace = () => null, inspect,
       policyRevision: view?.revision ?? null, values: view ? Object.fromEntries([...deliveryKeys, 'delivery.output', 'delivery.publish'].map(key => [key, view.values[key]])) : null,
       preview: preview ? { hash: preview.hash, scope: preview.scope, target: preview.target, baseRevision: preview.baseRevision, expiresAt: preview.expiresAt,
         before: Object.fromEntries(preview.keys.map(key => [key, preview.before[key]])), after: Object.fromEntries(preview.keys.map(key => [key, preview.after[key]])) } : null,
-      prerequisites, busy: Boolean(checking), installer: null, buildQualified: false, message };
+      artifactPreview: artifactPreview ? structuredClone(artifactPreview) : null, artifacts: artifactView(artifactAfter),
+      prerequisites, busy: Boolean(checking || changing), installer: null, buildQualified: false, message };
   }
   function publish() { try { onChange(status()); } catch { message = 'Delivery view needs refresh. Reopen Settings to inspect saved values.'; } }
   function prepare(changes, reset, selected) {
@@ -36,6 +41,7 @@ export function createDeliveryManager({ policy, workspace = () => null, inspect,
     revision++; publish(); return { snapshot: status() };
   }
   async function cancelCheck() { const operation = checking; if (operation) { operation.controller.abort(); await operation.done; } }
+  async function cancelArtifact() { const operation = changing; if (operation) { operation.controller.abort(); try { await operation.done; } catch {} } }
   async function check() {
     if (checking) return { snapshot: status() }; if (typeof inspect !== 'function') throw Error('Mac prerequisite inspection unavailable');
     const operation = { controller: new AbortController() }; checking = operation; prerequisites = null; message = 'Checking this Mac’s build tools and signing prerequisites.'; revision++; publish();
@@ -56,10 +62,30 @@ export function createDeliveryManager({ policy, workspace = () => null, inspect,
     sync(); if (closed || !policy) throw Error('Delivery protected configuration unavailable'); canonicalJSON(payload);
     const shape = deliveryShapes[payload?.operation]; if (!shape) throw Error('Delivery operation unavailable'); record(payload, ['operation', ...shape[0]], shape[1]);
     if (payload.operation === 'chat') { const action = deliveryCommand(payload.text); return action ? dispatch(action) : { snapshot: status(), message: 'Ask to show delivery settings, find an installer, check this Mac or change artifact limits.' }; }
-    if (payload.operation === 'cancel') { await cancelCheck(); invalidate(); revision++; message = 'Delivery change or check cancelled. Artifacts and configuration are preserved.'; publish(); return { snapshot: status() }; }
-    if (checking) throw Error('Wait for the Mac check or cancel it');
+    if (payload.operation === 'cancel') { const inFlight = Boolean(changing); await cancelCheck(); await cancelArtifact(); invalidate(); revision++; message = inFlight ? 'Artifact action settled. Inspect retained artifacts for completed removal or recovery needs.' : 'Delivery change or check cancelled. Artifacts and configuration are preserved.'; publish(); return { snapshot: status() }; }
+    if (checking || changing) throw Error('Wait for the delivery action or cancel it');
     if (payload.operation === 'inspect') return check();
     if (['view', 'scope'].includes(payload.operation)) { if (payload.scope) select(payload.scope); publish(); return { snapshot: status() }; }
+    if (['artifacts', 'artifact', 'artifactApply'].includes(payload.operation)) {
+      if (!artifacts || !workspace()?.id || artifactView()?.unavailable) throw Error('Choose a repository with available protected artifact storage');
+      if (payload.operation === 'artifacts') { artifacts.inventory(workspace().id, { after: payload.after ?? null }); artifactAfter = payload.after ?? null; revision++; message = 'Retained artifacts belong to ' + workspace().name + '. Validation provenance is shown with each artifact.'; publish(); return { snapshot: status() }; }
+      if (payload.operation === 'artifact') {
+        invalidate(); const id = payload.id === 'latest' ? artifactView()?.items.find(item => item.state === 'verified')?.id : payload.id;
+        artifactPreview = artifacts.prepare(workspace().id, { action: payload.action, ...(id !== undefined ? { id } : {}) });
+        revision++; message = payload.action === 'retain' ? 'Review removal of ' + artifactPreview.remove.length + ' older artifacts. Latest, pinned, active and recovery artifacts remain protected.' : 'Review the artifact change for ' + workspace().name + '. No bytes or protection flags have changed.';
+        publish(); return { snapshot: status() };
+      }
+      if (!artifactPreview) { if (applied && (!payload.hash || applied === payload.hash)) return { snapshot: status(), applied: false }; throw Error('Artifact preview unavailable'); }
+      const p = artifactPreview; if (payload.hash && payload.hash !== p.hash) throw Error('Artifact preview changed');
+      const operation = { controller: new AbortController() }; changing = operation; operation.done = artifacts.apply(p, { signal: operation.controller.signal }); revision++; publish();
+      let result;
+      try { result = await operation.done; }
+      catch { artifactPreview = null; message = 'Artifact action interrupted. Inspect retained artifacts; completed removals stay recorded and uncertain bytes remain held for recovery.'; throw Error('Artifact action interrupted; inspect retained artifacts'); }
+      finally { changing = null; revision++; if (!closed) publish(); }
+      artifactPreview = null; applied = p.hash; observed = context(); revision++;
+      message = p.action === 'retain' ? result.removed + ' older artifacts removed with ownership and checksum verification. Protected artifacts remain.' : 'Artifact protection saved for ' + workspace().name + '.';
+      publish(); return { snapshot: status(), applied: true };
+    }
     if (payload.operation === 'help') {
       if (!['tools', 'signing'].includes(payload.kind) || typeof openHelp !== 'function') throw Error('Build setup guide unavailable');
       await openHelp(payload.kind); return { snapshot: status() };
@@ -77,5 +103,5 @@ export function createDeliveryManager({ policy, workspace = () => null, inspect,
     }
     throw Error('Delivery operation unavailable');
   }
-  return Object.freeze({ status, dispatch, sync() { sync(); publish(); }, async close() { if (!closed) { invalidate(); closed = true; await cancelCheck(); } } });
+  return Object.freeze({ status, dispatch, sync() { sync(); publish(); }, async close() { if (!closed) { invalidate(); closed = true; await cancelCheck(); await cancelArtifact(); } } });
 }

@@ -10,7 +10,7 @@ const identifier = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9
 function payloadBinding(value) {
   try {
     const text = canonicalJSON(value); record(value, ['purpose', 'repository', 'id']);
-    if (!['conversation', 'log', 'audit', 'development', 'workspace', 'migration'].includes(value.purpose)
+    if (!['conversation', 'log', 'audit', 'development', 'workspace', 'migration', 'artifact'].includes(value.purpose)
       || value.repository !== null && !identifier(value.repository) || !identifier(value.id)) throw new Error();
     return Buffer.from('pipeliner:protected-payload:1:' + text);
   } catch { throw new Error('protected-payload-binding'); }

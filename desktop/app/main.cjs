@@ -17,7 +17,7 @@ const calendarHelper = argument('--calendar-helper') ?? (app.isPackaged ? path.j
 app.setName('Pipeliner'); app.setPath('userData', dataDirectory); app.setPath('crashDumps', path.join(dataDirectory, 'crashes'));
 protocol.registerSchemesAsPrivileged([{ scheme: 'pipeliner', privileges: { standard: true, secure: true } }]);
 if (!app.requestSingleInstanceLock()) app.exit(0);
-let window, manager, vault, workspaces, workspaceStore, issues, pipelines, policy, development, developmentStore, supervisor, scheduling, scheduler, background, backgroundHost, backgroundNative, skills, skillStore, tools, toolStore, toolConnections, privacy, privacyRecords, appearance, delivery, retentionMonitor, attachWindow, attachment, requestShutdown, authorizationMonitor, shutdownPaused = false, closing = false, verifiedClose = false;
+let window, manager, vault, workspaces, workspaceStore, issues, pipelines, policy, development, developmentStore, supervisor, scheduling, scheduler, background, backgroundHost, backgroundNative, skills, skillStore, tools, toolStore, toolConnections, privacy, privacyRecords, appearance, delivery, artifacts, retentionMonitor, attachWindow, attachment, requestShutdown, authorizationMonitor, shutdownPaused = false, closing = false, verifiedClose = false;
 const moduleAt = file => import(pathToFileURL(path.join(__dirname, file)).href);
 const assets = new Map(['index.html', 'app.css', 'app.mjs', 'workspaces.mjs', 'issues.mjs', 'pipelines.mjs', 'development.mjs', 'scheduling.mjs', 'background.mjs', 'skills.mjs', 'tools.mjs', 'privacy.mjs', 'appearance.mjs', 'delivery.mjs'].map(file => [file, path.join(__dirname, file)]));
 assets.set('commands.mjs', path.join(__dirname, '../connections/commands.mjs')); assets.set('tokens.css', path.join(__dirname, '../prototype/style.css'));
@@ -199,7 +199,7 @@ app.whenReady().then(async () => {
     onApplied: () => { issues?.sync(); pipelines?.sync(); development?.sync(); scheduling?.sync(); background?.sync(); skills?.sync(); tools?.sync(); privacy?.sync(); } });
   appearance = makeAppearance(1);
   const publishDelivery = snapshot => { if (window && !window.isDestroyed()) window.webContents.send('delivery:status', snapshot); };
-  const makeDelivery = initialRevision => createDeliveryManager({ policy, initialRevision, onChange: publishDelivery, inspect: inspectMacDelivery,
+  const makeDelivery = initialRevision => createDeliveryManager({ policy, artifacts, initialRevision, onChange: publishDelivery, inspect: inspectMacDelivery,
     workspace: () => { const selected = workspaceStore?.selected(); return workspaceStore?.workspaces().find(item => item.id === selected) ?? null; },
     openHelp: kind => shell.openExternal(kind === 'tools' ? 'https://apps.apple.com/us/app/xcode/id497799835' : 'https://developer.apple.com/developer-id/'),
     onApplied: () => { issues?.sync(); pipelines?.sync(); development?.sync(); scheduling?.sync(); background?.sync(); skills?.sync(); tools?.sync(); appearance?.sync(); privacy?.sync(); } });
@@ -275,7 +275,7 @@ app.whenReady().then(async () => {
       powerMonitor.removeListener('suspend', suspendHost); powerMonitor.removeListener('resume', wakeHost); powerMonitor.removeListener('shutdown', endSession);
       await tools.close(); await toolConnections?.close();
       await privacy.close(); privacyRecords?.close();
-      await delivery.close(); backgroundHost?.close(); background.close(); scheduling.close(); pipelines.close(); skills.close(); appearance.close();
+      await delivery.close(); await artifacts?.close(); backgroundHost?.close(); background.close(); scheduling.close(); pipelines.close(); skills.close(); appearance.close();
       developmentStore?.close(); policy?.close(); skillStore?.close(); toolStore?.close(); workspaceStore?.close(); vault?.close(); verifiedClose = true; app.quit();
     } catch { closing = false; console.error('Pipeliner shutdown needs verified recovery. Work remains preserved.'); await attachWindow(); publish(manager.status()); }
   };
@@ -302,6 +302,14 @@ app.whenReady().then(async () => {
         continuity: input => development.inspectContinuity(input),
         effect: action => action.operation === 'github.pr.merge' ? development.inspectIntegration(action) : supervisor.inspectEffect(action) } });
     const appearanceRevision = appearance.status().revision + 1; appearance.close(); appearance = makeAppearance(appearanceRevision); publishAppearance(appearance.status());
+    const { openArtifactStore } = await moduleAt('../delivery/artifacts.mjs');
+    try {
+      artifacts = await openArtifactStore(directory, { vault, limits: repository => {
+        const values = policy.worker.read(repository).values;
+        return { keepLatest: values['delivery.keepLatest'].value, warningBytes: values['delivery.warningGiB'].value * 1024 ** 3, capacityBytes: values['delivery.capacityGiB'].value * 1024 ** 3 };
+      } });
+    } catch { artifacts = null; console.error('Artifact storage needs recovery. Existing data preserved.'); }
+    if (closing) { await artifacts?.close(); return; }
     const deliveryRevision = delivery.status().revision + 1; await delivery.close(); delivery = makeDelivery(deliveryRevision); publishDelivery(delivery.status());
     const { openDevelopmentStore } = await moduleAt('../development/state.mjs');
     const { openExecutionSupervisor } = await moduleAt('../core/execution.mjs');
@@ -335,7 +343,7 @@ app.whenReady().then(async () => {
     authorizationMonitor = setInterval(() => { if (!closing) void backgroundHost.refresh().catch(() => {}); }, 1000); authorizationMonitor.unref();
     await scheduler.check('startup');
   } catch { publish(manager.status()); }
-  if (qualifying) await require('./qualify.cjs').run({ window, directory, helper, vault, manager, workspaces, issues, pipelines, policy, development, scheduler, scheduling, background, backgroundHost, backgroundNative, skills, skillStore, tools, toolStore, privacy, privacyRecords, appearance, delivery, deliveryChannel: deliveryChannel(), appearanceChannel: appearanceChannel(), privacyChannel: privacyChannel(), toolChannel: toolChannel(), skillChannel: skillChannel(), attachWindow, backgroundChannel: backgroundChannel(), schedulingChannel: schedulingChannel(), developmentChannel: developmentChannel(), workspaceChannel: workspaceChannel(), issueChannel: issueChannel(), pipelineChannel: pipelineChannel(), channel: channel(), windowReadyMs });
+  if (qualifying) await require('./qualify.cjs').run({ window, directory, helper, vault, manager, workspaces, issues, pipelines, policy, development, scheduler, scheduling, background, backgroundHost, backgroundNative, skills, skillStore, tools, toolStore, privacy, privacyRecords, appearance, delivery, artifacts, deliveryChannel: deliveryChannel(), appearanceChannel: appearanceChannel(), privacyChannel: privacyChannel(), toolChannel: toolChannel(), skillChannel: skillChannel(), attachWindow, backgroundChannel: backgroundChannel(), schedulingChannel: schedulingChannel(), developmentChannel: developmentChannel(), workspaceChannel: workspaceChannel(), issueChannel: issueChannel(), pipelineChannel: pipelineChannel(), channel: channel(), windowReadyMs });
 }).catch(() => { console.error('Pipeliner could not start safely.'); app.exit(1); });
 
 async function githubPrompt({ connection, verificationUri, userCode, signal, cancel }) {

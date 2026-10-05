@@ -3,7 +3,7 @@ import { canonicalJSON, record } from '../core/settings.mjs';
 
 export function createRecordCodec(vault, purpose) {
   try {
-    if (!['workspace', 'development'].includes(purpose) || typeof vault?.sealPayload !== 'function' || typeof vault?.openPayload !== 'function') throw Error();
+    if (!['workspace', 'development', 'artifact'].includes(purpose) || typeof vault?.sealPayload !== 'function' || typeof vault?.openPayload !== 'function') throw Error();
     const binding = { purpose, repository: null, id: 'record-protection-probe' }, bytes = vault.openPayload(binding, vault.sealPayload(binding, Buffer.alloc(0)));
     try { if (bytes.length) throw Error(); } finally { bytes.fill(0); }
   } catch { throw Error('protected-record-unavailable'); }

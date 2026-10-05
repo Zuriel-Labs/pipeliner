@@ -1,9 +1,10 @@
 'use strict';
 const assert = require('node:assert/strict');
-const { writeFileSync } = require('node:fs');
+const { writeFileSync, mkdirSync, readFileSync, existsSync } = require('node:fs');
+const { createHash, randomUUID } = require('node:crypto');
 const { join } = require('node:path');
 
-exports.run = async ({ window, directory, delivery, appearance, channel, policy, js, wait, check, measurements }) => {
+exports.run = async ({ window, directory, delivery, artifacts, appearance, channel, policy, js, wait, check, measurements }) => {
   const chat = text => js(`document.getElementById('chat-nav').click();document.getElementById('prompt').value=${JSON.stringify(text)};document.getElementById('composer').requestSubmit()`);
   const show = () => js("document.getElementById('settings-nav').click();document.getElementById('settings-delivery').click()");
   const change = async text => { await chat(text); await wait(() => Boolean(delivery.status().preview)); await chat('Apply this delivery change'); await wait(() => !delivery.status().preview); };
@@ -67,7 +68,44 @@ exports.run = async ({ window, directory, delivery, appearance, channel, policy,
     await js("(()=>{const input=document.getElementById('delivery-warningGiB');const offset=document.querySelector('.app-nav').getBoundingClientRect().bottom+40;window.scrollTo(0,window.scrollY+input.getBoundingClientRect().top-offset)})()");
     await wait(() => js("(()=>{const input=document.getElementById('delivery-warningGiB').getBoundingClientRect();return input.top>=document.querySelector('.app-nav').getBoundingClientRect().bottom && input.bottom<innerHeight})()"));
     await new Promise(resolve => setTimeout(resolve, 150));
-    writeFileSync(join(directory, 'qa-capture.png'), (await window.webContents.capturePage()).toPNG(), { flag: 'wx', mode: 0o600 });
+    writeFileSync(join(directory, 'delivery-fields-capture.png'), (await window.webContents.capturePage()).toPNG(), { flag: 'wx', mode: 0o600 });
     window.setSize(1180, 840); appearance.dispatch({ operation: 'prepare', changes: { 'appearance.textScale': 1 } }); appearance.dispatch({ operation: 'apply' }); await show();
+  });
+  await check('delivery-native-protected-artifact-custody-chat-pin-recovery-and-safe-retention', async () => {
+    await change('Keep the latest 1 artifacts for this repository');
+    const source = join(directory, 'artifact-fixture'); mkdirSync(source, { mode: 0o700 });
+    const repository = delivery.status().repository.id, receipts = [];
+    for (const name of ['one', 'two', 'three', 'four', 'five']) {
+      const bytes = Buffer.from(('private synthetic artifact ' + name + '\n').repeat(2400)), filename = name + '.dmg', sha256 = createHash('sha256').update(bytes).digest('hex');
+      writeFileSync(join(source, filename), bytes, { flag: 'wx', mode: 0o600 });
+      receipts.push(await artifacts.capture({ repository, commandId: randomUUID(), sourceDirectory: source, manifest: { name: filename, bytes: bytes.length, sha256,
+        sourceCommit: 'a'.repeat(40), gitTree: 'b'.repeat(40), host: { os: 'darwin', architecture: 'arm64', version: '27.0.1' }, validation: { protocol: 'synthetic-custody-fixture', result: 'passed', receiptHash: sha256 } } }));
+    }
+    delivery.sync(); await chat('Show retained artifacts'); await wait(() => js("document.querySelectorAll('.artifact-record').length===5"));
+    await js(`document.getElementById('artifact-pin-${receipts[0].id}').click()`); await wait(() => Boolean(delivery.status().artifactPreview));
+    await js("document.getElementById('artifact-apply').focus()"); window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+    await wait(() => artifacts.inventory(repository).items.find(item => item.id === receipts[0].id).pinned);
+    await js(`document.getElementById('artifact-recovery-${receipts[1].id}').click()`); await wait(() => Boolean(delivery.status().artifactPreview));
+    await chat('Apply this artifact change'); await wait(() => artifacts.inventory(repository).items.find(item => item.id === receipts[1].id).recovery);
+    await artifacts.hold(repository, receipts[2].id, true); delivery.sync();
+    await chat('Clean up old artifacts'); await wait(() => Boolean(delivery.status().artifactPreview)); assert.deepEqual(delivery.status().artifactPreview.remove, [receipts[3].id]);
+    await chat('Apply this artifact change'); await wait(() => artifacts.inventory(repository).items.length === 4);
+    assert.equal(existsSync(join(directory, 'artifacts', receipts[3].id + '.pipeliner-artifact')), false);
+    for (const receipt of receipts.filter((_, index) => index !== 3)) assert.equal(await artifacts.verify(repository, receipt.id), true);
+    assert.equal(readFileSync(join(directory, 'artifacts.sqlite')).includes(Buffer.from('one.dmg')), false);
+    assert.equal(readFileSync(join(directory, 'artifacts', receipts[0].id + '.pipeliner-artifact')).includes(Buffer.from('private synthetic')), false);
+    assert.equal(delivery.status().installer, null); assert.equal(delivery.status().buildQualified, false);
+    assert.equal(JSON.stringify(delivery.status()).includes(source), false);
+    await artifacts.hold(repository, receipts[2].id, false, { settled: true }); delivery.sync();
+    await chat('Pin the latest artifact'); await wait(() => Boolean(delivery.status().artifactPreview)); await delivery.dispatch({ operation: 'cancel' }); assert.equal(artifacts.inventory(repository).items[0].pinned, false);
+    await chat('Show retained artifacts'); await wait(() => js("document.querySelectorAll('.artifact-record').length===4"));
+    await js("document.getElementById('delivery-inventory').scrollIntoView({block:'start'})");
+    window.setSize(420, 760); appearance.dispatch({ operation: 'prepare', changes: { 'appearance.textScale': 2 } }); appearance.dispatch({ operation: 'apply' });
+    await new Promise(resolve => setTimeout(resolve, 150)); assert.equal(await js('document.documentElement.scrollWidth<=innerWidth'), true);
+    assert.equal(await js("Array.from(document.querySelectorAll('.artifact-record button,.artifact-record summary')).every(node=>node.getBoundingClientRect().height>=44)"), true);
+    await js("(()=>{const card=document.querySelector('.artifact-record');window.scrollTo(0,window.scrollY+card.getBoundingClientRect().top-document.querySelector('.app-nav').getBoundingClientRect().bottom-24)})()");
+    await js('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))'); await new Promise(resolve => setTimeout(resolve, 100));
+    writeFileSync(join(directory, 'qa-capture.png'), (await window.webContents.capturePage()).toPNG(), { flag: 'wx', mode: 0o600 });
+    window.setSize(1180, 840); appearance.dispatch({ operation: 'prepare', changes: { 'appearance.textScale': 1 } }); appearance.dispatch({ operation: 'apply' });
   });
 };

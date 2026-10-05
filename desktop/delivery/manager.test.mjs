@@ -1,12 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, realpathSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync, existsSync, writeFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openPolicyStore } from '../core/policy.mjs';
 import { createDeliveryManager } from './manager.mjs';
 import { deliveryCommand } from './commands.mjs';
 import { createDeliveryControlChannel } from '../core/control.mjs';
+import { openTestVault } from '../connections/test-vault.mjs';
+import { openArtifactStore } from './artifacts.mjs';
 
 function fixture() {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-54-delivery-')));
@@ -23,6 +26,30 @@ function fixture() {
     async close() { await manager.close(); policy.close(); rmSync(root, { recursive: true }); assert.equal(existsSync(root), false); } };
 }
 const apply = async f => { const hash = f.manager.status().preview.hash; return f.manager.dispatch({ operation: 'apply', hash }); };
+test('artifact chat and controls use actual custody, invalidate stale targets and keep PM flags out of worker commands', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-54-artifact-chat-'))), source = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-54-artifact-chat-source-')));
+  const vault = await openTestVault(root), policy = openPolicyStore(root, { catalog: () => ({ repositories: ['repo_one', 'repo_two'], capabilities: [], maxConcurrency: 1, background: false, connections: [], developers: [], extensions: [] }) });
+  const artifacts = await openArtifactStore(root, { vault, limits: repository => { const values = policy.worker.read(repository).values; return { keepLatest: values['delivery.keepLatest'].value, warningBytes: values['delivery.warningGiB'].value * 1024 ** 3, capacityBytes: values['delivery.capacityGiB'].value * 1024 ** 3 }; } });
+  let selected = 'repo_one'; const manager = createDeliveryManager({ policy, artifacts, workspace: () => ({ id: selected, name: selected }) });
+  try {
+    const bytes = Buffer.from('synthetic chat artifact'), name = 'chat.dmg', sha256 = createHash('sha256').update(bytes).digest('hex'); writeFileSync(join(source, name), bytes, { mode: 0o600 });
+    const receipt = await artifacts.capture({ repository: selected, commandId: randomUUID(), sourceDirectory: source, manifest: { name, bytes: bytes.length, sha256, sourceCommit: 'a'.repeat(40), gitTree: 'b'.repeat(40), host: { os: 'darwin', architecture: 'arm64', version: '27.0.1' }, validation: { protocol: 'synthetic-custody-fixture', result: 'passed', receiptHash: sha256 } } });
+    await manager.dispatch({ operation: 'chat', text: 'Show retained artifacts' }); assert.equal(manager.status().artifacts.items[0].id, receipt.id);
+    await manager.dispatch({ operation: 'chat', text: 'Pin the latest artifact' }); const old = manager.status().artifactPreview;
+    assert.equal(artifacts.inventory(selected).items[0].pinned, false);
+    selected = 'repo_two'; assert.equal(manager.status().artifactPreview, null); await assert.rejects(manager.dispatch({ operation: 'artifactApply', hash: old.hash })); assert.equal(manager.status().artifacts.items.length, 0);
+    selected = 'repo_one'; await manager.dispatch({ operation: 'chat', text: 'Pin the latest artifact' }); const current = manager.status().artifactPreview;
+    await assert.rejects(manager.dispatch({ operation: 'artifactApply', hash: '0'.repeat(64) }));
+    await manager.dispatch({ operation: 'chat', text: 'Apply this artifact change' }); assert.equal(artifacts.inventory(selected).items[0].pinned, true);
+    assert.equal((await manager.dispatch({ operation: 'artifactApply', hash: current.hash })).applied, false);
+    await manager.dispatch({ operation: 'chat', text: 'Make the latest artifact my recovery target' }); await manager.dispatch({ operation: 'chat', text: 'Apply this artifact change' }); assert.equal(artifacts.inventory(selected).items[0].recovery, true);
+    await manager.dispatch({ operation: 'chat', text: 'Unpin the latest artifact' }); await manager.dispatch({ operation: 'cancel' }); assert.equal(artifacts.inventory(selected).items[0].pinned, true);
+    await assert.rejects(manager.dispatch({ operation: 'artifacts', after: 'wrong-page' })); assert.equal(manager.status().artifacts.unavailable, undefined);
+    const url = 'pipeliner://app/index.html', frame = { url, parent: null }, contents = { mainFrame: frame, isDestroyed: () => false }, channel = createDeliveryControlChannel(manager, { contents, url, context: () => ({ revision: manager.status().revision }) });
+    assert.throws(() => channel.dispatch({ sender: {}, senderFrame: frame }, { operation: 'artifact', action: 'unpin', id: receipt.id, contextRevision: manager.status().revision }));
+    assert.equal(manager.status().installer, null); assert.equal(manager.status().buildQualified, false);
+  } finally { await manager.close(); await artifacts.close(); policy.close(); vault.close(); rmSync(root, { recursive: true }); rmSync(source, { recursive: true }); assert.equal(existsSync(root), false); assert.equal(existsSync(source), false); }
+});
 test('delivery uses scoped policy, persisted inheritance and exact receipts without allocating or deleting artifacts', async () => {
   const f = fixture();
   try {

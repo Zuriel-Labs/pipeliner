@@ -39,7 +39,9 @@ try {
   for(const file of runtimeInputs(candidate.files))await stageSource(file);
   for(const file of ['package.json','package-lock.json'])await stageSource(file);
   const npm=(await command('/usr/bin/which',['npm'])).stdout.trim();if(!isAbsolute(npm))throw new Error('package-npm-unavailable');
-  await command(npm,['ci','--ignore-scripts','--no-audit','--no-fund','--userconfig=/dev/null','--globalconfig=/dev/null','--cache='+join(temporary,'npm-cache')],{cwd:stage,timeout:180000});
+  const userConfig=join(temporary,'npm-user.conf'),globalConfig=join(temporary,'npm-global.conf');
+  for(const path of [userConfig,globalConfig])await writeFile(path,'',{flag:'wx',mode:0o600});
+  await command(npm,['ci','--ignore-scripts','--no-audit','--no-fund','--userconfig='+userConfig,'--globalconfig='+globalConfig,'--cache='+join(temporary,'npm-cache')],{cwd:stage,timeout:180000});
   await rm(join(stage,'node_modules/.bin'),{recursive:true,force:true});await rm(join(stage,'node_modules/.package-lock.json'),{force:true});
   const lock=JSON.parse(await readFile(join(stage,'package-lock.json'),'utf8'));
   const packages=await readdir(join(stage,'node_modules'));const expected=Object.keys(lock.packages).filter(p=>p.startsWith('node_modules/')).map(p=>p.slice(13)).sort();
@@ -118,7 +120,7 @@ try {
   await command('/usr/bin/hdiutil',['verify',dmg],{timeout:180000});
   const report={kind:'local-mac-review',...candidate,files:undefined,buildRoot:temporary,app,dmg,sourceInputs:inputs,nativeInputs,electron,codex,archive:{sha256:await fileHash(archive),headerSha256},fuses,dmgSha256:await fileHash(dmg),signing:'ad-hoc-local-integrity',pending:['Developer ID and notarization','actual packaged native QA','Human PM acceptance','Windows/Linux'],retained:{owner:'Issue #54',trigger:'replace candidate or finish PM testing'},versions:{node:process.versions.node,os:(await command('/usr/bin/sw_vers',['-productVersion'])).stdout.trim(),architecture:process.arch}};
   await writeFile(join(temporary,'build.json'),JSON.stringify(report,null,2)+'\n',{flag:'wx',mode:0o600});
-  for(const path of [stage,nativeRoot,runtime,electronZip,codexTar,license,entitlements,join(temporary,'npm-cache')])await rm(path,{recursive:true,force:true});
+  for(const path of [stage,nativeRoot,runtime,electronZip,codexTar,license,entitlements,userConfig,globalConfig,join(temporary,'npm-cache')])await rm(path,{recursive:true,force:true});
   retained=true;console.log(JSON.stringify({built:true,sourceCommit:candidate.sourceCommit,gitTree:candidate.gitTree,app,dmg,dmgSha256:report.dmgSha256,buildRecord:join(temporary,'build.json'),signing:report.signing,pending:report.pending}));
 } finally {
   if(!retained){await rm(temporary,{recursive:true,force:true});await access(temporary).then(()=>{throw new Error('package-cleanup-failed');},e=>{if(e.code!=='ENOENT')throw e;});console.log(JSON.stringify({cleanup:'owned-failed-build-removed',verified:true}));}

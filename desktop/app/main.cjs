@@ -3,6 +3,9 @@ const { app, BrowserWindow, Menu, protocol, session, ipcMain, dialog, shell, saf
 const { mkdirSync, lstatSync, realpathSync, readFileSync } = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
+if (app.isPackaged && process.argv.some(value => /^(?:--qualify(?:-|=|$)|--(?:data-directory|key-helper|calendar-helper)(?:=|$))/i.test(value))) {
+  console.error('Pipeliner rejected an unsupported packaged startup option.'); app.exit(2); return;
+}
 const origin = 'pipeliner://app', url = `${origin}/index.html`;
 const argument = name => process.argv.find(value => value.startsWith(`${name}=`))?.slice(name.length + 1);
 const qualifying = process.argv.includes('--qualify');

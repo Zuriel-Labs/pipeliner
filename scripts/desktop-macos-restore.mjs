@@ -16,7 +16,7 @@ const path = join(root, 'Restore.ipsw'), began = performance.now(), hash = creat
 const free = async () => { const value = await statfs(root); return value.bavail * value.bsize; };
 let written = 0, measured = 0, progress = 0, file;
 try {
-  if (await free() < 64 * 1024 ** 3) throw new Error('macos-restore-storage-reserve-insufficient');
+  if (await free() < 100 * 1024 ** 3) throw new Error('macos-restore-storage-reserve-insufficient');
   await writeFile(join(root, 'ownership.json'), JSON.stringify({ issue: 54, owner: 'brimdor', root, resources: ['Restore.ipsw', 'VM disk', 'native helper'],
     cleanupTrigger: 'D-22 qualification completion or failure; preserve unrelated resources', bytes, sha256 }), { flag: 'wx', mode: 0o600 });
   console.log(JSON.stringify({ root, owner: 'brimdor', issue: 54, expectedBytes: bytes, sha256 }));

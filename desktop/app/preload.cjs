@@ -21,4 +21,6 @@ contextBridge.exposeInMainWorld('pipeliner', Object.freeze({
   onTools: callback => { ipcRenderer.on('tools:status', (_event, value) => callback(value)); },
   privacyRequest: payload => ipcRenderer.invoke('privacy:control', payload),
   onPrivacy: callback => { ipcRenderer.on('privacy:status', (_event, value) => callback(value)); },
+  appearanceRequest: payload => ipcRenderer.invoke('appearance:control', payload),
+  onAppearance: callback => { ipcRenderer.on('appearance:status', (_event, value) => callback(value)); },
 }));

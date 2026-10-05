@@ -8,6 +8,7 @@ import { initBackground } from './background.mjs';
 import { initSkills } from './skills.mjs';
 import { initTools } from './tools.mjs';
 import { initPrivacy } from './privacy.mjs';
+import { initAppearance } from './appearance.mjs';
 
 let state = null, returnFocus = null; const drafts = new Map(), previousBusy = new Set();
 const $ = id => document.getElementById(id);
@@ -131,6 +132,7 @@ const scheduling = await initScheduling({ el, message });
 const background = await initBackground({ el, message });
 const skills = await initSkills({ el, message });
 const tools = await initTools({ el, message });
+const appearance = await initAppearance({ el, message, show: () => { showSettings(); $('settings-appearance').click(); } });
 $('prompt').addEventListener('input', () => { promptRevision++; void privacy.draft($('prompt').value).catch(() => {}); });
 $('composer').addEventListener('submit', event => { event.preventDefault(); const text = $('prompt').value.trim(); if (!text) return;
   if (containsSecret(text) && !(skills.handles(text) && skills.safe(text)) && !(tools.handles(text) && tools.safe(text))) { $('prompt').value = ''; promptRevision++; void privacy.draft('').catch(() => {}); message('Use the protected connection surface for keys. Nothing was sent; protected-looking text was not saved.'); $('prompt').focus(); return; }
@@ -139,7 +141,8 @@ $('composer').addEventListener('submit', event => { event.preventDefault(); cons
   $('prompt').value = ''; promptRevision++;
   if (privacy.handles(text)) { privacy.chat(text); return; }
   void privacy.draft('', target).catch(() => {});
-  if (!connectionCommand(text).connection && skills.handles(text)) skills.chat(text);
+  if (!connectionCommand(text).connection && appearance.handles(text)) appearance.chat(text);
+  else if (!connectionCommand(text).connection && skills.handles(text)) skills.chat(text);
   else if (!connectionCommand(text).connection && tools.handles(text)) tools.chat(text);
   else if (!connectionCommand(text).connection && background.handles(text)) background.chat(text);
   else if (!connectionCommand(text).connection && scheduling.handles(text)) scheduling.chat(text);
@@ -150,13 +153,14 @@ $('composer').addEventListener('submit', event => { event.preventDefault(); cons
   else request({ operation: 'chat', text }, text);
 });
 $('chat-nav').addEventListener('click', () => showSettings(false)); $('settings-nav').addEventListener('click', () => showSettings());
-for (const category of ['connections', 'pipelines', 'agents', 'schedule', 'background', 'skills', 'privacy']) $('settings-' + category).addEventListener('click', () => {
+for (const category of ['connections', 'pipelines', 'agents', 'schedule', 'background', 'skills', 'privacy', 'appearance']) $('settings-' + category).addEventListener('click', () => {
   $('connection-settings').hidden = category !== 'connections'; $('pipeline-settings').hidden = category !== 'pipelines'; $('agent-settings').hidden = category !== 'agents'; $('schedule-settings').hidden = category !== 'schedule';
   $('background-settings').hidden = category !== 'background';
   $('skill-settings').hidden = category !== 'skills';
   $('tool-settings').hidden = category !== 'skills';
   $('privacy-settings').hidden = category !== 'privacy';
-  for (const name of ['connections', 'pipelines', 'agents', 'schedule', 'background', 'skills', 'privacy']) $('settings-' + name).setAttribute('aria-pressed', String(name === category));
+  $('appearance-settings').hidden = category !== 'appearance';
+  for (const name of ['connections', 'pipelines', 'agents', 'schedule', 'background', 'skills', 'privacy', 'appearance']) $('settings-' + name).setAttribute('aria-pressed', String(name === category));
 });
 for (const button of document.querySelectorAll('[data-settings]')) button.addEventListener('click', () => showSettings());
 for (const button of document.querySelectorAll('[data-chat]')) button.addEventListener('click', () => request({ operation: 'chat', text: button.dataset.chat }, button.dataset.chat));

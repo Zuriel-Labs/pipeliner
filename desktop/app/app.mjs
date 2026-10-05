@@ -10,6 +10,7 @@ import { initTools } from './tools.mjs';
 import { initPrivacy } from './privacy.mjs';
 import { initAppearance } from './appearance.mjs';
 import { initDelivery } from './delivery.mjs';
+import { initPermissions } from './permissions.mjs';
 
 let state = null, returnFocus = null; const drafts = new Map(), previousBusy = new Set();
 const $ = id => document.getElementById(id);
@@ -134,6 +135,7 @@ const background = await initBackground({ el, message });
 const skills = await initSkills({ el, message });
 const tools = await initTools({ el, message });
 const appearance = await initAppearance({ el, message, show: () => { showSettings(); $('settings-appearance').click(); } });
+const permissions = await initPermissions({ el, message, show: () => { showSettings(); $('settings-permissions').click(); } });
 const delivery = await initDelivery({ el, message, show: () => { showSettings(); $('settings-delivery').click(); },
   editRelease: scope => { showSettings(); $('settings-pipelines').click(); pipelines.chat('Edit ' + scope + ' Release pipeline'); } });
 $('prompt').addEventListener('input', () => { promptRevision++; void privacy.draft($('prompt').value).catch(() => {}); });
@@ -145,6 +147,7 @@ $('composer').addEventListener('submit', event => { event.preventDefault(); cons
   if (privacy.handles(text)) { privacy.chat(text); return; }
   void privacy.draft('', target).catch(() => {});
   if (!connectionCommand(text).connection && appearance.handles(text)) appearance.chat(text);
+  else if (!connectionCommand(text).connection && permissions.handles(text)) permissions.chat(text);
   else if (!connectionCommand(text).connection && delivery.handles(text)) delivery.chat(text);
   else if (!connectionCommand(text).connection && skills.handles(text)) skills.chat(text);
   else if (!connectionCommand(text).connection && tools.handles(text)) tools.chat(text);
@@ -157,7 +160,7 @@ $('composer').addEventListener('submit', event => { event.preventDefault(); cons
   else request({ operation: 'chat', text }, text);
 });
 $('chat-nav').addEventListener('click', () => showSettings(false)); $('settings-nav').addEventListener('click', () => showSettings());
-for (const category of ['connections', 'pipelines', 'agents', 'schedule', 'background', 'skills', 'privacy', 'appearance', 'delivery']) $('settings-' + category).addEventListener('click', () => {
+for (const category of ['connections', 'pipelines', 'agents', 'schedule', 'background', 'skills', 'privacy', 'appearance', 'delivery', 'permissions']) $('settings-' + category).addEventListener('click', () => {
   $('connection-settings').hidden = category !== 'connections'; $('pipeline-settings').hidden = category !== 'pipelines'; $('agent-settings').hidden = category !== 'agents'; $('schedule-settings').hidden = category !== 'schedule';
   $('background-settings').hidden = category !== 'background';
   $('skill-settings').hidden = category !== 'skills';
@@ -165,7 +168,8 @@ for (const category of ['connections', 'pipelines', 'agents', 'schedule', 'backg
   $('privacy-settings').hidden = category !== 'privacy';
   $('appearance-settings').hidden = category !== 'appearance';
   $('delivery-settings').hidden = category !== 'delivery';
-  for (const name of ['connections', 'pipelines', 'agents', 'schedule', 'background', 'skills', 'privacy', 'appearance', 'delivery']) $('settings-' + name).setAttribute('aria-pressed', String(name === category));
+  $('permission-settings').hidden = category !== 'permissions';
+  for (const name of ['connections', 'pipelines', 'agents', 'schedule', 'background', 'skills', 'privacy', 'appearance', 'delivery', 'permissions']) $('settings-' + name).setAttribute('aria-pressed', String(name === category));
 });
 for (const button of document.querySelectorAll('[data-settings]')) button.addEventListener('click', () => showSettings());
 for (const button of document.querySelectorAll('[data-chat]')) button.addEventListener('click', () => request({ operation: 'chat', text: button.dataset.chat }, button.dataset.chat));

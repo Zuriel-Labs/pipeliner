@@ -39,6 +39,27 @@ test('background pause retains ownership, verifies runtime control and preserves
   assert.equal(manager.status().storageAvailable, true); await manager.close(); assert.equal(shutdowns, 1);
 });
 
+test('permission settlement pauses only revoked captured runs and preserves unrelated repository work', async () => {
+  const capabilities = ['workspace.read', 'workspace.write', 'worker.exec'], runs = new Map(['first', 'second'].map(repository => [repository, { id: 'run-' + repository, repository, issue: 7, epoch: 2, policyRevision: 0, control: 'running' }]));
+  const paused = [], suspended = []; let fail = false, revokeSecond = false;
+  const policy = { worker: { read: () => ({ bindings: { capabilities }, values: { ...Object.fromEntries(Object.entries(defaults).map(([id, value]) => [id, { value, configuredValue: value }])),
+    'permissions.grants': { value: capabilities, configuredValue: capabilities }, 'permissions.ceiling': { value: capabilities, configuredValue: capabilities } } }),
+    authority: repository => ({ capabilities: repository === 'first' || revokeSecond ? ['workspace.read', 'worker.exec'] : capabilities, resources: [] }) },
+    runtime: { status: repository => runs.get(repository), requestControl(binding) { const row = [...runs.values()].find(run => run.id === binding.runId); row.control = 'pause-requested'; } } };
+  const manager = createDevelopmentManager({ store: { selected: () => null, workspaces: () => [...runs.keys()].map(id => ({ id })), pending: () => [] }, policy,
+    ledger: { status: id => ({ epoch: [...runs.values()].find(run => run.id === id).epoch }), suspend: binding => suspended.push(binding.runId) }, connections: { developers: () => [] },
+    supervisor: { status: () => null, control(binding) { if (fail && binding.runId === 'run-first') throw Error('private termination failure'); const row = [...runs.values()].find(run => run.id === binding.runId); row.control = 'paused'; paused.push(row.repository); },
+      async settle() {}, async pauseForeground() { for (const run of runs.values()) run.control = 'paused'; }, async shutdown() {} } });
+  try {
+    await manager.permissionsChanged(['first', 'second']); assert.deepEqual(paused, ['first']); assert.deepEqual(suspended, ['run-first']); assert.equal(runs.get('second').control, 'running');
+    await manager.permissionsChanged(['first']); assert.deepEqual(paused, ['first']);
+    runs.get('first').control = 'running'; fail = true; await assert.rejects(manager.permissionsChanged(['first']), /verification/); assert.equal(runs.get('second').control, 'running');
+    assert.equal(runs.get('first').id, 'run-first'); assert.equal(runs.get('first').issue, 7);
+    revokeSecond = true; await assert.rejects(manager.permissionsChanged(['first', 'second']), /verification/); assert.equal(runs.get('second').control, 'paused');
+    await assert.rejects(manager.permissionsChanged(['unknown'])); fail = false; await manager.permissionsChanged(['first']); assert.equal(runs.get('first').control, 'paused');
+  } finally { await manager.close(); }
+});
+
 test('Development preflight rejects incompatible paths before activation and captures qualified schedules and custom tools', async () => {
   for (const failure of ['migration', 'prompt', 'provider', 'method', 'protected', 'base', 'delivery', 'permission', 'schedule-hash', 'schedule-disabled', 'schedule-qualified',
     'tool-qualified', 'tool-denied', 'tool-data', 'tool-missing', 'tool-schema', 'tool-revision', 'tool-mcp', 'skill-missing']) {

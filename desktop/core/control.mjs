@@ -11,6 +11,7 @@ import { toolShapes } from '../tools/commands.mjs';
 import { privacyShapes } from '../privacy/commands.mjs';
 import { appearanceShapes } from '../appearance/commands.mjs';
 import { deliveryShapes } from '../delivery/commands.mjs';
+import { permissionShapes } from '../permissions/commands.mjs';
 
 function trustedContext(event, { contents, url, context }) {
   if (contents.isDestroyed() || event?.sender !== contents || !event.senderFrame || event.senderFrame !== contents.mainFrame
@@ -231,6 +232,17 @@ export function createDeliveryControlChannel(manager, binding) {
     const current = trustedContext(event, binding); canonicalJSON(payload);
     if (payload?.operation === 'status') { record(payload, ['operation']); return manager.status(); }
     const shape = deliveryShapes[payload?.operation]; if (!shape) throw Error('Unknown delivery operation');
+    record(payload, ['operation', 'contextRevision', ...shape[0]], shape[1]);
+    if (!Number.isSafeInteger(payload.contextRevision) || payload.contextRevision !== current.revision) throw Error('Control context changed');
+    const { contextRevision: _revision, ...action } = payload; return manager.dispatch(action);
+  } });
+}
+
+export function createPermissionControlChannel(manager, binding) {
+  return Object.freeze({ dispatch(event, payload) {
+    const current = trustedContext(event, binding); canonicalJSON(payload);
+    if (payload?.operation === 'status') { record(payload, ['operation']); return manager.status(); }
+    const shape = permissionShapes[payload?.operation]; if (!shape) throw Error('Unknown permission operation');
     record(payload, ['operation', 'contextRevision', ...shape[0]], shape[1]);
     if (!Number.isSafeInteger(payload.contextRevision) || payload.contextRevision !== current.revision) throw Error('Control context changed');
     const { contextRevision: _revision, ...action } = payload; return manager.dispatch(action);

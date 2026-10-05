@@ -6,11 +6,12 @@ import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const exec = promisify(execFile), root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const qualificationFlags = ['--qualify', '--qualify-issues', '--qualify-pipelines', '--qualify-development', '--qualify-scheduling', '--qualify-background', '--qualify-skills', '--qualify-tools', '--qualify-privacy', '--qualify-appearance', '--qualify-delivery'];
+const qualificationFlags = ['--qualify', '--qualify-issues', '--qualify-pipelines', '--qualify-development', '--qualify-scheduling', '--qualify-background', '--qualify-skills', '--qualify-tools', '--qualify-privacy', '--qualify-appearance', '--qualify-delivery', '--qualify-permissions'];
 const qualifying = process.argv.some(arg => qualificationFlags.includes(arg));
 if (process.argv.slice(2).some(arg => ![...qualificationFlags, '--retain-owned-capture'].includes(arg))) throw new Error('argument-denied');
 if (process.platform !== 'darwin' || process.arch !== 'arm64') throw new Error('host-unqualified');
 const temporary = await realpath(await mkdtemp(join(tmpdir(), 'pipeliner-app-'))), helper = join(temporary, 'secure-entry');
+const temporaryInfo = await lstat(temporary);
 const calendar = join(temporary, 'calendar');
 let child, timer, privacyExport, privacyExportInfo, code = 1, report = '', errors = 0, delivered = 0;
 try {
@@ -45,7 +46,7 @@ try {
       if (!process.argv.includes('--retain-owned-capture') || !result[available]) continue;
       const source = join(temporary, file), info = await lstat(source);
       if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.uid !== process.getuid() || info.size > 10 * 1024 * 1024) throw new Error('capture-ownership-invalid');
-      const capture = join('/tmp', `pipeliner-${process.argv.includes('--qualify-skills') || process.argv.includes('--qualify-tools') || process.argv.includes('--qualify-privacy') || process.argv.includes('--qualify-appearance') || process.argv.includes('--qualify-delivery') ? 54 : process.argv.includes('--qualify-background') ? 52 : process.argv.includes('--qualify-scheduling') ? 50 : process.argv.includes('--qualify-development') ? 42 : process.argv.includes('--qualify-pipelines') ? 40 : 36}-${child.pid}${suffix}.png`);
+      const capture = join('/tmp', `pipeliner-${process.argv.includes('--qualify-skills') || process.argv.includes('--qualify-tools') || process.argv.includes('--qualify-privacy') || process.argv.includes('--qualify-appearance') || process.argv.includes('--qualify-delivery') || process.argv.includes('--qualify-permissions') ? 54 : process.argv.includes('--qualify-background') ? 52 : process.argv.includes('--qualify-scheduling') ? 50 : process.argv.includes('--qualify-development') ? 42 : process.argv.includes('--qualify-pipelines') ? 40 : 36}-${child.pid}${suffix}.png`);
       await writeFile(capture, await readFile(source), { flag: 'wx', mode: 0o600 }); result[key] = capture;
     }
     console.log(JSON.stringify(result));
@@ -65,7 +66,10 @@ try {
     await rm(privacyExport, { recursive: true }); await access(privacyExport).then(() => { throw new Error('export-fixture-cleanup-unverified'); }, error => { if (error.code !== 'ENOENT') throw error; });
     console.log(JSON.stringify({ cleanup: 'owned-privacy-export-removed', verified: true }));
   }
-  await rm(temporary, { recursive: true, force: true });
-  console.log(JSON.stringify({ cleanup: 'owned-app-root-removed', processesClosed: !child || child.exitCode !== null || child.signalCode !== null }));
+  const info = await lstat(temporary);
+  if (info.dev !== temporaryInfo.dev || info.ino !== temporaryInfo.ino || !info.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid() || await realpath(temporary) !== temporary) throw Error('app-root-cleanup-unverified');
+  await rm(temporary, { recursive: true });
+  await access(temporary).then(() => { throw Error('app-root-cleanup-unverified'); }, error => { if (error.code !== 'ENOENT') throw error; });
+  console.log(JSON.stringify({ cleanup: 'owned-app-root-removed', verified: true, processesClosed: !child || child.exitCode !== null || child.signalCode !== null }));
 }
 process.exitCode = code;

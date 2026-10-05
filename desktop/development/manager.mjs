@@ -362,8 +362,8 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
           if (developmentIssueHash({ number: issue.number, title: issue.title, body: issue.body }) !== captured.issueHash) throw new Error('Development captured Issue changed before resume.');
           await execute(target, next, snapshot, executionProfile(snapshot.files, target), issue, signal);
         });
-      } else { supervisor.control(binding, operation); await supervisor.settle(target.id); ledger.suspend(binding); messages.set(target.id, 'Development ' + operation + ' verified. Work and the repository claim remain preserved.'); }
-    })().catch(error => { errors.set(target.id, safeError(error)); messages.set(target.id, safeError(error)); }).finally(() => { controls.delete(target.id); publish(); });
+      } else { supervisor.control(binding, operation); await supervisor.settle(target.id); ledger.suspend(binding); messages.set(target.id, 'Development ' + operation + ' verified. Work and the repository claim remain preserved.'); return true; }
+    })().catch(error => { errors.set(target.id, safeError(error)); messages.set(target.id, safeError(error)); return false; }).finally(() => { controls.delete(target.id); publish(); });
     controls.set(target.id, work); publish(); return { accepted: true, snapshot: status() };
   }
   async function inspectIntegration(action) {
@@ -531,6 +531,23 @@ export function createDevelopmentManager({ store, policy, ledger, connections, s
     return control(target, payload.operation);
   }
   return Object.freeze({ status, dispatch, observe, inspectIntegration, inspectContinuity,
+    async permissionsChanged(repositories) {
+      if (closed || closing || !policy || !store || !Array.isArray(repositories) || new Set(repositories).size !== repositories.length) throw Error('Development permission verification unavailable.');
+      const targets = repositories.map(workspace); let failed = false;
+      for (const target of targets) {
+        try {
+          if (controls.has(target.id)) await controls.get(target.id);
+          const run = policy.runtime.status(target.id);
+          if (!run) { const task = tasks.get(target.id); if (task) { task.controller.abort(); await task.done; } continue; }
+          if (['paused', 'stopped'].includes(run.control)) continue;
+          const captured = policy.worker.read(target.id, run.policyRevision), grant = policy.worker.authority(target.id, run.policyRevision);
+          const rights = captured.values['permissions.grants'].configuredValue.filter(capability => captured.values['permissions.ceiling'].configuredValue.includes(capability) && captured.bindings.capabilities.includes(capability));
+          if (rights.every(capability => grant.capabilities.includes(capability)) && captured.values['permissions.resources'].configuredValue.every(ref => grant.resources.includes(ref))) continue;
+          control(target, 'pause'); if (await controls.get(target.id) !== true || policy.runtime.status(target.id)?.control !== 'paused') throw Error('Development permission termination verification pending.');
+        } catch { failed = true; } // Attempt every affected repository; one uncertain pause cannot leave later revoked work running.
+      }
+      if (failed) throw Error('Development permission termination verification pending.');
+    },
     availability(repository) {
       const target = workspace(repository), view = policy.worker.read(target.id), grant = policy.worker.authority(target.id, view.revision), dev = connections.developers().find(value => value.id === grant.dev);
       return { run: policy.runtime.status(target.id), busy: tasks.has(target.id) || controls.has(target.id), qualified: Boolean(supervisor && dev && grant.bundledSkills && grant.connections.includes('github') && grant.connections.includes(dev.connection)

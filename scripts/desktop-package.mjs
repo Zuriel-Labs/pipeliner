@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { mkdtemp, realpath, mkdir, readFile, writeFile, readdir, lstat, rm, rename, access, statfs } from 'node:fs/promises';
 import { join, dirname, resolve, isAbsolute } from 'node:path';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { runtimeInputs, readPackageInput } from '../desktop/package/inputs.mjs';
 import { sourceCandidate, committedInput } from '../desktop/package/source.mjs';
@@ -20,6 +20,7 @@ const candidate=await sourceCandidate(source);
 const temporary=await realpath(await mkdtemp(join(tmpdir(),'pipeliner-54-review-build-')));
 const stage=join(temporary,'stage'), distribution=join(temporary,'distribution'), app=join(distribution,'Pipeliner.app');
 const env={PATH:dirname(process.execPath)+':/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',HOME:temporary,TMPDIR:temporary,LANG:'en_US.UTF-8'};
+const signingEnv={...env,HOME:homedir()};
 const command=(file,args,options={})=>exec(file,args,{env,timeout:60000,maxBuffer:1024*1024,...options});
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
 async function fileHash(path){const value=createHash('sha256');for await(const bytes of createReadStream(path))value.update(bytes);return value.digest('hex');}
@@ -35,6 +36,10 @@ const codex={version:'0.160.0',bytes:95893648,sha256:'07c3c7ca376a8f791115342f53
 let retained=false;
 try {
   const capacity=await statfs(temporary);if(capacity.bavail*capacity.bsize<4*1024**3)throw new Error('package-capacity-unavailable');
+  const identities=(await command('/usr/bin/security',['find-identity','-v','-p','codesigning'],{env:signingEnv})).stdout;
+  const available=[...identities.matchAll(/\d+\) ([A-F0-9]{40}) "Apple Development:[^"]+"/g)];
+  if(available.length!==1)throw new Error('package-local-signing-identity-unavailable');
+  const signingIdentity=available[0][1];
   await mkdir(stage,{mode:0o700});await mkdir(distribution,{mode:0o700});
   for(const file of runtimeInputs(candidate.files))await stageSource(file);
   for(const file of ['package.json','package-lock.json'])await stageSource(file);
@@ -103,13 +108,9 @@ try {
   await writeFile(join(resources,'Codex-LICENSE'),await readFile(license),{flag:'wx',mode:0o600});
   // An existing Apple Development identity qualifies only this host's local review.
   // Keep hardened runtime and library validation; distribution still requires Developer ID/notarization.
-  const identities=(await command('/usr/bin/security',['find-identity','-v','-p','codesigning'])).stdout;
-  const available=[...identities.matchAll(/\d+\) ([A-F0-9]{40}) "Apple Development:[^"]+"/g)];
-  if(available.length!==1)throw new Error('package-local-signing-identity-unavailable');
-  const signingIdentity=available[0][1];
   const entitlements=join(temporary,'electron-entitlements.plist');
   await writeFile(entitlements,'<?xml version="1.0"?><plist version="1.0"><dict><key>com.apple.security.cs.allow-jit</key><true/></dict></plist>');
-  const sign=async(path,jit=false)=>command('/usr/bin/codesign',['--force','--sign',signingIdentity,'--options','runtime','--timestamp=none',...(jit?['--entitlements',entitlements]:[]),path]);
+  const sign=async(path,jit=false)=>command('/usr/bin/codesign',['--force','--sign',signingIdentity,'--options','runtime','--timestamp=none',...(jit?['--entitlements',entitlements]:[]),path],{env:signingEnv});
   const frameworkRoot=join(contents,'Frameworks');
   async function nativeBinaries(directory){
     for(const name of await readdir(directory)){const path=join(directory,name),info=await lstat(path);if(info.isSymbolicLink())continue;

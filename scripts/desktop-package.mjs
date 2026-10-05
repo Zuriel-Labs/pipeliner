@@ -8,6 +8,7 @@ import { tmpdir, homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { runtimeInputs, readPackageInput } from '../desktop/package/inputs.mjs';
 import { sourceCandidate, committedInput } from '../desktop/package/source.mjs';
+import { embedIntegrityDigest } from '../desktop/package/integrity.mjs';
 import { backgroundPlist, backgroundBundleId } from '../desktop/background/native.mjs';
 import { createPackageWithOptions, getRawHeader, extractFile, listPackage, statFile } from '../desktop/package/node_modules/@electron/asar/lib/asar.js';
 import { flipFuses, getCurrentFuseWire, FuseVersion } from '../desktop/package/node_modules/@electron/fuses/dist/index.js';
@@ -82,11 +83,20 @@ try {
   const set=async(key,value)=>command('/usr/libexec/PlistBuddy',['-c','Set :'+key+' '+value,plist]);
   await set('CFBundleIdentifier',backgroundBundleId);await set('CFBundleName','Pipeliner');await set('CFBundleDisplayName','Pipeliner');await set('CFBundleExecutable','Pipeliner');await set('CFBundleVersion','0.1.0');await set('CFBundleShortVersionString','0.1.0');
   await rename(join(contents,'MacOS/Electron'),join(contents,'MacOS/Pipeliner'));
+  for(const suffix of ['',' (GPU)',' (Plugin)',' (Renderer)']){
+    const oldName='Electron Helper'+suffix,newName='Pipeliner Helper'+suffix,bundle=join(contents,'Frameworks',oldName+'.app'),helperPlist=join(bundle,'Contents/Info.plist');
+    const existing=JSON.parse((await command('/usr/bin/plutil',['-convert','json','-o','-',helperPlist])).stdout);
+    for(const [key,value] of Object.entries({CFBundleName:newName,CFBundleDisplayName:newName,CFBundleExecutable:newName,CFBundleIdentifier:backgroundBundleId+'.helper',CFBundleVersion:'0.1.0',CFBundleShortVersionString:'0.1.0'}))await command('/usr/libexec/PlistBuddy',['-c',(Object.hasOwn(existing,key)?'Set :'+key+' ':'Add :'+key+' string ')+value,helperPlist]);
+    await rename(join(bundle,'Contents/MacOS',oldName),join(bundle,'Contents/MacOS',newName));await rename(bundle,join(contents,'Frameworks',newName+'.app'));
+  }
   for(const key of ['NSCameraUsageDescription','NSMicrophoneUsageDescription','NSAudioCaptureUsageDescription','NSBluetoothPeripheralUsageDescription','NSBluetoothAlwaysUsageDescription','NSAppTransportSecurity','ElectronAsarIntegrity'])await command('/usr/libexec/PlistBuddy',['-c','Delete :'+key,plist]);
   for(const instruction of ['Add :ElectronAsarIntegrity dict','Add :ElectronAsarIntegrity:Resources/app.asar dict','Add :ElectronAsarIntegrity:Resources/app.asar:algorithm string SHA256','Add :ElectronAsarIntegrity:Resources/app.asar:hash string '+headerSha256])await command('/usr/libexec/PlistBuddy',['-c',instruction,plist]);
-  const fuseSettings=[false,true,false,false,true,true,true,false,true];
+  const fuseSettings=[false,true,false,false,true,true,false,false,true];
   await flipFuses(app,{version:FuseVersion.V1,strictlyRequireAllFuses:true,...Object.fromEntries(fuseSettings.map((v,i)=>[i,v]))});
   const fuses=await getCurrentFuseWire(app);if(fuses.version!=='1'||fuseSettings.some((v,i)=>fuses[i]!==(v?49:48))||Object.keys(fuses).length!==10)throw new Error('package-fuse-readback-failed');
+  const frameworkBinary=join(contents,'Frameworks/Electron Framework.framework/Versions/A/Electron Framework');
+  const beforeIntegrity=await readFile(frameworkBinary),afterIntegrity=embedIntegrityDigest(beforeIntegrity,headerSha256);
+  await writeFile(frameworkBinary,afterIntegrity);if(!(await readFile(frameworkBinary)).equals(afterIntegrity))throw new Error('package-integrity-readback-failed');
   const nativeRoot=join(temporary,'native');await mkdir(nativeRoot,{mode:0o700});
   const nativeInputs={};
   for(const file of ['desktop/connections/secure-entry.m','desktop/scheduling/calendar.m','desktop/github/git-credential.c','desktop/background/bootstrap.m']){
@@ -121,6 +131,10 @@ try {
   for(const name of ['secure-entry','calendar','git-credential'])await sign(join(helpers,name));await sign(join(service,'PipelinerBackground'));
   await sign(app,true);await command('/usr/bin/codesign',['--verify','--deep','--strict',app]);
   await command('/usr/bin/codesign',['--verify','--deep','--strict','-R','=anchor apple generic and identifier "'+backgroundBundleId+'"',app]);
+  for(const option of ['--qualify','--data-directory=/synthetic-denied','--key-helper=/synthetic-denied','--calendar-helper=/synthetic-denied']){
+    try{await command(join(contents,'MacOS/Pipeliner'),[option],{timeout:10000,maxBuffer:8192});throw new Error('package-startup-guard-failed');}
+    catch(error){if(error.code!==2||error.stdout||!error.stderr?.includes('Pipeliner rejected an unsupported packaged startup option.'))throw new Error('package-startup-guard-failed');}
+  }
   const current=await sourceCandidate(source);if(current.sourceCommit!==candidate.sourceCommit||current.gitTree!==candidate.gitTree)throw new Error('package-source-changed');
   const dmg=join(temporary,'Pipeliner-0.1.0-mac-arm64-review.dmg');
   await command('/usr/bin/hdiutil',['create','-volname','Pipeliner Review','-srcfolder',distribution,'-format','UDZO','-ov',dmg],{timeout:180000});

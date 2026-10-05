@@ -6,8 +6,9 @@ export { packagedCodexPath } from '../codex/executable.mjs';
 // Fixed reviewed runtime inputs. Repository docs, tests, launchers and home skills are never selected.
 const paths = [
   'LICENSE', ...['project','config','qa','showcase','release-cycle','cleanup'].map(n=>'scripts/lib/'+n+'.mjs'), 'desktop/authority/Dockerfile', 'desktop/prototype/style.css',
-  ...['main.cjs','preload.cjs','index.html','app.css','app.mjs','appearance.mjs','background.mjs','development.mjs','issues.mjs','pipelines.mjs','scheduling.mjs','skills.mjs','tools.mjs','privacy.mjs','workspaces.mjs'].map(n=>'desktop/app/'+n),
+  ...['main.cjs','preload.cjs','index.html','app.css','app.mjs','appearance.mjs','delivery.mjs','background.mjs','development.mjs','issues.mjs','pipelines.mjs','scheduling.mjs','skills.mjs','tools.mjs','privacy.mjs','workspaces.mjs'].map(n=>'desktop/app/'+n),
   ...['commands.mjs','manager.mjs'].map(n=>'desktop/appearance/'+n),
+  ...['commands.mjs','manager.mjs','mac.mjs'].map(n=>'desktop/delivery/'+n),
   ...['commands.mjs','host.mjs','manager.mjs','native.mjs'].map(n=>'desktop/background/'+n),
   ...['commands.mjs','github.mjs','manager.mjs','native-entry.mjs','providers.mjs','vault.mjs'].map(n=>'desktop/connections/'+n),
   ...['control.mjs','execution.mjs','identity.mjs','policy.mjs','reliability.mjs','runtime.mjs','settings.mjs','storage.mjs','worker.mjs'].map(n=>'desktop/core/'+n),

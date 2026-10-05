@@ -11,10 +11,11 @@ import {openPrivacyStore} from './store.mjs';
 const protection={available:async()=>true,encrypt:async text=>Buffer.from(text.split('').reverse().join('')),decrypt:async bytes=>({result:bytes.toString().split('').reverse().join(''),shouldReEncrypt:false})};
 async function fixture(options={}){
   const root=realpathSync(mkdtempSync(join(tmpdir(),'pipeliner-privacy-test-')));let vault,store;
+  const {wrapVault,...controls}=options;
   function close(){try{store?.close();}finally{try{vault?.close();}finally{rmSync(root,{recursive:true});assert.equal(existsSync(root),false);}}}
-  try{vault=await openVault(root,protection);store=openPrivacyStore(root,{vault,...options});}
+  try{vault=await openVault(root,protection);store=openPrivacyStore(root,{vault:wrapVault?wrapVault(vault):vault,...controls});}
   catch(error){close();throw error;}
-  return {root,vault,get store(){return store;},reopen(){store.close();store=openPrivacyStore(root,{vault,...options});},close};
+  return {root,vault,get store(){return store;},reopen(){store.close();store=openPrivacyStore(root,{vault:wrapVault?wrapVault(vault):vault,...controls});},close};
 }
 const day=86400000;
 test('private payloads persist encrypted, scope reads and reject substituted metadata/ciphertext',async()=>{
@@ -124,5 +125,37 @@ test('read pages bound total bytes and resume without skipping large payloads',a
     const page=f.store.list('first','conversation',{limit:100});assert.equal(page.length,4);
     const next=f.store.list('first','conversation',{limit:100,before:page.at(-1).id});assert.equal(next.length,1);
     assert.equal(new Set([...page,...next].map(row=>row.value.index)).size,5);
+  }finally{f.close();}
+});
+test('conversation receipts apply once and encrypted scoped drafts never become authority or log history',async()=>{
+  const f=await fixture({clock:()=>1000});
+  try{
+    const input={id:'receipt-one',repository:'first',category:'conversation',runId:'messages',value:{role:'pm',text:'show privacy'},completedAt:1000};
+    assert.equal(f.store.append(input).applied,true);assert.equal(f.store.append(input).applied,false);
+    assert.throws(()=>f.store.append({...input,repository:'second'}),/Privacy record conflict/);
+    f.store.saveDraft('first','unfinished private draft');f.store.saveDraft('second','other draft');f.reopen();
+    assert.equal(f.store.draft('first'),'unfinished private draft');assert.equal(f.store.draft('second'),'other draft');
+    assert.equal(f.store.list('first','conversation',{runId:'messages'}).length,1);
+    assert.equal(readFileSync(join(f.root,'privacy.sqlite')).includes('unfinished private draft'),false);
+    f.store.saveDraft('first','');assert.equal(f.store.draft('first'),'');assert.equal(f.store.draft('second'),'other draft');
+    assert.equal(f.store.list('first','conversation',{runId:'messages'})[0].value.role,'pm');assert.equal(f.store.apply,undefined);
+  }finally{f.close();}
+});
+test('deletion and its minimal encrypted receipt commit together or preserve the original records',async()=>{
+  let failReceipt=true;
+  const f=await fixture({clock:()=>1000,wrapVault:vault=>({openPayload:(...args)=>vault.openPayload(...args),sealPayload:(binding,...args)=>{
+    if(failReceipt&&binding.id.startsWith('delete-'))throw new Error('synthetic receipt failure');return vault.sealPayload(binding,...args);
+  }})});
+  try{
+    f.store.append({repository:'first',category:'conversation',value:'private conversation'});
+    f.store.append({repository:'second',category:'audit',value:'other repository'});
+    const before=f.store.inventory(),preview=f.store.previewDeletion('first',['conversation']);
+    assert.throws(()=>f.store.delete(preview),/synthetic receipt failure/);assert.deepEqual(f.store.inventory(),before);
+    assert.equal(f.store.list('first','conversation')[0].value,'private conversation');
+    failReceipt=false;assert.equal(f.store.delete(preview).deleted,1);assert.equal(f.store.list('first','conversation').length,0);
+    const receipt=f.store.list(null,'audit')[0];assert.equal(receipt.value.operation,'delete');assert.equal(receipt.value.deleted,1);
+    assert.equal(JSON.stringify(receipt.value).includes('first'),false);assert.equal(JSON.stringify(receipt.value).includes('private conversation'),false);
+    assert.equal(f.store.list('second','audit')[0].value,'other repository');
+    assert.equal(readFileSync(join(f.root,'privacy.sqlite')).includes('private conversation'),false);
   }finally{f.close();}
 });

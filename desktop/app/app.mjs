@@ -7,14 +7,16 @@ import { initScheduling } from './scheduling.mjs';
 import { initBackground } from './background.mjs';
 import { initSkills } from './skills.mjs';
 import { initTools } from './tools.mjs';
+import { initPrivacy } from './privacy.mjs';
 
 let state = null, returnFocus = null; const drafts = new Map(), previousBusy = new Set();
 const $ = id => document.getElementById(id);
-let currentContext = null; const conversations = new Map();
+let currentContext = null, privacy, promptRevision = 0; const conversations = new Map();
 function setContext(target, label) {
   if (target === currentContext) return;
   conversations.set(currentContext, { nodes: [...$('transcript').childNodes], prompt: $('prompt').value }); currentContext = target;
   const saved = conversations.get(target); $('transcript').replaceChildren(...(saved?.nodes ?? [])); $('prompt').value = saved?.prompt ?? '';
+  promptRevision++; privacy?.context();
   $('chat-title').textContent = label ? label : 'Start with a conversation.';
   $('chat-scope').textContent = label ? 'This conversation and Issue controls apply to this repository. Connections remain installation settings.' : 'Connect your accounts here. Keys and sign-in stay in protected surfaces.';
   if (!saved) message(label ? 'Repository selected. Ask to show Issues, draft an Issue or mark a specific Issue Ready.' : 'Connect your accounts or import a project.');
@@ -26,12 +28,15 @@ function showSettings(show = true) {
   $('chat-view').hidden = show; $('settings-view').hidden = !show; $('workspace-view').hidden = true; $('issues-view').hidden = true;
   for (const [id, active] of [['chat-nav', !show], ['settings-nav', show], ['repositories-nav', false], ['issues-nav', false]]) { $(id).classList.toggle('current', active); if (active) $(id).setAttribute('aria-current', 'page'); else $(id).removeAttribute('aria-current'); }
 }
-function message(text, pm = false, target = currentContext) {
+function message(text, pm = false, target = currentContext, persist = true, receipt = crypto.randomUUID()) {
   const article = document.createElement('article'); article.className = `message ${pm ? 'pm' : 'assistant'}`;
+  article.dataset.receipt = receipt;
   const label = document.createElement('span'); label.className = 'message-label'; label.textContent = pm ? 'You' : 'Pipeliner';
   const content = document.createElement('p'); content.textContent = text; article.append(label, content);
   if (target === currentContext) { $('transcript').append(article); article.scrollIntoView({ block: 'nearest' }); }
   else { const saved = conversations.get(target) ?? { nodes: [], prompt: '' }; saved.nodes.push(article); conversations.set(target, saved); }
+  if (persist) privacy?.record(text, pm, target, receipt, content);
+  return article;
 }
 function el(tag, text, className) { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (className) node.className = className; return node; }
 function render(snapshot) {
@@ -100,6 +105,18 @@ async function request(payload, text) {
   if (!$('chat-view').hidden) $('prompt').focus();
   else if (returnFocus && $(returnFocus) && !$(returnFocus).disabled) { $(returnFocus).focus(); returnFocus = null; }
 }
+privacy = await initPrivacy({ el, message, context: () => currentContext, composer: () => ({ value: $('prompt').value, revision: promptRevision }),
+  show: () => { showSettings(); $('settings-privacy').click(); }, history: page => {
+    if (page.repository !== currentContext) return;
+    const before = page.replace ? [] : [...$('transcript').childNodes], known = new Set(before.map(node => node.dataset?.receipt));
+    const nodes = [];
+    for (const row of page.messages) {
+      if (known.has(row.id) || !['pm', 'app'].includes(row.value?.role) || typeof row.value.text !== 'string') continue;
+      nodes.push(message(row.value.text, row.value.role === 'pm', currentContext, false, row.id));
+    }
+    $('transcript').replaceChildren(...nodes, ...before);
+    if (!page.older && promptRevision === page.edit && (page.replace || !$('prompt').value)) $('prompt').value = page.draft;
+  } });
 const workspaces = await initWorkspaces({ el, message, show: () => {
   $('chat-view').hidden = true; $('settings-view').hidden = true; $('workspace-view').hidden = false; $('issues-view').hidden = true;
   for (const id of ['chat-nav', 'settings-nav', 'repositories-nav', 'issues-nav']) { $(id).classList.toggle('current', id === 'repositories-nav'); if (id === 'repositories-nav') $(id).setAttribute('aria-current', 'page'); else $(id).removeAttribute('aria-current'); }
@@ -114,10 +131,14 @@ const scheduling = await initScheduling({ el, message });
 const background = await initBackground({ el, message });
 const skills = await initSkills({ el, message });
 const tools = await initTools({ el, message });
+$('prompt').addEventListener('input', () => { promptRevision++; void privacy.draft($('prompt').value).catch(() => {}); });
 $('composer').addEventListener('submit', event => { event.preventDefault(); const text = $('prompt').value.trim(); if (!text) return;
-  if (containsSecret(text) && !(skills.handles(text) && skills.safe(text)) && !(tools.handles(text) && tools.safe(text))) { $('prompt').value = ''; message('Use the protected connection surface for keys. Nothing was saved or sent.'); $('prompt').focus(); return; }
+  if (containsSecret(text) && !(skills.handles(text) && skills.safe(text)) && !(tools.handles(text) && tools.safe(text))) { $('prompt').value = ''; promptRevision++; void privacy.draft('').catch(() => {}); message('Use the protected connection surface for keys. Nothing was sent; protected-looking text was not saved.'); $('prompt').focus(); return; }
+  const target = currentContext;
   // Consume only the submitted text before IPC. A later reply must preserve a new draft.
-  $('prompt').value = '';
+  $('prompt').value = ''; promptRevision++;
+  if (privacy.handles(text)) { privacy.chat(text); return; }
+  void privacy.draft('', target).catch(() => {});
   if (!connectionCommand(text).connection && skills.handles(text)) skills.chat(text);
   else if (!connectionCommand(text).connection && tools.handles(text)) tools.chat(text);
   else if (!connectionCommand(text).connection && background.handles(text)) background.chat(text);
@@ -129,12 +150,13 @@ $('composer').addEventListener('submit', event => { event.preventDefault(); cons
   else request({ operation: 'chat', text }, text);
 });
 $('chat-nav').addEventListener('click', () => showSettings(false)); $('settings-nav').addEventListener('click', () => showSettings());
-for (const category of ['connections', 'pipelines', 'agents', 'schedule', 'background', 'skills']) $('settings-' + category).addEventListener('click', () => {
+for (const category of ['connections', 'pipelines', 'agents', 'schedule', 'background', 'skills', 'privacy']) $('settings-' + category).addEventListener('click', () => {
   $('connection-settings').hidden = category !== 'connections'; $('pipeline-settings').hidden = category !== 'pipelines'; $('agent-settings').hidden = category !== 'agents'; $('schedule-settings').hidden = category !== 'schedule';
   $('background-settings').hidden = category !== 'background';
   $('skill-settings').hidden = category !== 'skills';
   $('tool-settings').hidden = category !== 'skills';
-  for (const name of ['connections', 'pipelines', 'agents', 'schedule', 'background', 'skills']) $('settings-' + name).setAttribute('aria-pressed', String(name === category));
+  $('privacy-settings').hidden = category !== 'privacy';
+  for (const name of ['connections', 'pipelines', 'agents', 'schedule', 'background', 'skills', 'privacy']) $('settings-' + name).setAttribute('aria-pressed', String(name === category));
 });
 for (const button of document.querySelectorAll('[data-settings]')) button.addEventListener('click', () => showSettings());
 for (const button of document.querySelectorAll('[data-chat]')) button.addEventListener('click', () => request({ operation: 'chat', text: button.dataset.chat }, button.dataset.chat));

@@ -6,7 +6,7 @@ export { packagedCodexPath } from '../codex/executable.mjs';
 // Fixed reviewed runtime inputs. Repository docs, tests, launchers and home skills are never selected.
 const paths = [
   'LICENSE', ...['project','config','qa','showcase','release-cycle','cleanup'].map(n=>'scripts/lib/'+n+'.mjs'), 'desktop/authority/Dockerfile', 'desktop/prototype/style.css',
-  ...['main.cjs','preload.cjs','index.html','app.css','app.mjs','background.mjs','development.mjs','issues.mjs','pipelines.mjs','scheduling.mjs','skills.mjs','tools.mjs','workspaces.mjs'].map(n=>'desktop/app/'+n),
+  ...['main.cjs','preload.cjs','index.html','app.css','app.mjs','background.mjs','development.mjs','issues.mjs','pipelines.mjs','scheduling.mjs','skills.mjs','tools.mjs','privacy.mjs','workspaces.mjs'].map(n=>'desktop/app/'+n),
   ...['commands.mjs','host.mjs','manager.mjs','native.mjs'].map(n=>'desktop/background/'+n),
   ...['commands.mjs','github.mjs','manager.mjs','native-entry.mjs','providers.mjs','vault.mjs'].map(n=>'desktop/connections/'+n),
   ...['control.mjs','execution.mjs','identity.mjs','policy.mjs','reliability.mjs','runtime.mjs','settings.mjs','storage.mjs','worker.mjs'].map(n=>'desktop/core/'+n),
@@ -14,6 +14,7 @@ const paths = [
   ...['device.mjs','repository-git.mjs','operations.mjs','transport.mjs'].map(n=>'desktop/github/'+n),
   ...['commands.mjs','github.mjs','manager.mjs','model.mjs'].map(n=>'desktop/issues/'+n),
   ...['commands.mjs','manager.mjs','model.mjs'].map(n=>'desktop/pipelines/'+n),
+  ...['commands.mjs','files.mjs','manager.mjs','model.mjs','store.mjs'].map(n=>'desktop/privacy/'+n),
   ...['commands.mjs','github.mjs','local.mjs','manager.mjs','store.mjs'].map(n=>'desktop/repositories/'+n),
   ...['calendar.mjs','commands.mjs','manager.mjs','model.mjs','read-cache.mjs','scheduler.mjs'].map(n=>'desktop/scheduling/'+n),
   ...['commands.mjs','manager.mjs','package.mjs','source.mjs','store.mjs'].map(n=>'desktop/skills/'+n),

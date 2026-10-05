@@ -81,6 +81,10 @@ export function openPrivacyStore(directory, { vault, clock = Date.now, limits = 
       } catch (error) { db.exec('ROLLBACK'); throw error; }
     }
     function remove(ids) { for (const id of ids) db.prepare('DELETE FROM privacy_records WHERE id=?').run(id); }
+    function encrypt(row, value) {
+      const plain = Buffer.from(canonicalJSON({ metadata: metadata(row), value }));
+      try { return vault.sealPayload(binding(row), plain); } finally { plain.fill(0); }
+    }
     function rotate(row, runLimit, totalLimit) {
       const bytes = query => db.prepare(query).get().n;
       const runBytes = () => db.prepare("SELECT COALESCE(SUM(length(payload)),0) AS n FROM privacy_records WHERE category='log' AND repository IS ? AND run_id IS ?").get(row.repository, row.run_id).n;
@@ -102,29 +106,38 @@ export function openPrivacyStore(directory, { vault, clock = Date.now, limits = 
       reclaim("SELECT * FROM privacy_records WHERE category='log' AND id!=? ORDER BY created_at,id", [row.id], () => totalBytes() > totalLimit);
     }
     function append(input) {
-      canonicalJSON(input); record(input, ['repository', 'category', 'value'], ['runId', 'completedAt']);
+      canonicalJSON(input); record(input, ['repository', 'category', 'value'], ['id', 'runId', 'completedAt']);
       if (!repository(input.repository) || !categories.includes(input.category) || input.runId !== undefined && !identifier(input.runId)
-        || input.category === 'log' && !identifier(input.runId) || input.completedAt !== undefined && !timestamp(input.completedAt)) throw new Error('Privacy record invalid');
+        || input.id !== undefined && !identifier(input.id) || input.category === 'log' && !identifier(input.runId)
+        || input.completedAt !== undefined && !timestamp(input.completedAt)) throw new Error('Privacy record invalid');
       return transaction(time => {
         if (input.completedAt > time) throw new Error('Privacy completion time invalid');
-        const row = { id: randomUUID(), repository: input.repository, category: input.category, run_id: input.runId ?? null,
+        const previous = input.id === undefined ? null : db.prepare('SELECT * FROM privacy_records WHERE id=?').get(input.id);
+        if (previous) {
+          const value = decode(previous);
+          if (previous.repository !== input.repository || previous.category !== input.category || previous.run_id !== (input.runId ?? null)
+            || previous.completed_at !== (input.completedAt ?? null) || canonicalJSON(value) !== canonicalJSON(input.value)) throw new Error('Privacy record conflict');
+          return { changed: false, value: { id: previous.id, applied: false } };
+        }
+        const row = { id: input.id ?? randomUUID(), repository: input.repository, category: input.category, run_id: input.runId ?? null,
           created_at: time, completed_at: input.completedAt ?? null };
-        const plain = Buffer.from(canonicalJSON({ metadata: metadata(row), value: input.value }));
-        try { row.payload = vault.sealPayload(binding(row), plain); } finally { plain.fill(0); }
+        row.payload = encrypt(row, input.value);
         db.prepare('INSERT INTO privacy_records VALUES(?,?,?,?,?,?,?)').run(row.id, row.repository, row.category, row.run_id, time, row.completed_at, row.payload);
         if (row.category === 'log') rotate(row, configured(row.repository).runLogBytes, configured(null).totalLogBytes);
-        return { changed: true, value: { id: row.id } };
+        return { changed: true, value: { id: row.id, applied: true } };
       });
     }
     function list(target, category, options = {}) {
       ready(); if (!repository(target) || !categories.includes(category)) throw new Error('Privacy scope invalid');
-      canonicalJSON(options); record(options, [], ['limit', 'before']); const { limit = 50, before = null } = options;
-      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || before !== null && !identifier(before)) throw new Error('Privacy page invalid');
-      const cursor = before === null ? null : db.prepare('SELECT * FROM privacy_records WHERE id=? AND repository IS ? AND category=?').get(before, target, category);
+      canonicalJSON(options); record(options, [], ['limit', 'before', 'runId']); const { limit = 50, before = null, runId } = options;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || before !== null && !identifier(before)
+        || runId !== undefined && runId !== null && !identifier(runId)) throw new Error('Privacy page invalid');
+      const filter = 'repository IS ? AND category=?' + (runId === undefined ? '' : ' AND run_id IS ?'), parameters = [target, category, ...(runId === undefined ? [] : [runId])];
+      const cursor = before === null ? null : db.prepare('SELECT * FROM privacy_records WHERE id=? AND ' + filter).get(before, ...parameters);
       if (before !== null && !cursor) throw new Error('Privacy page changed');
       if (cursor) decode(cursor);
-      const rows = cursor ? db.prepare('SELECT * FROM privacy_records WHERE repository IS ? AND category=? AND (created_at<? OR (created_at=? AND id<?)) ORDER BY created_at DESC,id DESC LIMIT ?')
-        .iterate(target, category, cursor.created_at, cursor.created_at, cursor.id, limit) : db.prepare('SELECT * FROM privacy_records WHERE repository IS ? AND category=? ORDER BY created_at DESC,id DESC LIMIT ?').iterate(target, category, limit);
+      const rows = cursor ? db.prepare('SELECT * FROM privacy_records WHERE ' + filter + ' AND (created_at<? OR (created_at=? AND id<?)) ORDER BY created_at DESC,id DESC LIMIT ?')
+        .iterate(...parameters, cursor.created_at, cursor.created_at, cursor.id, limit) : db.prepare('SELECT * FROM privacy_records WHERE ' + filter + ' ORDER BY created_at DESC,id DESC LIMIT ?').iterate(...parameters, limit);
       const page = []; let bytes = 0;
       for (const row of rows) {
         if (page.length && bytes + row.payload.length > 2 * 1024 ** 2) break;
@@ -165,10 +178,16 @@ export function openPrivacyStore(directory, { vault, clock = Date.now, limits = 
       if (!saved || canonicalJSON(preview) !== saved.preview) throw new Error('Privacy preview changed');
       if (now() > saved.expires) throw new Error('Privacy preview expired');
       if (saved.applied) return { applied: false, deleted: 0 };
-      const result = transaction(() => {
+      const result = transaction(time => {
         const snapshot = selection(preview.repository, preview.categories, preview.after, preview.limit);
         if (state().revision !== preview.revision || snapshot.digest !== preview.digest || snapshot.next !== preview.next || snapshot.more !== preview.more) throw new Error('Privacy preview changed');
         remove(saved.selected);
+        if (saved.selected.length) {
+          const receipt = { id: 'delete-' + preview.id, repository: null, category: 'audit', run_id: 'privacy-receipt', created_at: time, completed_at: time };
+          const payload = encrypt(receipt, { operation: 'delete', repositoryDigest: hash(canonicalJSON(preview.repository)), categories: preview.categories,
+            deleted: saved.selected.length, retainedRecovery: preview.retainedRecovery });
+          db.prepare('INSERT INTO privacy_records VALUES(?,?,?,?,?,?,?)').run(receipt.id, null, receipt.category, receipt.run_id, time, time, payload);
+        }
         return { changed: saved.selected.length > 0, value: { applied: true, deleted: saved.selected.length } };
       });
       saved.applied = true;
@@ -195,7 +214,31 @@ export function openPrivacyStore(directory, { vault, clock = Date.now, limits = 
       const current = state();
       return { revision: current.revision, categories: db.prepare('SELECT repository,category,COUNT(*) AS count,SUM(length(payload)) AS bytes FROM privacy_records GROUP BY repository,category ORDER BY repository,category').all() };
     }
-    return Object.freeze({ append, list, inventory, expire, previewDeletion, delete: deleteRecords,
+    const draftId = target => 'draft-' + hash(canonicalJSON(target));
+    function draft(target) {
+      ready(); if (!repository(target)) throw new Error('Privacy scope invalid');
+      const row = db.prepare('SELECT * FROM privacy_records WHERE id=?').get(draftId(target));
+      if (!row) return '';
+      const value = decode(row);
+      if (row.repository !== target || row.category !== 'conversation' || row.run_id !== 'draft' || row.completed_at !== null
+        || typeof value !== 'string' || value.length > 16000) throw new Error('protected-payload-invalid');
+      return value;
+    }
+    function saveDraft(target, text) {
+      if (!repository(target) || typeof text !== 'string' || text.length > 16000) throw new Error('Privacy draft invalid');
+      return transaction(time => {
+        const before = draft(target); if (before === text) return { changed: false, value: { applied: false } };
+        const row = { id: draftId(target), repository: target, category: 'conversation', run_id: 'draft', created_at: time, completed_at: null };
+        if (!text) remove([row.id]);
+        else {
+          row.payload = encrypt(row, text);
+          db.prepare('INSERT INTO privacy_records VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET created_at=excluded.created_at,payload=excluded.payload')
+            .run(row.id, target, row.category, row.run_id, time, null, row.payload);
+        }
+        return { changed: true, value: { applied: true } };
+      });
+    }
+    return Object.freeze({ append, list, inventory, expire, previewDeletion, delete: deleteRecords, draft, saveDraft,
       close() { if (!closed) { closed = true; previews.clear(); db.close(); } } });
   } catch (error) { db.close(); throw error; }
 }

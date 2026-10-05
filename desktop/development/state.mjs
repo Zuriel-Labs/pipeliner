@@ -171,6 +171,14 @@ export function openDevelopmentStore(directory, { clock = Date.now } = {}) {
     },
     status: runId => immutable(read(runId).state),
     captured: runId => immutable(read(runId).captured),
+    recovery() {
+      requireOpen(); const rows = db.prepare('SELECT id FROM development_runs ORDER BY id LIMIT 10001').all();
+      if (rows.length > 10000) throw new Error('Development recovery inventory needs bounded archival');
+      return rows.map(row => {
+        const { captured, state } = read(row.id), uncertainEffects = requests(row.id).filter(value => ['dispatched', 'uncertain'].includes(value.state)).length;
+        return { runId: row.id, repository: captured.run.repository, state: state.state, uncertainEffects };
+      }).filter(row => row.state !== 'complete' || row.uncertainEffects > 0);
+    },
     evidence(binding) { bound(binding); return requests(binding.runId); },
     outputs(runId) {
       read(runId); return db.prepare('SELECT * FROM development_outputs WHERE run=? ORDER BY visit').all(runId).map(row => {

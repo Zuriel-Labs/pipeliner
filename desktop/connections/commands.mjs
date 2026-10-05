@@ -1,6 +1,6 @@
-export function containsSecret(text) {
-  return typeof text === 'string' && /(?:\b(?:bearer\s+|gh[pousr]_|sk-|(?:api[_ -]?key|token)\s*[:=])\S+|[A-Za-z0-9_-]{24,})/i.test(text);
-}
+const protectedText = /(?:\b(?:bearer\s+|gh[pousr]_|sk-|(?:api[_ -]?key|token)\s*[:=])\S+|[A-Za-z0-9_-]{24,})/gi;
+export function containsSecret(text) { return typeof text === 'string' && text.search(protectedText) !== -1; }
+export function redactProtectedText(text) { return text.replace(protectedText, '[protected-looking text omitted]'); }
 
 export function connectionCommand(text) {
   if (typeof text !== 'string' || text.length > 2000 || containsSecret(text)) return { message: 'Use the protected connection surface for keys. Nothing was saved or sent.' };

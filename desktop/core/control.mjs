@@ -8,6 +8,7 @@ import { schedulingShapes } from '../scheduling/commands.mjs';
 import { backgroundShapes } from '../background/commands.mjs';
 import { skillShapes } from '../skills/commands.mjs';
 import { toolShapes } from '../tools/commands.mjs';
+import { privacyShapes } from '../privacy/commands.mjs';
 
 function trustedContext(event, { contents, url, context }) {
   if (contents.isDestroyed() || event?.sender !== contents || !event.senderFrame || event.senderFrame !== contents.mainFrame
@@ -196,6 +197,18 @@ export function createToolControlChannel(manager, binding) {
     const shape = toolShapes[payload?.operation]; if (!shape) throw new Error('Unknown tool operation');
     record(payload, ['operation', 'contextRevision', ...shape[0]], shape[1]);
     if (payload.contextRevision !== current.revision) throw new Error('Control context changed');
+    const { contextRevision: _revision, ...action } = payload; return manager.dispatch(action);
+  } });
+}
+
+export function createPrivacyControlChannel(manager, binding) {
+  return Object.freeze({ dispatch(event, payload) {
+    const current = trustedContext(event, binding); canonicalJSON(payload);
+    if (payload?.operation === 'status') { record(payload, ['operation']); return manager.status(); }
+    const shape = privacyShapes[payload?.operation]; if (!shape) throw new Error('Unknown privacy operation');
+    record(payload, ['operation', 'contextRevision', ...shape[0]], shape[1]);
+    if (!Number.isSafeInteger(payload.contextRevision) || !['append', 'draft'].includes(payload.operation) && payload.contextRevision !== current.revision) throw new Error('Control context changed');
+    // Only untrusted archived text may use an old host-issued token. Policy/file actions always require the current context.
     const { contextRevision: _revision, ...action } = payload; return manager.dispatch(action);
   } });
 }

@@ -101,10 +101,15 @@ try {
   await command('/usr/bin/codesign',['--verify','--strict',join(helpers,'codex')]);
   const license=await download('codex-LICENSE','https://raw.githubusercontent.com/openai/codex/rust-v0.160.0/LICENSE',10926,'d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc');
   await writeFile(join(resources,'Codex-LICENSE'),await readFile(license),{flag:'wx',mode:0o600});
-  // Ad hoc signing supplies local integrity only; Developer ID/notarization are pending.
+  // An existing Apple Development identity qualifies only this host's local review.
+  // Keep hardened runtime and library validation; distribution still requires Developer ID/notarization.
+  const identities=(await command('/usr/bin/security',['find-identity','-v','-p','codesigning'])).stdout;
+  const available=[...identities.matchAll(/\d+\) ([A-F0-9]{40}) "Apple Development:[^"]+"/g)];
+  if(available.length!==1)throw new Error('package-local-signing-identity-unavailable');
+  const signingIdentity=available[0][1];
   const entitlements=join(temporary,'electron-entitlements.plist');
   await writeFile(entitlements,'<?xml version="1.0"?><plist version="1.0"><dict><key>com.apple.security.cs.allow-jit</key><true/></dict></plist>');
-  const sign=async(path,jit=false)=>command('/usr/bin/codesign',['--force','--sign','-','--options','runtime','--timestamp=none',...(jit?['--entitlements',entitlements]:[]),path]);
+  const sign=async(path,jit=false)=>command('/usr/bin/codesign',['--force','--sign',signingIdentity,'--options','runtime','--timestamp=none',...(jit?['--entitlements',entitlements]:[]),path]);
   const frameworkRoot=join(contents,'Frameworks');
   async function nativeBinaries(directory){
     for(const name of await readdir(directory)){const path=join(directory,name),info=await lstat(path);if(info.isSymbolicLink())continue;
@@ -114,13 +119,14 @@ try {
   for(const name of await readdir(frameworkRoot)){const path=join(frameworkRoot,name);if(name.endsWith('.app')||name.endsWith('.framework'))await sign(path,name.endsWith('.app'));}
   for(const name of ['secure-entry','calendar','git-credential'])await sign(join(helpers,name));await sign(join(service,'PipelinerBackground'));
   await sign(app,true);await command('/usr/bin/codesign',['--verify','--deep','--strict',app]);
+  await command('/usr/bin/codesign',['--verify','--deep','--strict','-R','=anchor apple generic and identifier "'+backgroundBundleId+'"',app]);
   const current=await sourceCandidate(source);if(current.sourceCommit!==candidate.sourceCommit||current.gitTree!==candidate.gitTree)throw new Error('package-source-changed');
   const dmg=join(temporary,'Pipeliner-0.1.0-mac-arm64-review.dmg');
   await command('/usr/bin/hdiutil',['create','-volname','Pipeliner Review','-srcfolder',distribution,'-format','UDZO','-ov',dmg],{timeout:180000});
   await command('/usr/bin/hdiutil',['verify',dmg],{timeout:180000});
-  const report={kind:'local-mac-review',...candidate,files:undefined,buildRoot:temporary,app,dmg,sourceInputs:inputs,nativeInputs,electron,codex,archive:{sha256:await fileHash(archive),headerSha256},fuses,dmgSha256:await fileHash(dmg),signing:'ad-hoc-local-integrity',pending:['Developer ID and notarization','actual packaged native QA','Human PM acceptance','Windows/Linux'],retained:{owner:'Issue #54',trigger:'replace candidate or finish PM testing'},versions:{node:process.versions.node,os:(await command('/usr/bin/sw_vers',['-productVersion'])).stdout.trim(),architecture:process.arch}};
+  const report={kind:'local-mac-review',...candidate,files:undefined,buildRoot:temporary,app,dmg,sourceInputs:inputs,nativeInputs,electron,codex,archive:{sha256:await fileHash(archive),headerSha256},fuses,dmgSha256:await fileHash(dmg),signing:'Apple-Development-local-only',pending:['Developer ID and notarization','actual packaged native QA','Human PM acceptance','Windows/Linux'],retained:{owner:'Issue #54',trigger:'replace candidate or finish PM testing'},versions:{node:process.versions.node,os:(await command('/usr/bin/sw_vers',['-productVersion'])).stdout.trim(),architecture:process.arch}};
   await writeFile(join(temporary,'build.json'),JSON.stringify(report,null,2)+'\n',{flag:'wx',mode:0o600});
-  for(const path of [stage,nativeRoot,runtime,electronZip,codexTar,license,entitlements,userConfig,globalConfig,join(temporary,'npm-cache')])await rm(path,{recursive:true,force:true});
+  for(const path of [stage,nativeRoot,runtime,electronZip,codexTar,license,entitlements,userConfig,globalConfig,join(temporary,'npm-cache'),join(temporary,'node-compile-cache')])await rm(path,{recursive:true,force:true});
   retained=true;console.log(JSON.stringify({built:true,sourceCommit:candidate.sourceCommit,gitTree:candidate.gitTree,app,dmg,dmgSha256:report.dmgSha256,buildRecord:join(temporary,'build.json'),signing:report.signing,pending:report.pending}));
 } finally {
   if(!retained){await rm(temporary,{recursive:true,force:true});await access(temporary).then(()=>{throw new Error('package-cleanup-failed');},e=>{if(e.code!=='ENOENT')throw e;});console.log(JSON.stringify({cleanup:'owned-failed-build-removed',verified:true}));}

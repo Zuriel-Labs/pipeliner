@@ -1,10 +1,20 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
 import { protectedFile } from '../core/storage.mjs';
+import { canonicalJSON, record } from '../core/settings.mjs';
 
 export const connectionIds = Object.freeze(['github', 'github-setup', 'codex', 'ollama']);
 const validId = id => { if (!connectionIds.includes(id) && !(typeof id === 'string' && /^mcp-[a-f0-9]{64}$/.test(id))) throw new Error('connection-denied'); };
 const limit = 2 * 1024 * 1024;
+const identifier = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/.test(value);
+function payloadBinding(value) {
+  try {
+    const text = canonicalJSON(value); record(value, ['purpose', 'repository', 'id']);
+    if (!['conversation', 'log', 'audit', 'development'].includes(value.purpose)
+      || value.repository !== null && !identifier(value.repository) || !identifier(value.id)) throw new Error();
+    return Buffer.from('pipeliner:protected-payload:1:' + text);
+  } catch { throw new Error('protected-payload-binding'); }
+}
 
 export async function openVault(directory, protection) {
   if (!await protection.available()) throw new Error('secure-storage-unavailable');
@@ -59,6 +69,22 @@ export async function openVault(directory, protection) {
       return epoch;
     }
     return Object.freeze({ get, begin,
+      sealPayload(binding, bytes) {
+        ready(); const aad = payloadBinding(binding);
+        if (!Buffer.isBuffer(bytes) || bytes.length > limit) throw new Error('protected-payload-limit');
+        const nonce = randomBytes(12), cipher = createCipheriv('aes-256-gcm', key, nonce);
+        cipher.setAAD(aad);
+        return Buffer.concat([nonce, cipher.update(bytes), cipher.final(), cipher.getAuthTag()]);
+      },
+      openPayload(binding, bytes) {
+        ready(); const aad = payloadBinding(binding);
+        try {
+          if (!Buffer.isBuffer(bytes) || bytes.length < 28 || bytes.length > limit + 28) throw new Error();
+          const decipher = createDecipheriv('aes-256-gcm', key, bytes.subarray(0, 12));
+          decipher.setAAD(aad); decipher.setAuthTag(bytes.subarray(-16));
+          return Buffer.concat([decipher.update(bytes.subarray(12, -16)), decipher.final()]);
+        } catch { throw new Error('protected-payload-invalid'); }
+      },
       current(id, epoch) { ready(); validId(id); return (db.prepare('SELECT epoch FROM connections WHERE id=?').get(id)?.epoch ?? 0) === epoch; },
       save(id, epoch, value) { ready(); validId(id); return db.prepare('UPDATE connections SET payload=? WHERE id=? AND epoch=?').run(seal(id, epoch, value), id, epoch).changes === 1; },
       erase: id => begin(id, true),

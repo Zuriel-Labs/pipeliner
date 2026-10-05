@@ -8,9 +8,31 @@ import { createHash } from 'node:crypto';
 import { openPolicyStore } from './policy.mjs';
 import { settingsSchema, developmentTemplate, releaseTemplate, legacyDefaults, canonicalJSON } from './settings.mjs';
 import { createControlChannel } from './control.mjs';
+import { createConfigurationExport, configurationChanges } from '../privacy/model.mjs';
 
 const repository = 'R_example_one';
 const other = 'R_example_two';
+
+test('configuration snapshot preserves explicit scope and restore uses current PM validation without weakening ceilings', t => {
+  const f = fixture(t); f.apply(f.proposal({ 'privacy.logDays': 12 }, 'global', null));
+  f.apply(f.proposal({ 'privacy.auditDays': 400 }));
+  const snapshot = f.store.control.configuration('repository', repository);
+  assert.deepEqual(snapshot.settings, { 'privacy.auditDays': 400 }); assert.equal(snapshot.revision, 2);
+  const exported = createConfigurationExport(snapshot, 1000); assert.equal(f.store.worker.configuration, undefined);
+  f.apply(f.proposal({ 'privacy.auditDays': 500, 'privacy.conversationDays': 100 }));
+  const before = f.store.worker.read(repository), edit = configurationChanges(exported, {
+    scope: 'repository', target: repository, currentSettings: f.store.control.configuration('repository', repository).settings });
+  const preview = f.proposal(edit.changes, 'repository', repository, edit.reset);
+  assert.equal(f.store.worker.read(repository).revision, before.revision);
+  f.apply(preview); assert.equal(f.store.worker.read(repository).values['privacy.auditDays'].value, 400);
+  assert.equal(f.store.worker.read(repository).values['privacy.conversationDays'].source, 'shipped');
+  assert.equal(f.store.worker.read(other).values['privacy.logDays'].value, 12);
+  assert.deepEqual(f.store.worker.read(repository, before.revision).values, before.values);
+  const escalating = createConfigurationExport({ ...snapshot, settings: { 'permissions.grants': ['github.read'] } }, 1000);
+  const unsafe = configurationChanges(escalating, { scope: 'repository', target: repository, currentSettings: snapshot.settings });
+  assert.throws(() => f.proposal(unsafe.changes, 'repository', repository, unsafe.reset), /ceiling/);
+  assert.throws(() => f.store.control.configuration('host', repository), /scope/);
+});
 
 test('additive scheduling schema reads immutable legacy policy hashes and upgrades only on a reviewed edit', t => {
   const f = fixture(t); f.store.close();

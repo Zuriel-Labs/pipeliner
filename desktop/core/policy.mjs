@@ -150,6 +150,12 @@ export function openPolicyStore(directory, { catalog, clock = Date.now, inspecto
         affectedRepositories: target ? [target] : current.repositories, timing: [...new Set(touched.map(key => fields.get(key).timing))] };
     }
     const control = {
+      configuration(scope, target) {
+        const current = facts(); targetCheck(target, current);
+        if (!['host', 'global', 'repository'].includes(scope) || (scope === 'repository') !== (target !== null)) throw new Error('Invalid configuration scope');
+        const version = versionData(), settings = scope === 'repository' ? version.document.repositories[target] ?? {} : version.document[scope];
+        return immutable({ scope, target, revision: version.revision, hash: version.hash, settings: structuredClone(settings) });
+      },
       capture(request) {
         canonicalJSON(request); record(request, ['commandId', 'conversationId', 'target', 'text']); checkedId(request.commandId); checkedId(request.conversationId); targetCheck(request.target);
         if (typeof request.text !== 'string' || !request.text.trim() || request.text.length > 4096) throw new Error('Invalid direct PM input');

@@ -14,11 +14,12 @@ test('Mac update trust binds signed build identity, pinned Developer ID and dist
   const resources = join(bundle, 'Contents/Resources'), executable = join(bundle, 'Contents/MacOS/Pipeliner'), file = join(resources, 'pipeliner-build.json');
   mkdirSync(resources, { recursive: true, mode: 0o700 }); mkdirSync(join(bundle, 'Contents/MacOS'), { mode: 0o700 });
   writeFileSync(executable, 'Synthetic non-executable fixture\n', { mode: 0o700 });
+  writeFileSync(join(bundle, 'Contents/Info.plist'), 'Synthetic native plist fixture\n', { mode: 0o600 });
   const original = canonicalJSON(identity) + '\n', save = text => { writeFileSync(file, text, { mode: 0o600 }); chmodSync(file, 0o600); };
   let calls, mode, controller;
   const run = async (command, args, signal) => {
     signal.throwIfAborted(); calls.push({ command, args });
-    assert(['/usr/bin/codesign', '/usr/bin/lipo', '/usr/bin/syspolicy_check'].includes(command));
+    assert(['/usr/bin/codesign', '/usr/bin/plutil', '/usr/bin/lipo', '/usr/bin/syspolicy_check'].includes(command));
     if (mode === 'cancel') { controller.abort(); signal.throwIfAborted(); }
     if (command === '/usr/bin/codesign' && args.includes('--verify')) {
       assert(args.includes('--deep')); assert(args.includes('--strict'));
@@ -35,6 +36,11 @@ test('Mac update trust binds signed build identity, pinned Developer ID and dist
       'TeamIdentifier=' + (mode === 'team' ? 'OTHER12345' : team) + '\nCodeDirectory v=20500 size=10 flags=' +
       (mode === 'runtime' ? '0x0(none)' : '0x10000(runtime)') + '\n' + (mode === 'timestamp' ? 'Signed Time=synthetic\n' : 'Timestamp=synthetic secure timestamp\n') };
     if (command === '/usr/bin/lipo') { assert.deepEqual(args, ['-archs', executable]); return { stdout: mode === 'architecture' ? 'x86_64\n' : 'arm64\n', stderr: '' }; }
+    if (command === '/usr/bin/plutil') {
+      assert.deepEqual(args, ['-convert', 'json', '-o', '-', join(bundle, 'Contents/Info.plist')]);
+      return { stdout: JSON.stringify({ CFBundleIdentifier: 'com.zuriellabs.pipeliner.desktop', CFBundleExecutable: 'Pipeliner',
+        CFBundlePackageType: 'APPL', CFBundleShortVersionString: identity.version, CFBundleVersion: identity.version }), stderr: '' };
+    }
     if (command === '/usr/bin/syspolicy_check') {
       assert.deepEqual(args, ['distribution', bundle]);
       if (mode === 'policy') throw Error('Synthetic distribution refusal');
@@ -61,6 +67,7 @@ test('Mac update trust binds signed build identity, pinned Developer ID and dist
     save(original); const other = join(root, 'linked.json'); linkSync(file, other); await assert.rejects(readBuildIdentity(bundle)); unlinkSync(other);
     unlinkSync(file); writeFileSync(other, original, { mode: 0o600 }); symlinkSync(other, file); await assert.rejects(readBuildIdentity(bundle)); unlinkSync(file); unlinkSync(other);
     save(original); chmodSync(file, 0o666); await assert.rejects(readBuildIdentity(bundle)); chmodSync(file, 0o600);
+    mode = 'valid'; controller = new AbortController();
     for (const changed of [{ ...identity, sourceCommit: 'c'.repeat(40) }, { ...identity, version: '0.3.0' }]) {
       await assert.rejects(verifyMacUpdateBundle({ bundle, team, identity: changed }, { run }), /^Error: update-native-trust-unverified$/);
     }

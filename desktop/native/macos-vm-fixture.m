@@ -9,7 +9,65 @@
 #include <errno.h>
 #include <math.h>
 #include <assert.h>
+#include <mach/mach_time.h>
+#include <time.h>
 
+static BOOL validNativeGate(NSData *data, NSString *mode, NSString *nonce, pid_t pid) {
+  id value = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+  return [value isKindOfClass:NSDictionary.class] && [value count] == 3
+    && [value[@"mode"] isEqual:mode] && [value[@"nonce"] isEqual:nonce]
+    && [value[@"pid"] isKindOfClass:NSNumber.class] && [value[@"pid"] longLongValue] == pid && [value[@"pid"] doubleValue] == (double)pid
+    && [[NSJSONSerialization dataWithJSONObject:value options:NSJSONWritingSortedKeys error:nil] isEqual:data];
+}
+
+#ifndef PIPELINER_VM_DISK_TEST
+static BOOL waitForNativeGate(NSString *root, NSString *mode, NSString *nonce) {
+  NSCharacterSet *hex = [NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"];
+  if (nonce.length != 32 || [nonce rangeOfCharacterFromSet:hex.invertedSet].location != NSNotFound) return NO;
+  int directory = open(root.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+  if (directory < 0) return NO;
+  struct stat parent, named, gatePin; mach_timebase_info_data_t scale;
+  NSString *name = nil; uint64_t began = 0;
+  BOOL accepted = NO, pinned = NO;
+  if (fstat(directory, &parent) != 0 || !S_ISDIR(parent.st_mode) || parent.st_uid != getuid() || (parent.st_mode & 0777) != 0700
+    || mach_timebase_info(&scale) != KERN_SUCCESS || scale.denom == 0) goto done;
+  name = [NSString stringWithFormat:@"native-gate-%@.json", nonce]; began = mach_continuous_time();
+  while ((long double)(mach_continuous_time() - began) * scale.numer / scale.denom < 30.0L * NSEC_PER_SEC) {
+    if (lstat(root.fileSystemRepresentation, &named) != 0 || named.st_dev != parent.st_dev || named.st_ino != parent.st_ino
+      || named.st_uid != parent.st_uid || named.st_mode != parent.st_mode) break;
+    int fd = openat(directory, name.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) {
+      if (errno != ENOENT) break;
+      const struct timespec interval = {0, 20000000}; nanosleep(&interval, NULL); continue;
+    }
+    struct stat before, after, current; unsigned char bytes[256];
+    if (fstat(fd, &before) != 0 || !S_ISREG(before.st_mode) || before.st_uid != getuid() || before.st_nlink != 1
+      || (before.st_mode & 0777) != 0600 || before.st_size < 0 || before.st_size > (off_t)sizeof(bytes)
+      || (pinned && (before.st_dev != gatePin.st_dev || before.st_ino != gatePin.st_ino))) { close(fd); break; }
+    if (!pinned) { gatePin = before; pinned = YES; }
+    if (before.st_size == 0) { close(fd); const struct timespec interval = {0, 20000000}; nanosleep(&interval, NULL); continue; }
+    ssize_t length = read(fd, bytes, (size_t)before.st_size);
+    BOOL stable = fstat(fd, &after) == 0 && fstatat(directory, name.fileSystemRepresentation, &current, AT_SYMLINK_NOFOLLOW) == 0
+      && after.st_dev == before.st_dev && after.st_ino == before.st_ino && after.st_size == before.st_size && after.st_nlink == 1
+      && after.st_mode == before.st_mode && after.st_uid == before.st_uid
+      && after.st_mtimespec.tv_sec == before.st_mtimespec.tv_sec && after.st_mtimespec.tv_nsec == before.st_mtimespec.tv_nsec
+      && after.st_ctimespec.tv_sec == before.st_ctimespec.tv_sec && after.st_ctimespec.tv_nsec == before.st_ctimespec.tv_nsec
+      && current.st_dev == after.st_dev && current.st_ino == after.st_ino && current.st_size == after.st_size
+      && current.st_mode == after.st_mode && current.st_uid == after.st_uid && current.st_nlink == 1
+      && current.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec && current.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec
+      && current.st_ctimespec.tv_sec == after.st_ctimespec.tv_sec && current.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec
+      && lstat(root.fileSystemRepresentation, &named) == 0 && named.st_dev == parent.st_dev && named.st_ino == parent.st_ino
+      && named.st_uid == parent.st_uid && named.st_mode == parent.st_mode
+      && (long double)(mach_continuous_time() - began) * scale.numer / scale.denom < 30.0L * NSEC_PER_SEC;
+    close(fd);
+    accepted = stable && length == before.st_size && validNativeGate([NSData dataWithBytes:bytes length:(NSUInteger)length], mode, nonce, getpid()); break;
+  }
+done:
+  close(directory); return accepted;
+}
+#endif
+
+#ifndef PIPELINER_VM_GATE_TEST
 static BOOL emptyPrivateDisk(struct stat info) {
   return S_ISREG(info.st_mode) && info.st_uid == getuid() && info.st_nlink == 1 && (info.st_mode & 0777) == 0600 && info.st_size == 0;
 }
@@ -29,8 +87,9 @@ static int openOwnedEmptyDisk(NSString *root) {
 done:
   close(directory); return fd;
 }
+#endif
 
-#ifndef PIPELINER_VM_DISK_TEST
+#if !defined(PIPELINER_VM_DISK_TEST) && !defined(PIPELINER_VM_GATE_TEST)
 
 // Native qualification only. Bridge mode shares only fresh synthetic input/output folders.
 static void report(NSDictionary *value) {
@@ -330,12 +389,13 @@ static NSDictionary *readPrivateJSON(NSURL *url) {
 
 int main(int argc, const char *argv[]) {
   @autoreleasepool {
-    umask(077); if (argc != 3) return 2;
+    umask(077); if (argc != 3 && argc != 4) return 2;
     NSString *mode = [NSString stringWithUTF8String:argv[1]], *root = [NSString stringWithUTF8String:argv[2]];
     struct stat info; char actual[PATH_MAX];
     if (!([root.lastPathComponent isEqual:@"pipeliner-54-macos-worker"] || [root.lastPathComponent hasPrefix:@"pipeliner-54-macos-worker-"]) || ![root isAbsolutePath]
       || !realpath(root.fileSystemRepresentation, actual) || strcmp(root.fileSystemRepresentation, actual) != 0 || lstat(root.fileSystemRepresentation, &info) != 0
       || !S_ISDIR(info.st_mode) || info.st_uid != getuid() || (info.st_mode & 077) != 0) { report(@{@"failed": @"owned-root-validation"}); return 2; }
+    if (![mode isEqual:@"--input-shape"] && (argc != 4 || !waitForNativeGate(root, mode, [NSString stringWithUTF8String:argv[3]]))) { report(@{@"failed": @"native-lease-gate"}); return 2; }
     MacQualification *probe = [MacQualification new]; probe.root = root; [probe armTermination];
     if ([mode isEqualToString:@"--input-shape"]) {
       [NSApplication sharedApplication]; [NSApp setActivationPolicy:NSApplicationActivationPolicyProhibited];
@@ -362,10 +422,12 @@ int main(int argc, const char *argv[]) {
     return 1;
   }
 }
-#else
+#elif defined(PIPELINER_VM_DISK_TEST)
 int main(int argc, const char *argv[]) {
   @autoreleasepool {
     assert(argc == 2); NSString *root = [NSString stringWithUTF8String:argv[1]], *path = [root stringByAppendingPathComponent:@"Disk.img"];
+    NSData *gate = [@"{\"mode\":\"--install\",\"nonce\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"pid\":42}" dataUsingEncoding:NSUTF8StringEncoding];
+    assert(validNativeGate(gate, @"--install", @"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 42));
     struct stat parent, before, after; assert(lstat(root.fileSystemRepresentation, &parent) == 0 && S_ISDIR(parent.st_mode) && parent.st_uid == getuid() && (parent.st_mode & 0777) == 0700);
     assert(openOwnedEmptyDisk(root) == -1);
     int fd = open(path.fileSystemRepresentation, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600); assert(fd >= 0); close(fd);
@@ -381,6 +443,24 @@ int main(int argc, const char *argv[]) {
     assert(chmod(root.fileSystemRepresentation, 0755) == 0 && openOwnedEmptyDisk(root) == -1 && chmod(root.fileSystemRepresentation, 0700) == 0);
     assert(lstat(path.fileSystemRepresentation, &after) == 0 && after.st_dev == before.st_dev && after.st_ino == before.st_ino && emptyPrivateDisk(after));
     assert(unlink(path.fileSystemRepresentation) == 0); printf("Owned empty disk boundary OK: 6 native cases, 1 injected link-count case.\n"); return 0;
+  }
+}
+#else
+int main(int argc, const char *argv[]) {
+  @autoreleasepool {
+    if (argc != 3) return 2;
+    NSString *root = [NSString stringWithUTF8String:argv[1]], *nonce = [NSString stringWithUTF8String:argv[2]], *mode = @"--install";
+    NSDictionary *valid = @{@"mode":mode,@"nonce":nonce,@"pid":@42};
+    NSData *bytes = [NSJSONSerialization dataWithJSONObject:valid options:NSJSONWritingSortedKeys error:nil];
+    assert(validNativeGate(bytes, mode, nonce, 42));
+    for (NSDictionary *bad in @[@{@"mode":@"--boot",@"nonce":nonce,@"pid":@42},@{@"mode":mode,@"nonce":@"other",@"pid":@42},
+      @{@"mode":mode,@"nonce":nonce,@"pid":@43},@{@"mode":mode,@"nonce":nonce,@"pid":@42.5},@{@"mode":mode,@"nonce":nonce,@"pid":@"42"},@{@"mode":mode,@"nonce":nonce,@"pid":@42,@"extra":@YES}])
+      assert(!validNativeGate([NSJSONSerialization dataWithJSONObject:bad options:NSJSONWritingSortedKeys error:nil], mode, nonce, 42));
+    assert(!validNativeGate([[NSString stringWithFormat:@"%@\n", [[NSString alloc] initWithData:bytes encoding:NSUTF8StringEncoding]] dataUsingEncoding:NSUTF8StringEncoding], mode, nonce, 42));
+    assert(!validNativeGate([[NSString stringWithFormat:@"{\"mode\":\"--install\",\"nonce\":\"%@\",\"pid\":42,\"pid\":42}",nonce] dataUsingEncoding:NSUTF8StringEncoding], mode, nonce, 42));
+    printf("Native start gate waiting.\n"); fflush(stdout);
+    if (!waitForNativeGate(root, mode, nonce)) return 2;
+    printf("Native start gate OK: 9 metadata cases and exact private PID gate.\n"); return 0;
   }
 }
 #endif

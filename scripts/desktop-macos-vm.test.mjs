@@ -1,10 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, chmodSync, writeFileSync, readFileSync, realpathSync, symlinkSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, chmodSync, writeFileSync, readFileSync, realpathSync, symlinkSync, rmSync, existsSync, lstatSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { Readable } from 'node:stream';
+import { writeLeasedRestore } from './desktop-macos-restore.mjs';
 
 test('Mac qualification refuses foreign ownership and aliases without deleting their contents', { skip: process.platform !== 'darwin' || process.arch !== 'arm64' }, () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-54-macos-worker-'))), alias = root + '-alias';
@@ -25,7 +28,7 @@ test('Mac qualification refuses foreign ownership and aliases without deleting t
   } finally { rmSync(alias,{force:true}); rmSync(root,{recursive:true}); }
 });
 
-test('Failed owned VM setup removes only its recorded root and preserves neighboring data', { skip: process.platform !== 'darwin' || process.arch !== 'arm64' }, () => {
+test('Ungated legacy VM setup preserves its supplied root and neighboring data', { skip: process.platform !== 'darwin' || process.arch !== 'arm64' }, () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(),'pipeliner-54-macos-worker-')));
   const neighbor = realpathSync(mkdtempSync(join(tmpdir(),'pipeliner-54-macos-neighbor-')));
   chmodSync(root,0o700); chmodSync(neighbor,0o700);
@@ -35,8 +38,33 @@ test('Failed owned VM setup removes only its recorded root and preserves neighbo
   try {
     const result = spawnSync(process.execPath,[fileURLToPath(new URL('./desktop-macos-vm.mjs',import.meta.url)),'--owned-root',root],{encoding:'utf8',timeout:10000});
     assert.equal(result.status,1);
-    const report = JSON.parse(result.stdout.trim());
-    assert.equal(report.exactOwnedVMRootRemoved,true); assert.equal(report.ownedProcessClosed,true);
-    assert.equal(existsSync(root),false); assert.equal(readFileSync(marker,'utf8'),'synthetic neighbor');
+    assert.match(result.stderr,/macos-vm-root-unverified/);
+    assert.equal(existsSync(root),true); assert.equal(readFileSync(marker,'utf8'),'synthetic neighbor');
   } finally { rmSync(root,{recursive:true,force:true}); rmSync(neighbor,{recursive:true}); }
+});
+
+test('VM producer refuses a missing managed context before creating resources', { skip: process.platform !== 'darwin' || process.arch !== 'arm64' }, () => {
+  const environment = {...process.env}; for (const name of Object.keys(environment)) if (name.startsWith('TEST_ARTIFACT_')) delete environment[name];
+  const result = spawnSync(process.execPath,[fileURLToPath(new URL('./desktop-macos-vm.mjs',import.meta.url)),'--bridge'],{env:environment,encoding:'utf8',timeout:10000});
+  assert.equal(result.status,1); assert.match(result.stderr,/macos-vm-context-required/); assert.equal(result.stdout,'');
+});
+
+test('Leased restore keeps the original inode and refuses oversize, wrong hash and nonempty roles', { skip: process.platform !== 'darwin' || process.arch !== 'arm64' }, async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(),'pipeliner-54-restore-input-'))); chmodSync(root,0o700);
+  const body = Buffer.from('synthetic restore'), expected = {bytes:body.length,sha256:createHash('sha256').update(body).digest('hex')};
+  try {
+    for (const [name,bytes,metadata,error] of [
+      ['valid',body,expected,null],['oversize',Buffer.concat([body,body]),expected,/macos-restore-size-exceeded/],
+      ['hash',body,{...expected,sha256:'0'.repeat(64)},/macos-restore-image-unverified/],
+      ['short',body.subarray(1),expected,/macos-restore-image-unverified/],
+    ]) {
+      const path = join(root,name); writeFileSync(path,'',{mode:0o600});
+      const before = lstatSync(path);
+      const action = writeLeasedRestore(path,Readable.from([bytes]),metadata,new AbortController().signal);
+      if (error) await assert.rejects(action,error); else { const value = await action; assert.equal(value.bytes,body.length); assert.equal(value.inode,before.ino); assert.deepEqual(readFileSync(path),body); }
+      const after = lstatSync(path); assert.equal(after.dev,before.dev); assert.equal(after.ino,before.ino);
+      if (after.size > 0) await assert.rejects(writeLeasedRestore(path,Readable.from([body]),expected,new AbortController().signal),/macos-restore-role-unverified/);
+      else assert.equal(after.size,0);
+    }
+  } finally { rmSync(root,{recursive:true}); }
 });

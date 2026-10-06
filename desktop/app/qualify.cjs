@@ -709,6 +709,37 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
     if (appearanceScope) await require('./qualify-appearance.cjs').run({ window, directory, appearance, channel: appearanceChannel, policy, development, js, wait, check });
     if (deliveryScope) await require('./qualify-delivery.cjs').run({ window, directory, vault, privacy, delivery, artifacts, appearance, channel: deliveryChannel, policy, js, wait, check, measurements });
     if (permissionScope) await require('./qualify-permissions.cjs').run({ window, directory, permissions, appearance, channel: permissionChannel, policy, js, wait, check, measurements });
+    if (process.argv.includes('--qualify-issues')) await check('issues-cached-10000-row-bounded-search-pages-dependencies-and-native-keyboard', async () => {
+      const original = issues.status(), started = performance.now(), rows = Array.from({ length: 10000 }, (_, i) => ({ id: 'ScaleFixture' + (i + 1), number: i + 1, title: 'Synthetic cached Issue ' + (i + 1),
+        state: 'OPEN', ready: false, status: 'Backlog', metadata: { Status: 'Backlog', Priority: 'P2', Impact: 'Medium', Effort: 'Small' } }));
+      // Cached display only; these rows grant no host catalog, Ready or worker authority.
+      const display = { ...original, revision: original.revision + 1000, message: null, question: null, selected: null, detail: null,
+        catalog: { ...original.catalog, issues: rows }, draft: { id: 'scale-display-draft', state: 'choosing', values: { title: 'Synthetic cached draft', summary: 'Display only', acceptance: ['Preserve selected dependencies'], labels: [], dependencies: [10000] } } };
+      try {
+        window.webContents.send('issues:status', display); await wait(() => js("document.getElementById('issue-list-count').textContent.includes('10000 matching')"));
+        measurements.cachedIssueInitialDisplayMs = performance.now() - started;
+        await js("document.getElementById('issues-nav').click()");
+        assert.equal(await js("document.querySelectorAll('#issue-list>article').length===50&&document.querySelectorAll('#draft-dependencies-results input').length===50"), true);
+        assert.equal(await js("document.getElementById('issue-draft').textContent.includes('Selected dependencies: #10000.')"), true);
+        measurements.cachedIssuePageMs = await js("(()=>{const samples=[];for(let i=0;i<20;i++){const start=performance.now();document.getElementById(i%2?'issue-list-previous':'issue-list-next').click();document.getElementById('issue-list').offsetHeight;samples.push(performance.now()-start)}return samples})()");
+        const sorted = [...measurements.cachedIssuePageMs].sort((a, b) => a - b); measurements.cachedIssuePageP95Ms = sorted[Math.ceil(sorted.length * .95) - 1];
+        assert(measurements.cachedIssuePageP95Ms < 150);
+        window.focus(); await js("document.getElementById('issue-list-next').focus({preventScroll:true})"); await wait(() => window.isFocused());
+        window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+        await wait(() => js("document.querySelector('#issue-list h2').textContent.startsWith('#51 ')"));
+        assert.equal(await js("document.activeElement.id"), 'issue-list-next');
+        measurements.cachedIssueSearchMs = await js("(()=>{const input=document.getElementById('issue-list-search');input.focus({preventScroll:true});const start=performance.now();input.value='#10000';input.dispatchEvent(new Event('input'));document.getElementById('issue-list').offsetHeight;return performance.now()-start})()");
+        assert.equal(await js("document.querySelectorAll('#issue-list>article').length===1&&document.querySelector('#issue-list h2').textContent.startsWith('#10000 ')&&document.activeElement.id==='issue-list-search'"), true);
+        await js("const input=document.getElementById('draft-dependencies-search');input.value='#10000';input.dispatchEvent(new Event('input'))");
+        assert.equal(await js("document.querySelectorAll('#draft-dependencies-results input').length===1&&document.querySelector('#draft-dependencies-results input').checked"), true);
+        assert.equal(issues.status().revision, original.revision); assert.equal(issues.status().catalog.issues.length, original.catalog.issues.length);
+        for (const zoom of [1, 2]) { window.setSize(420, 760); window.webContents.setZoomFactor(zoom); await new Promise(resolve => setTimeout(resolve, 100)); assert.equal(await js('document.documentElement.scrollWidth<=innerWidth'), true); }
+      } finally {
+        window.webContents.setZoomFactor(1); window.setSize(1180, 840);
+        await new Promise((resolve, reject) => { window.webContents.once('did-finish-load', resolve); window.webContents.once('did-fail-load', reject); window.reload(); });
+        await wait(() => js("Boolean(document.getElementById('appearance-form'))"));
+      }
+    });
     await check('themes-narrow-zoom-high-contrast-reduced-motion', async () => {
       if (developmentScope) await js("document.getElementById('settings-nav').click();document.getElementById('settings-agents').click()");
       for (const theme of ['light', 'dark']) for (const view of ['repositories', 'issues', 'settings']) { nativeTheme.themeSource = theme; await js(`document.getElementById('${view}-nav').click()`); assert.equal(await js('document.documentElement.scrollWidth<=innerWidth'), true); }
@@ -751,7 +782,7 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
       assert.equal(folderCancelled, true);
     });
   } catch { const snapshot = workspaces.status(); workspaceEvidence = { checkpoint: workspaceStage, busy: snapshot.busy, state: snapshot.draft?.state, error: snapshot.draft?.error, folderSelected: Boolean(snapshot.draft?.folder), projectCount: snapshot.draft?.projects?.length ?? 0 }; process.exitCode = 1; }
-  const report = { desktopQualification: permissionScope ? 'permissions-and-local-testing-controls' : deliveryScope ? 'delivery-custody-recovery-and-installation-data-inventory' : appearanceScope ? 'appearance-and-accessibility-preferences' : privacyScope ? 'protected-local-privacy-and-recovery' : toolsScope ? 'scoped-tools-and-custom-pipelines' : skillsScope ? 'starter-skill-management' : backgroundScope ? 'optional-background-host' : schedulingScope ? 'deterministic-scheduling' : developmentScope ? 'development-controls' : pipelineScope ? 'versioned-pipeline-editing' : 'protected-issue-intake', checks, passed: checks.length === (permissionScope ? 24 : deliveryScope ? 26 : appearanceScope ? 26 : privacyScope ? 27 : toolsScope ? 26 : skillsScope ? 26 : backgroundScope ? 25 : schedulingScope ? 23 : developmentScope ? 22 + (pipelineScope ? 6 : 0) : pipelineScope ? 24 : issueScope ? 18 : 21) && checks.every(c => c.passed), milliseconds: Math.round(performance.now() - started), windowReadyFromMainEntryMs: windowReadyMs, measurements,
+  const report = { desktopQualification: permissionScope ? 'permissions-and-local-testing-controls' : deliveryScope ? 'delivery-custody-recovery-and-installation-data-inventory' : appearanceScope ? 'appearance-and-accessibility-preferences' : privacyScope ? 'protected-local-privacy-and-recovery' : toolsScope ? 'scoped-tools-and-custom-pipelines' : skillsScope ? 'starter-skill-management' : backgroundScope ? 'optional-background-host' : schedulingScope ? 'deterministic-scheduling' : developmentScope ? 'development-controls' : pipelineScope ? 'versioned-pipeline-editing' : 'protected-issue-intake', checks, passed: checks.length === (permissionScope ? 24 : deliveryScope ? 26 : appearanceScope ? 26 : privacyScope ? 27 : toolsScope ? 26 : skillsScope ? 26 : backgroundScope ? 25 : schedulingScope ? 23 : developmentScope ? 22 + (pipelineScope ? 6 : 0) : pipelineScope ? 24 : issueScope ? 18 : 21) + (process.argv.includes('--qualify-issues') ? 1 : 0) && checks.every(c => c.passed), milliseconds: Math.round(performance.now() - started), windowReadyFromMainEntryMs: windowReadyMs, measurements,
     versions: { electron: process.versions.electron, chromium: process.versions.chrome, node: process.versions.node, sqlite: process.versions.sqlite, os: process.platform, architecture: process.arch }, storageRouting,
     nativeEvidence, workspaceEvidence, folderFailure, folderCancelled, synthetic: 'Synthetic GitHub/model replies, first folder selection, optional tool catalog and background-service adapters; actual native secure fields, folder-panel cancellation, protected storage, local Git and own window. External tool compatibility and actual SMAppService/bootstrap are qualified separately.',
     notRun: issueScope ? ['Unchanged Codex unauthenticated discovery', 'Unchanged public GitHub App qualification', 'Unchanged invalid Cloud key probe'] : [],

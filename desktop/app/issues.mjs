@@ -1,6 +1,24 @@
 import { issueCommand } from './issue-commands.mjs';
+import { issuePage } from './issue-view.mjs';
 export async function initIssues({ el, message, setContext, show }) {
   let state = null, lastMessage = null, lastQuestion = null; const $ = id => document.getElementById(id);
+  let listPage = 0, dependencyPage = 0, dependencyQuery = '';
+  function pager(id, label, query, change, results = id + '-results') {
+    const root = el('div', undefined, 'issue-browser'), field = el('div', undefined, 'setup-field'), name = el('label', label), search = el('input');
+    search.id = id + '-search'; name.htmlFor = search.id; search.type = 'search'; search.maxLength = 256; search.value = query; field.append(name, search);
+    const summary = el('p', '', 'small'); summary.id = id + '-count'; summary.setAttribute('role', 'status');
+    const actions = el('div', undefined, 'connection-actions'), previous = el('button', 'Previous results', 'secondary'), next = el('button', 'Next results', 'secondary');
+    for (const node of [previous, next]) { node.type = 'button'; node.setAttribute('aria-controls', results); }
+    previous.id = id + '-previous'; next.id = id + '-next'; actions.append(previous, next); root.append(field, summary, actions);
+    search.addEventListener('input', () => change(search.value, 0));
+    previous.addEventListener('click', () => change(search.value, Number(root.dataset.page) - 1)); next.addEventListener('click', () => change(search.value, Number(root.dataset.page) + 1));
+    return { root, search, update(result) {
+      root.dataset.page = result.page; summary.textContent = result.count ? (result.page * 50 + 1) + '–' + (result.page * 50 + result.rows.length) + ' of ' + result.count + ' matching Issues' : 'No matching Issues.';
+      previous.disabled = result.page === 0; next.disabled = result.page + 1 >= result.pages;
+    } };
+  }
+  const listControls = pager('issue-list', 'Find Issues by number or title', '', (_query, page) => { listPage = page; renderList(); }, 'issue-list');
+  $('issue-list').before(listControls.root);
   const active = ['In Progress', 'In Review', 'Pending Review'];
   const errors = { 'ready-active': 'Ready cannot be removed while this Issue is In Progress, In Review or Pending Review.', 'issue-state-conflict': 'GitHub activity and the local run disagree, or more than one Issue is active. Resolve the recorded state before changing readiness.',
     'issue-state-incomplete': 'The complete Issue and Project state could not be verified. Check GitHub access.', 'issue-uncertain': 'A sent result is uncertain. Check its recorded result; creation and other writes will not repeat blindly.',
@@ -34,21 +52,26 @@ export async function initIssues({ el, message, setContext, show }) {
     if (!issue.status) controls.append(el('p', 'Readiness is blocked until this Issue has a verified Status in the linked Project.', 'small'));
     return controls;
   }
+  function renderList() {
+    if (!state) return;
+    const result = issuePage(state.catalog?.issues ?? [], listControls.search.value, listPage); listPage = result.page; listControls.update(result);
+    const rows = result.rows.map(issue => {
+      const row = el('article', undefined, 'connection-card'); row.append(el('h2', '#' + issue.number + ' · ' + issue.title), el('p', (issue.status ?? 'Not tracked in this Project') + ' · ' + issue.state + (issue.ready ? ' · Ready for Development' : ''), 'small'),
+        el('p', ['Priority', 'Impact', 'Effort'].map(role => role + ': ' + (issue.metadata[role] ?? 'not set')).join(' · '), 'small'));
+      row.append(button(state.selected === issue.number ? 'Selected Issue' : 'View Issue', 'select', { number: issue.number }, 'select-issue-' + issue.number), readyControl(issue)); return row;
+    }); $('issue-list').replaceChildren(...rows);
+  }
   function render(snapshot) {
     if (state && snapshot.revision < state.revision) return;
     const changed = state?.workspaceId !== snapshot.workspaceId, focused = document.activeElement?.id; state = snapshot;
-    if (changed) { lastMessage = null; lastQuestion = null; setContext(state.workspaceId, state.repositoryLabel); }
+    if (changed) { lastMessage = null; lastQuestion = null; listPage = dependencyPage = 0; dependencyQuery = listControls.search.value = ''; setContext(state.workspaceId, state.repositoryLabel); }
     $('issue-context').textContent = state.repositoryLabel ?? 'Select a repository to view its Issues.';
     $('issue-refresh').disabled = !state.workspaceId || !state.storageAvailable || state.busy; $('issue-begin').disabled = $('issue-refresh').disabled;
     $('issue-health').textContent = !state.storageAvailable ? 'Issue storage or policy is unavailable. Actions remain blocked.' : !state.workspaceId ? 'Import or select a repository first.'
       : state.busy ? 'Checking the selected repository…' : state.catalog ? 'Read from GitHub at ' + new Date(state.catalog.observedAt).toLocaleString() : 'Check Issues to read current GitHub state.';
     $('issue-health').className = state.catalog && !state.busy && !state.error ? 'protected-state' : 'availability';
     $('issue-operation-error').hidden = !state.error; $('issue-operation-error').textContent = state.error ? errors[state.error] ?? 'The check did not finish. Check GitHub access and the selected repository before continuing.' : '';
-    const rows = (state.catalog?.issues ?? []).map(issue => {
-      const row = el('article', undefined, 'connection-card'); row.append(el('h2', '#' + issue.number + ' · ' + issue.title), el('p', (issue.status ?? 'Not tracked in this Project') + ' · ' + issue.state + (issue.ready ? ' · Ready for Development' : ''), 'small'),
-        el('p', ['Priority', 'Impact', 'Effort'].map(role => role + ': ' + (issue.metadata[role] ?? 'not set')).join(' · '), 'small'));
-      row.append(button(state.selected === issue.number ? 'Selected Issue' : 'View Issue', 'select', { number: issue.number }, 'select-issue-' + issue.number), readyControl(issue)); return row;
-    }); $('issue-list').replaceChildren(...rows);
+    renderList();
     const detail = state.detail, selected = state.catalog?.issues.find(issue => issue.number === state.selected), contents = [];
     if (detail && selected && detail.id === selected.id) {
       const card = el('article', undefined, 'connection-card'); card.id = 'selected-issue'; card.append(el('h2', '#' + detail.number + ' · ' + detail.title), el('p', readable(detail.body), 'issue-body'),
@@ -81,10 +104,17 @@ export async function initIssues({ el, message, setContext, show }) {
           input.addEventListener('change', () => request({ operation: 'choose', field: 'labels', value: input.checked ? [...(state.draft.values.labels ?? []), label] : state.draft.values.labels.filter(value => value !== label) })); row.append(input, document.createTextNode(label)); selections.append(row);
         } card.append(selections);
         const dependencies = el('fieldset', undefined, 'issue-selections'); dependencies.append(el('legend', 'Dependencies in this repository'));
-        for (const issue of state.catalog?.issues ?? []) {
-          const row = el('label'), input = el('input'); input.type = 'checkbox'; input.checked = (values.dependencies ?? []).includes(issue.number); input.disabled = state.busy;
-          input.addEventListener('change', () => request({ operation: 'choose', field: 'dependencies', value: input.checked ? [...(state.draft.values.dependencies ?? []), issue.number] : state.draft.values.dependencies.filter(value => value !== issue.number) })); row.append(input, document.createTextNode('#' + issue.number + ' · ' + issue.title)); dependencies.append(row);
-        } card.append(dependencies);
+        const dependencyRows = el('div'); dependencyRows.id = 'draft-dependencies-results';
+        const drawDependencies = () => {
+          const result = issuePage(state.catalog?.issues ?? [], dependencyQuery, dependencyPage); dependencyPage = result.page; dependencyControls.update(result);
+          dependencyRows.replaceChildren(...result.rows.map(issue => {
+            const row = el('label'), input = el('input'); input.type = 'checkbox'; input.checked = (values.dependencies ?? []).includes(issue.number); input.disabled = state.busy;
+            input.addEventListener('change', () => request({ operation: 'choose', field: 'dependencies', value: input.checked ? [...(state.draft.values.dependencies ?? []), issue.number] : state.draft.values.dependencies.filter(value => value !== issue.number) })); row.append(input, document.createTextNode('#' + issue.number + ' · ' + issue.title)); return row;
+          }));
+        };
+        const dependencyControls = pager('draft-dependencies', 'Find dependencies by number or title', dependencyQuery, (query, page) => { dependencyQuery = query; dependencyPage = page; drawDependencies(); });
+        dependencies.append(el('p', 'Selected dependencies: ' + ((values.dependencies ?? []).map(number => '#' + number).join(', ') || 'none') + '.', 'small'), dependencyControls.root, dependencyRows);
+        drawDependencies(); card.append(dependencies);
         if (draft.preview) {
           const preview = el('div', undefined, 'setup-preview'); preview.id = 'issue-preview'; preview.append(el('h3', draft.values.title), el('p', draft.values.summary), el('p', state.repositoryLabel + ' · Backlog · Unassigned · Not Ready', 'protected-state'));
           const criteria = el('ol'); for (const item of draft.values.acceptance) criteria.append(el('li', item)); preview.append(criteria,
@@ -129,7 +159,7 @@ export async function initIssues({ el, message, setContext, show }) {
       for (const choice of state.question.choices) { const { label, ...action } = choice; const node = choice.operation === 'show' ? el('button', label, 'secondary') : button(label, action.operation, action); if (choice.operation === 'show') node.addEventListener('click', show); choices.append(node); }
       $('transcript').lastElementChild?.append(choices);
     }
-    if (focused && $(focused) && !$(focused).disabled) $(focused).focus();
+    if (focused && $(focused) && !$(focused).disabled) $(focused).focus({ preventScroll: true });
   }
   async function request(payload, text) {
     if (!state) return; const target = state.workspaceId;

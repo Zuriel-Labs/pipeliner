@@ -44,6 +44,7 @@ assets.set('skill-commands.mjs', path.join(__dirname, '../skills/commands.mjs'))
 assets.set('tool-commands.mjs', path.join(__dirname, '../tools/commands.mjs'));
 assets.set('privacy-commands.mjs', path.join(__dirname, '../privacy/commands.mjs'));
 assets.set('appearance-commands.mjs', path.join(__dirname, '../appearance/commands.mjs'));
+assets.set('issue-view.mjs', path.join(__dirname, '../issues/view.mjs'));
 assets.set('delivery-commands.mjs', path.join(__dirname, '../delivery/commands.mjs'));
 assets.set('permission-commands.mjs', path.join(__dirname, '../permissions/commands.mjs'));
 assets.set('tools/commands.mjs', path.join(__dirname, '../tools/commands.mjs'));

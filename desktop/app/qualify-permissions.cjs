@@ -83,8 +83,12 @@ exports.run = async ({ window, directory, permissions, appearance, channel, poli
     assert.equal(await js('document.documentElement.scrollWidth<=innerWidth'), true);
     assert.equal(await js("Array.from(document.querySelectorAll('#permission-form input')).every(input=>Array.from(document.querySelectorAll('#permission-form label')).some(label=>label.htmlFor===input.id && label.getBoundingClientRect().height>=44))"), true);
     assert.equal(await js("Array.from(document.querySelectorAll('#permission-form fieldset')).every(group=>Boolean(group.querySelector('legend')?.textContent))"), true);
-    await js("document.getElementById('permission-workspace-write').focus()"); const before = await js("document.getElementById('permission-workspace-write').checked");
+    window.focus();
+    await js("document.getElementById('permission-workspace-write').focus()");
+    await wait(async () => window.isFocused() && await js("document.activeElement.id==='permission-workspace-write' && !document.activeElement.disabled"));
+    const before = await js("document.getElementById('permission-workspace-write').checked");
     window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+    await wait(() => js(`document.getElementById('permission-workspace-write').checked===${!before}`));
     assert.equal(await js("document.getElementById('permission-workspace-write').checked"), !before);
     await js("document.getElementById('permission-form').scrollIntoView({block:'start'});window.scrollBy(0,-(document.querySelector('.app-head').getBoundingClientRect().height+document.querySelector('.app-nav').getBoundingClientRect().height+10))");
     writeFileSync(join(directory, 'qa-capture.png'), (await window.webContents.capturePage()).toPNG(), { flag: 'wx', mode: 0o600 });

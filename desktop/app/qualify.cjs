@@ -787,7 +787,7 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
     nativeEvidence, workspaceEvidence, folderFailure, folderCancelled, synthetic: 'Synthetic GitHub/model replies, first folder selection, optional tool catalog and background-service adapters; actual native secure fields, folder-panel cancellation, protected storage, local Git and own window. External tool compatibility and actual SMAppService/bootstrap are qualified separately.',
     notRun: issueScope ? ['Unchanged Codex unauthenticated discovery', 'Unchanged public GitHub App qualification', 'Unchanged invalid Cloud key probe'] : [],
     pending: ['Human native folder selection', 'Authenticated provider/GitHub PM journeys', 'Human task observation', 'Screen reader', 'Windows/Linux', 'Stable signed package storage identity'], captureAvailable: Boolean(capture),
-    nativeCaptureAvailable: existsSync(path.join(directory, 'secure-field.png')), qaCaptureAvailable: existsSync(path.join(directory, 'qa-capture.png')), layoutCaptureAvailable: existsSync(path.join(directory, 'layout-capture.png')) };
+    nativeCaptureAvailable: existsSync(path.join(directory, 'secure-field.png')), qaCaptureAvailable: existsSync(path.join(directory, 'qa-capture.png')), layoutCaptureAvailable: existsSync(path.join(directory, 'layout-capture.png')), recoveryCaptureAvailable: existsSync(path.join(directory, 'recovery-capture.png')) };
   console.log(JSON.stringify(report)); if (!report.passed) process.exitCode = 1;
   if (window.isDestroyed()) app.exit(report.passed ? 0 : 1);
   else { window.once('closed', () => app.exit(report.passed ? 0 : 1)); window.close(); }

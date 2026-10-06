@@ -83,7 +83,7 @@ export async function initPrivacy({ el, message, context, composer, history, sho
   function renderRecovery() {
     refresh.disabled = state.busy; const view = state.recovery, nodes = [];
     recoveryStatus.textContent = view ? 'Local records captured at ' + new Date(view.createdAt).toLocaleTimeString() + '. Selected repository: ' + (state.repositoryLabel ?? 'none') + '.'
-      : 'Local status has not been captured or changed since capture. Refresh to inspect the current records.';
+      : 'Local status is not captured, or host state changed after capture. Refresh to inspect the current records.';
     if (!view) nodes.push(el('p', 'Protected storage may be loading or unavailable. Existing data is preserved; secure connection controls remain available.', 'availability'));
     else {
       const connections = el('article', undefined, 'connection-card'); connections.id = 'recovery-connection-health'; connections.append(el('h3', 'Connections'));

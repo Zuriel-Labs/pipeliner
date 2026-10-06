@@ -264,7 +264,7 @@ exports.run = async ({ window, directory, vault, privacy, delivery, updates, upd
     assert.equal(await js("document.getElementById('recovery-permission-health').open"), true);
     await js("(()=>{const card=document.getElementById('recovery-service-health');window.scrollTo(0,window.scrollY+card.getBoundingClientRect().top-document.querySelector('.app-nav').getBoundingClientRect().bottom-24)})()");
     await js('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
-    writeFileSync(join(directory, 'layout-capture.png'), (await window.webContents.capturePage()).toPNG(), { flag: 'wx', mode: 0o600 });
+    writeFileSync(join(directory, 'recovery-capture.png'), (await window.webContents.capturePage()).toPNG(), { flag: 'wx', mode: 0o600 });
     window.setSize(1180, 840); appearance.dispatch({ operation: 'prepare', changes: { 'appearance.textScale': 1 } }); appearance.dispatch({ operation: 'apply' });
     await new Promise((resolve, reject) => { window.webContents.once('did-finish-load', resolve); window.webContents.once('did-fail-load', reject); window.reload(); });
     await wait(() => js("Boolean(document.getElementById('settings-recovery'))"));

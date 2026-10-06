@@ -139,7 +139,7 @@ exports.run = async ({ window, directory, appearance, channel, policy, developme
     await wait(() => appearance.status().values['appearance.layout'].value === 'above');
     assert.deepEqual(Object.fromEntries(Object.entries(appearance.status().values).filter(([key]) => key !== 'appearance.layout')), others);
     assert.equal(await js("document.getElementById('prompt').value"), 'Draft survives Restore Layout'); assert.equal(development.status().run, null);
-    window.setSize(1180, 840); await show();
+    await change('Set text size to 100%'); window.setSize(1180, 840); await show();
   });
   await check('appearance-200-percent-reflow-labels-touch-targets-and-motion', async () => {
     await change('Set text size to 200%'); await change('Use dark mode'); await show();

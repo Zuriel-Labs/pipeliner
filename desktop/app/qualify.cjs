@@ -717,18 +717,18 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
         catalog: { ...original.catalog, issues: rows }, draft: { id: 'scale-display-draft', state: 'choosing', values: { title: 'Synthetic cached draft', summary: 'Display only', acceptance: ['Preserve selected dependencies'], labels: [], dependencies: [10000] } } };
       try {
         window.webContents.send('issues:status', display); await wait(() => js("document.getElementById('issue-list-count').textContent.includes('10000 matching')"));
-        measurements.cachedIssueInitialDisplayMs = performance.now() - started;
+        const cached = { interaction: 'cached-issue-navigation', cachedIssueInitialDisplayMs: performance.now() - started }; measurements.push(cached);
         await js("document.getElementById('issues-nav').click()");
         assert.equal(await js("document.querySelectorAll('#issue-list>article').length===50&&document.querySelectorAll('#draft-dependencies-results input').length===50"), true);
         assert.equal(await js("document.getElementById('issue-draft').textContent.includes('Selected dependencies: #10000.')"), true);
-        measurements.cachedIssuePageMs = await js("(()=>{const samples=[];for(let i=0;i<20;i++){const start=performance.now();document.getElementById(i%2?'issue-list-previous':'issue-list-next').click();document.getElementById('issue-list').offsetHeight;samples.push(performance.now()-start)}return samples})()");
-        const sorted = [...measurements.cachedIssuePageMs].sort((a, b) => a - b); measurements.cachedIssuePageP95Ms = sorted[Math.ceil(sorted.length * .95) - 1];
-        assert(measurements.cachedIssuePageP95Ms < 150);
+        cached.cachedIssuePageMs = await js("(()=>{const samples=[];for(let i=0;i<20;i++){const start=performance.now();document.getElementById(i%2?'issue-list-previous':'issue-list-next').click();document.getElementById('issue-list').offsetHeight;samples.push(performance.now()-start)}return samples})()");
+        const sorted = [...cached.cachedIssuePageMs].sort((a, b) => a - b); cached.cachedIssuePageP95Ms = sorted[Math.ceil(sorted.length * .95) - 1];
+        assert(cached.cachedIssuePageP95Ms < 150);
         window.focus(); await js("document.getElementById('issue-list-next').focus({preventScroll:true})"); await wait(() => window.isFocused());
         window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
         await wait(() => js("document.querySelector('#issue-list h2').textContent.startsWith('#51 ')"));
         assert.equal(await js("document.activeElement.id"), 'issue-list-next');
-        measurements.cachedIssueSearchMs = await js("(()=>{const input=document.getElementById('issue-list-search');input.focus({preventScroll:true});const start=performance.now();input.value='#10000';input.dispatchEvent(new Event('input'));document.getElementById('issue-list').offsetHeight;return performance.now()-start})()");
+        cached.cachedIssueSearchMs = await js("(()=>{const input=document.getElementById('issue-list-search');input.focus({preventScroll:true});const start=performance.now();input.value='#10000';input.dispatchEvent(new Event('input'));document.getElementById('issue-list').offsetHeight;return performance.now()-start})()");
         assert.equal(await js("document.querySelectorAll('#issue-list>article').length===1&&document.querySelector('#issue-list h2').textContent.startsWith('#10000 ')&&document.activeElement.id==='issue-list-search'"), true);
         await js("const input=document.getElementById('draft-dependencies-search');input.value='#10000';input.dispatchEvent(new Event('input'))");
         assert.equal(await js("document.querySelectorAll('#draft-dependencies-results input').length===1&&document.querySelector('#draft-dependencies-results input').checked"), true);

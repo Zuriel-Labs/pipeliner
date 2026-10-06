@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign } from 'node:crypto';
 import { canonicalJSON } from '../core/settings.mjs';
-import { verifyUpdateManifest } from './manifest.mjs';
+import { verifyUpdateManifest, verifyUpdateAvailability } from './manifest.mjs';
 
 test('update metadata needs pinned signatures, fresh host-bound newer releases and strict asset identity', () => {
   const { publicKey, privateKey } = generateKeyPairSync('ed25519'), other = generateKeyPairSync('ed25519');
@@ -38,4 +38,9 @@ test('update metadata needs pinned signatures, fresh host-bound newer releases a
   }
   assert.throws(() => verify(signed({ ...release, version: '0.1.0+new-build' })));
   assert.throws(() => verify(signed({ ...release, version: '0.2.0-alpha.9' }), { current: { ...current, version: '0.2.0-alpha.10' } }));
+  for (const version of ['0.1.0', '0.0.99']) {
+    const metadata = { ...release, version }, result = verifyUpdateAvailability(signed(metadata), { trust, current, now: 1000 });
+    assert.deepEqual(result, { release: metadata, available: false }); assert(Object.isFrozen(result)); assert(Object.isFrozen(result.release));
+    assert.throws(() => verify(signed(metadata)));
+  }
 });

@@ -48,7 +48,7 @@ export function endpointURL(endpoint, local) {
   return url;
 }
 
-async function destination(url, local, signal) {
+export async function destination(url, local, signal) {
   signal.throwIfAborted(); if (local) return { address: '127.0.0.1', family: 4 };
   const hostname = url.hostname.replace(/^\[|\]$/g, '');
   if (isIP(hostname)) return { address: hostname, family: isIP(hostname) };

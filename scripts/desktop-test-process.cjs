@@ -4,15 +4,18 @@ const fs = require('node:fs'), path = require('node:path'), cp = require('node:c
 const { createHash, randomUUID } = require('node:crypto');
 const { syncBuiltinESMExports } = require('node:module');
 const root = fs.realpathSync(path.join(__dirname, '..'));
-const home = '/Users/chris/.local/share/eaglepro-test-storage-candidates/pipeliner-54-quality-groups-a1f61a6f0464dc69';
+const home = '/Users/chris/.local/share/eaglepro-test-storage-candidates/pipeliner-54-quality-closure-transaction-be11b6af99e84244';
 const wrapper = home + '/test-artifacts-quality-groups';
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const pins = Object.freeze({
-  [home + '/groups.py']: 'a1f61a6f0464dc6995e9785749d1bf12b25a1cf5b6ff33b8fe6cfc618a0ec8aa',
+  [home + '/groups.py']: 'be11b6af99e842442800359cd0a5b2e70e1c5910391cae1fd517cac368595aa5',
   '/Users/chris/.local/share/eaglepro-test-storage-candidates/pipeliner-54-quality-65b461aef6d8e9c5/quality.py': '65b461aef6d8e9c5647f88784084e93f689e72d973ceddd51ed7383babc5f355',
   '/Users/chris/.local/share/eaglepro-test-storage-candidates/pipeliner-54-contracts-5f78740e471545f0/entry.py': 'c28a82fd39f72954690f78bbf595a9d115037470994aae6c6837e41cd1e4b59a',
   '/Users/chris/.local/share/eaglepro-test-storage-candidates/pipeliner-54-contracts-5f78740e471545f0/diagnostics.py': 'f286d78fd994a899598259f93b39e03d86808861843def203c3b3699656e2119',
   '/Users/chris/.local/share/eaglepro-test-storage-candidates/pipeliner-54-contracts-5f78740e471545f0/contracts.py': 'da1f02f84b1ef58a7a47fe77ab84cdd288e62448ab03ecc3a7db2fc2e0b14040',
+  '/Users/chris/.local/share/eaglepro-test-storage-candidates/pipeliner-54-inventory-path-7521f09119f91ef1/entry.py': '7521f09119f91ef1c0b84b8e8e5643f88e542e0edfc2b0dbb0dc9938b1d7c5fd',
+  '/Users/chris/.local/share/eaglepro-test-storage-candidates/pipeliner-54-inventory-path-7521f09119f91ef1/optimizer.py': '5621a13d6db2aae066eb9c15baf41603b694b7a0f3761ec23ff8b76a817d4148',
+  '/Users/chris/.local/share/eaglepro-test-storage-candidates/pipeliner-54-inventory-diagnostic-963ec2607a2146f4/diagnostic.py': '963ec2607a2146f4a25279541ff067756428ba4d2d229b5cce1c01b0c16dc5eb',
 });
 const chromiumHome = '/Users/chris/.local/share/eaglepro-test-storage-candidates/chromium-singleton-95c420f82716';
 const active = Symbol.for('pipeliner.developer.process-admission');
@@ -42,7 +45,7 @@ exports.activate = function activate({ run = process.env.TEST_ARTIFACT_RUN, node
   if (process.platform !== 'darwin' || process.arch !== 'arm64' || typeof run !== 'string'
     || !/^\/Volumes\/TESTING\/TestArtifacts\/projects\/pipeliner\/issues\/54\/runs\/[A-Za-z0-9-]+$/.test(run)) throw Error('test-process-context-required');
   const manifest = () => JSON.parse(owned(path.join(run, 'manifest.json'), 65536));
-  const initial = manifest(), chromium = initial.diagnostic_context?.route === 'quality-explicit-groups-chromium';
+  const initial = manifest(), chromium = initial.diagnostic_context?.route === 'quality-explicit-closed-groups-inventory-chromium';
   const expected = { ...pins, ...(chromium ? {
     [chromiumHome + '/storage.py']: '6fbb08f51bf7f950672a4f7462983ae6b1b30253e880d336beb5955ec57e2de3',
     [chromiumHome + '/chromium_singleton.py']: 'ca4cf859353eb6889a58c36ba1d478aa9544a9f7ac9d1e3a9c2e6b4ee28ec10d',
@@ -51,11 +54,11 @@ exports.activate = function activate({ run = process.env.TEST_ARTIFACT_RUN, node
     const value = manifest();
     if (value.status !== 'running' || value.managed_by !== 'eaglepro-test-storage' || value.project !== 'pipeliner' || value.issue !== '54'
       || value.owner_uid !== process.getuid() || value.run_path !== run || value.volume_uuid !== '3F381C66-C7CC-4F8F-B3BE-E46151ACF674'
-      || value.diagnostic_context?.route !== 'quality-explicit-groups-' + (chromium ? 'chromium' : 'stable')
+      || value.diagnostic_context?.route !== 'quality-explicit-closed-groups-inventory-' + (chromium ? 'chromium' : 'stable')
       || value.quality_groups?.version !== 1 || Object.keys(value.diagnostic_context.source_sha256).length !== Object.keys(expected).length
       || Object.entries(expected).some(([file, digest]) => value.diagnostic_context.source_sha256[file] !== digest || hash(owned(file)) !== digest)
       || ['tmp', 'logs', 'outputs', 'recordings'].some(name => value.paths?.[name] !== path.join(run, name))) throw Error('test-process-receipt-unverified');
-    if (hash(owned(wrapper)) !== 'f2dc437023e141f915a06b31b30502c96f444d18f19864ba3f2f2e35f6094b73') throw Error('test-process-wrapper-unverified');
+    if (hash(owned(wrapper)) !== 'cb5f528f1c8dc810012c15450a0ed9a1f077031258f108a453a3063d99731048') throw Error('test-process-wrapper-unverified');
     return value;
   }
   const environment = { TEST_ARTIFACT_RUN: run, ...Object.fromEntries(['tmp','logs','outputs','recordings'].map(name => ['TEST_ARTIFACT_' + name.toUpperCase(), path.join(run, name)])),

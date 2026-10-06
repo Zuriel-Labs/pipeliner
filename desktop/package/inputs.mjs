@@ -23,7 +23,7 @@ const paths = [
   ...['calendar.mjs','commands.mjs','manager.mjs','model.mjs','read-cache.mjs','scheduler.mjs'].map(n=>'desktop/scheduling/'+n),
   ...['commands.mjs','manager.mjs','package.mjs','source.mjs','store.mjs'].map(n=>'desktop/skills/'+n),
   ...['bindings.mjs','commands.mjs','connections.mjs','invoke.mjs','manager.mjs','package.mjs','schema-worker.mjs','schema.mjs','store.mjs','transport.mjs'].map(n=>'desktop/tools/'+n),
-  'desktop/codex/executable.mjs', 'desktop/codex/client.mjs', 'desktop/ollama/client.mjs',
+  'desktop/package/build.mjs', 'desktop/codex/executable.mjs', 'desktop/codex/client.mjs', 'desktop/ollama/client.mjs',
 ];
 const allowed = new Set(paths), required = ['LICENSE','desktop/app/main.cjs','desktop/app/preload.cjs','desktop/app/index.html','desktop/prototype/style.css','desktop/development/starter.mjs','desktop/authority/Dockerfile'];
 function checkedPath(value) {

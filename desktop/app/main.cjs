@@ -34,7 +34,7 @@ if (startup.testMode) {
 } else { app.setPath('userData', dataDirectory); app.setPath('crashDumps', path.join(dataDirectory, 'crashes')); }
 protocol.registerSchemesAsPrivileged([{ scheme: 'pipeliner', privileges: { standard: true, secure: true } }]);
 if (!app.requestSingleInstanceLock()) app.exit(0);
-let window, manager, vault, workspaces, workspaceStore, issues, pipelines, policy, development, developmentStore, supervisor, scheduling, scheduler, background, backgroundHost, backgroundNative, skills, skillStore, tools, toolStore, toolConnections, privacy, privacyRecords, appearance, delivery, updates, updateHistory, permissions, artifacts, retentionMonitor, attachWindow, attachment, requestShutdown, authorizationMonitor, shutdownPaused = false, closing = false, verifiedClose = false;
+let window, manager, vault, workspaces, workspaceStore, issues, pipelines, policy, development, developmentStore, supervisor, scheduling, scheduler, background, backgroundHost, backgroundNative, skills, skillStore, tools, toolStore, toolConnections, privacy, privacyRecords, appearance, delivery, updates, updateHistory, maintenance, permissions, artifacts, retentionMonitor, attachWindow, attachment, requestShutdown, authorizationMonitor, shutdownPaused = false, closing = false, verifiedClose = false;
 const hostCapabilities = Object.freeze(['workspace.read', 'workspace.write', 'worker.exec', 'provider.turn', 'git.push', 'github.read', 'github.issue.write', 'github.pr.write', 'github.project.write', 'extension.install', 'extension.invoke']);
 // A production publisher requires reviewed provenance; none is invented for this preview.
 const trustedUpdateSources = Object.freeze([]);
@@ -94,6 +94,7 @@ app.whenReady().then(async () => {
   const { createUpdateControlChannel } = await moduleAt('../core/control.mjs');
   const { createUpdateManager } = await moduleAt('../updates/manager.mjs');
   const { openUpdateHistory } = await moduleAt('../updates/history.mjs');
+  const { createMaintenanceGate } = await moduleAt('../updates/idle.mjs');
   const { inspectMacDelivery } = await moduleAt('../delivery/mac.mjs');
   const { createPermissionManager } = await moduleAt('../permissions/manager.mjs');
   const { createPermissionControlChannel } = await moduleAt('../core/control.mjs');
@@ -119,6 +120,24 @@ app.whenReady().then(async () => {
   const { codexAdapter, ollamaAdapter } = await moduleAt('../connections/providers.mjs');
   const { nativeKeyEntry, nativeFolderEntry, nativeMCPEntry } = await moduleAt('../connections/native-entry.mjs');
   const activeConnections = new Set();
+  maintenance = createMaintenanceGate({ ready: () => {
+    if (closing || !vault || !workspaceStore || !policy || !developmentStore || !supervisor || !scheduler || !backgroundHost || !privacyRecords || !updateHistory) return false;
+    if (scheduler.busy() || issues.busy() || manager.status().connections.some(connection => connection.busy || connection.cleanupPending)
+      || backgroundHost.status().busy || backgroundHost.status().cleanupPending
+      || [workspaces, pipelines, scheduling, background, skills, tools, privacy, appearance, delivery, permissions].some(value => value.status().busy)) return false;
+    // ponytail: defer all reservations until compatible migration and captured-run recovery are qualified.
+    if (workspaceStore.workspaces().some(workspace => { const state = development.availability(workspace.id);
+      return state.run || state.busy || workspaceStore.schedule(workspace.id)?.pending; })
+      || workspaceStore.pending().length || developmentStore.recovery().some(run => run.uncertainEffects)) return false;
+    return true;
+  }, verify: signal => supervisor.verifyIdle(signal) });
+  const executionAllowed = () => !closing && !maintenance.active() && (backgroundHost?.executionAllowed() ?? !backgroundLaunch);
+  const registerControl = (name, channel) => ipcMain.handle(name, (event, payload) => {
+    if (closing) throw Error('App closing');
+    return maintenance.control(() => channel().dispatch(event, payload), {
+      passive: payload?.operation === 'status' || name === 'updates:control' && payload?.operation === 'stop'
+    });
+  });
   const publish = snapshot => {
     development?.sync(); scheduling?.sync(); background?.sync(); privacy?.sync();
     let returned = false;
@@ -161,7 +180,7 @@ app.whenReady().then(async () => {
   const makeDevelopment = initialRevision => createDevelopmentManager({ store: workspaceStore, policy, ledger: developmentStore, supervisor, skills: skillStore, tools: toolStore,
     connectMCP: toolConnections ? (...args) => toolConnections.lease(...args) : undefined, toolEpoch: toolConnections ? endpoint => toolConnections.epoch(endpoint) : undefined, initialRevision,
     connections: { developers: () => manager.developers(), status: () => manager.status(), acquire: (...args) => manager.acquire(...args), acquireProvider: (...args) => manager.acquireProvider(...args) }, onChange: publishDevelopment,
-    openCandidate: value => shell.openExternal(value), hostAuthority: () => !closing && (backgroundHost?.executionAllowed() ?? !backgroundLaunch),
+    openCandidate: value => shell.openExternal(value), hostAuthority: executionAllowed,
     ...(qualifying ? { api: require('./qualify.cjs').issueApi } : {}) });
   development = makeDevelopment(1);
   const publishScheduling = snapshot => { background?.sync(); pipelines?.sync(); skills?.sync(); tools?.sync(); if (window && !window.isDestroyed()) window.webContents.send('scheduling:status', snapshot); };
@@ -254,7 +273,7 @@ app.whenReady().then(async () => {
   delivery = makeDelivery(1);
   const publishUpdates = snapshot => { if (window && !window.isDestroyed()) window.webContents.send('updates:status', snapshot); };
   const makeUpdates = initialRevision => createUpdateManager({ policy, history: updateHistory, sources: () => trustedUpdateSources,
-    foreground: () => !closing && Boolean(window && !window.isDestroyed() && window.isVisible() && window.isFocused()),
+    maintenance, foreground: () => !closing && !maintenance.active() && Boolean(window && !window.isDestroyed() && window.isVisible() && window.isFocused()),
     version: app.isPackaged ? app.getVersion() : null, initialRevision, onChange: publishUpdates,
     onApplied: () => { issues?.sync(); pipelines?.sync(); development?.sync(); scheduling?.sync(); background?.sync(); skills?.sync(); tools?.sync(); appearance?.sync(); privacy?.sync(); delivery?.sync(); } });
   updates = makeUpdates(1);
@@ -297,39 +316,36 @@ app.whenReady().then(async () => {
     })().finally(() => { attachment = null; }); return attachment;
   };
   const channel = () => createConnectionControlChannel(manager, { contents: window.webContents, url, context: () => ({ revision: manager.status().revision }) });
-  ipcMain.handle('connections:control', (event, payload) => { if (closing) throw new Error('App closing'); return channel().dispatch(event, payload); });
+  registerControl('connections:control', channel);
   const workspaceChannel = () => createWorkspaceControlChannel(workspaces, { contents: window.webContents, url, context: () => ({ revision: workspaces.status().revision }) });
-  ipcMain.handle('workspaces:control', (event, payload) => { if (closing) throw new Error('App closing'); return workspaceChannel().dispatch(event, payload); });
+  registerControl('workspaces:control', workspaceChannel);
   const issueChannel = () => createIssueControlChannel(issues, { contents: window.webContents, url, context: () => ({ revision: issues.status().revision }) });
-  ipcMain.handle('issues:control', (event, payload) => { if (closing) throw new Error('App closing'); return issueChannel().dispatch(event, payload); });
+  registerControl('issues:control', issueChannel);
   const pipelineChannel = () => createPipelineControlChannel(pipelines, { contents: window.webContents, url, context: () => ({ revision: pipelines.status().revision }) });
-  ipcMain.handle('pipelines:control', (event, payload) => { if (closing) throw new Error('App closing'); return pipelineChannel().dispatch(event, payload); });
+  registerControl('pipelines:control', pipelineChannel);
   const developmentChannel = () => createDevelopmentControlChannel(development, { contents: window.webContents, url, context: () => ({ revision: development.status().revision }) });
-  ipcMain.handle('development:control', (event, payload) => { if (closing) throw new Error('App closing'); return developmentChannel().dispatch(event, payload); });
+  registerControl('development:control', developmentChannel);
   const schedulingChannel = () => createSchedulingControlChannel(scheduling, { contents: window.webContents, url, context: () => ({ revision: scheduling.status().revision }) });
-  ipcMain.handle('scheduling:control', (event, payload) => { if (closing) throw new Error('App closing'); return schedulingChannel().dispatch(event, payload); });
+  registerControl('scheduling:control', schedulingChannel);
   const backgroundChannel = () => createBackgroundControlChannel(background, { contents: window.webContents, url, context: () => ({ revision: background.status().revision }) });
-  ipcMain.handle('background:control', (event, payload) => { if (closing) throw new Error('App closing'); return backgroundChannel().dispatch(event, payload); });
+  registerControl('background:control', backgroundChannel);
   const skillChannel = () => createSkillControlChannel(skills, { contents: window.webContents, url, context: () => ({ revision: skills.status().revision }) });
-  ipcMain.handle('skills:control', (event, payload) => { if (closing) throw new Error('App closing'); return skillChannel().dispatch(event, payload); });
+  registerControl('skills:control', skillChannel);
   const toolChannel = () => createToolControlChannel(tools, { contents: window.webContents, url, context: () => ({ revision: tools.status().revision }) });
-  ipcMain.handle('tools:control', (event, payload) => { if (closing) throw new Error('App closing'); return toolChannel().dispatch(event, payload); });
+  registerControl('tools:control', toolChannel);
   const privacyChannel = () => createPrivacyControlChannel({ status: () => privacy.status(), dispatch: action => {
     const operation = action.operation === 'chat' ? privacyCommand(action.text)?.operation : action.operation;
     if (['delete', 'apply'].includes(operation)) refreshRecovery(); return privacy.dispatch(action);
   } }, { contents: window.webContents, url, context: () => ({ revision: privacy.status().revision }) });
-  ipcMain.handle('privacy:control', (event, payload) => {
-    if (closing) throw new Error('App closing');
-    return privacyChannel().dispatch(event, payload);
-  });
+  registerControl('privacy:control', privacyChannel);
   const appearanceChannel = () => createAppearanceControlChannel(appearance, { contents: window.webContents, url, context: () => ({ revision: appearance.status().revision }) });
-  ipcMain.handle('appearance:control', (event, payload) => { if (closing) throw new Error('App closing'); return appearanceChannel().dispatch(event, payload); });
+  registerControl('appearance:control', appearanceChannel);
   const deliveryChannel = () => createDeliveryControlChannel(delivery, { contents: window.webContents, url, context: () => ({ revision: delivery.status().revision }) });
-  ipcMain.handle('delivery:control', (event, payload) => { if (closing) throw new Error('App closing'); return deliveryChannel().dispatch(event, payload); });
+  registerControl('delivery:control', deliveryChannel);
   const updateChannel = () => createUpdateControlChannel(updates, { contents: window.webContents, url, context: () => ({ revision: updates.status().revision }) });
-  ipcMain.handle('updates:control', (event, payload) => { if (closing) throw new Error('App closing'); return updateChannel().dispatch(event, payload); });
+  registerControl('updates:control', updateChannel);
   const permissionChannel = () => createPermissionControlChannel(permissions, { contents: window.webContents, url, context: () => ({ revision: permissions.status().revision }) });
-  ipcMain.handle('permissions:control', (event, payload) => { if (closing) throw new Error('App closing'); return permissionChannel().dispatch(event, payload); });
+  registerControl('permissions:control', permissionChannel);
   const suspendHost = () => { scheduler?.suspend(); void updates?.stop().catch(() => {}); void backgroundHost?.suspend().catch(() => {}); };
   const wakeHost = () => { if (!closing) void (async () => { await backgroundHost?.wake(); if (backgroundHost?.executionAllowed()) await scheduler?.wake(); })().catch(() => {}); };
   const endSession = event => { event.preventDefault(); void requestShutdown?.(); };
@@ -386,7 +402,7 @@ app.whenReady().then(async () => {
     const { openDevelopmentStore } = await moduleAt('../development/state.mjs');
     const { openExecutionSupervisor } = await moduleAt('../core/execution.mjs');
     developmentStore = openDevelopmentStore(directory, { vault });
-    try { supervisor = openExecutionSupervisor(directory, { store: policy }); } catch { supervisor = null; }
+    try { supervisor = openExecutionSupervisor(directory, { store: policy, maintenance: () => maintenance.active() }); } catch { supervisor = null; }
     const developmentRevision = development.status().revision + 1; await development.close(); development = makeDevelopment(developmentRevision); publishDevelopment(development.status());
     const permissionRevision = permissions.status().revision + 1; await permissions.close(); permissions = makePermissions(permissionRevision); publishPermissions(permissions.status());
     const pipelineRevision = pipelines.status().revision + 1; pipelines.close(); pipelines = makePipelines(pipelineRevision); publishPipelines(pipelines.status());
@@ -395,7 +411,7 @@ app.whenReady().then(async () => {
     const skillRevision = skills.status().revision + 1; skills.close(); skills = makeSkills(skillRevision); publishSkills(skills.status());
     const toolRevision = tools.status().revision + 1; await tools.close(); tools = makeTools(toolRevision); publishTools(tools.status());
     scheduler = createScheduler({ store: workspaceStore, policy, development,
-      hostAuthority: () => !closing && (backgroundHost?.executionAllowed() ?? !backgroundLaunch),
+      hostAuthority: executionAllowed,
       connections: { acquire: (...args) => manager.acquireRead(...args), epoch: id => manager.epoch(id) }, nextCalendar: (config, after, signal) => nextCalendar(calendarHelper, config, after, signal),
       onChange: () => scheduling?.sync(), ...(qualifying ? { api: require('./qualify.cjs').issueApi } : {}) });
     const schedulingRevision = scheduling.status().revision + 1; scheduling.close(); scheduling = makeScheduling(schedulingRevision); publishScheduling(scheduling.status());
@@ -409,11 +425,11 @@ app.whenReady().then(async () => {
     } });
     refreshRecovery(); const privacyRevision = privacy.status().revision + 1; await privacy.close(); privacy = makePrivacy(privacyRevision); publishPrivacy(privacy.status());
     let retentionCursor = null;
-    const retain = () => { if (closing) return; try { refreshRecovery(); const result = privacyRecords.expire({ after: retentionCursor, limit: 500 }); retentionCursor = result.more ? result.after : null; }
+    const retain = () => { if (closing || maintenance.active()) return; try { refreshRecovery(); const result = privacyRecords.expire({ after: retentionCursor, limit: 500 }); retentionCursor = result.more ? result.after : null; }
       catch { console.error('Pipeliner local retention needs protected recovery; records were preserved.'); } };
     retain(); retentionMonitor = setInterval(retain, 60000); retentionMonitor.unref();
     await backgroundHost.refresh();
-    authorizationMonitor = setInterval(() => { if (!closing) void backgroundHost.refresh().catch(() => {}); }, 1000); authorizationMonitor.unref();
+    authorizationMonitor = setInterval(() => { if (!closing && !maintenance.active()) void backgroundHost.refresh().catch(() => {}); }, 1000); authorizationMonitor.unref();
     await updates.poll();
     await scheduler.check('startup');
   } catch { publish(manager.status()); }

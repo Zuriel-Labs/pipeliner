@@ -6,10 +6,11 @@ import { readUpdateSource } from './source.mjs';
 import { endpointURL } from '../tools/transport.mjs';
 
 export function createUpdateManager({ policy, version = null, history = null, sources = () => [], reader = readUpdateSource,
-  host = { platform: process.platform, architecture: process.arch }, foreground = () => true, initialRevision = 1, onChange = () => {}, onApplied = () => {} }) {
+  host = { platform: process.platform, architecture: process.arch }, foreground = () => true, maintenance = null, initialRevision = 1, onChange = () => {}, onApplied = () => {} }) {
   record(host, ['platform', 'architecture']);
   if (!Number.isSafeInteger(initialRevision) || initialRevision < 1 || [onChange, onApplied, sources, reader, foreground].some(fn => typeof fn !== 'function')
     || history !== null && ['read', 'begin', 'complete', 'fail'].some(name => typeof history[name] !== 'function')
+    || maintenance !== null && typeof maintenance.exclusive !== 'function'
     || Object.values(host).some(value => typeof value !== 'string' || !/^[a-z0-9_-]{1,16}$/.test(value))
     || version !== null && (typeof version !== 'string' || version.length > 128 || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?$/.test(version))) throw Error('Desktop update controls unavailable');
   host = { ...host };
@@ -128,7 +129,22 @@ export function createUpdateManager({ policy, version = null, history = null, so
       try { onApplied(); } catch { message = 'Update settings saved. Refresh did not finish; reopen Settings to inspect them.'; }
       publish(); return { snapshot: status(), applied: result.applied };
     } else if (payload.operation === 'install') {
-      revision++; message = 'Update installation is unavailable. A verified release, qualified installer and migration/recovery preview are required. No app files changed.';
+      if (pending) return { snapshot: status() };
+      if (!capable(inspect()) || !status().release || !maintenance) {
+        revision++; message = 'Update installation is unavailable. A verified release, qualified installer and migration/recovery preview are required. No app files changed.';
+      } else {
+        const operation = { controller: new AbortController() }; pending = operation; revision++;
+        message = 'Inspecting idle work on this Mac. No installer is downloaded.';
+        operation.done = (async () => {
+          try {
+            await maintenance.exclusive(checkpoint => {
+              checkpoint(); message = 'Idle work verified. Installation still needs a qualified native installer and compatible recovery preview. No app files changed.';
+            }, { signal: operation.controller.signal });
+          } catch { message = 'Update deferred: work is busy, changed or unverified. Finish or repair pending work, then retry. No work was stopped and no app files changed.'; }
+          finally { pending = null; revision++; publish(); }
+        })();
+        publish(); await operation.done; return { snapshot: status() };
+      }
     } else if (payload.operation !== 'view') throw Error('Desktop update operation unavailable');
     publish(); return { snapshot: status() };
   }

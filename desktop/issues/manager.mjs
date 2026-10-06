@@ -289,7 +289,7 @@ export function createIssueManager({ store, policy, connections, api = github, n
     }
     throw new Error('issue-unavailable');
   }
-  return Object.freeze({ status, dispatch, sync() { sync(); publish(); }, async idle() { await Promise.allSettled([...tasks.values()].map(task => task.done)); },
+  return Object.freeze({ status, dispatch, busy: () => tasks.size > 0, sync() { sync(); publish(); }, async idle() { await Promise.allSettled([...tasks.values()].map(task => task.done)); },
     agent: Object.freeze({
       propose(binding, targetId, values) {
         const target = workspace(targetId); agentAuthority(binding, target, false);

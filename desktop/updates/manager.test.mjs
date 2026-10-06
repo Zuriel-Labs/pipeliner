@@ -11,6 +11,7 @@ import { openPolicyStore } from '../core/policy.mjs';
 import { createUpdateManager } from './manager.mjs';
 import { updateCommand } from './commands.mjs';
 import { createUpdateControlChannel } from '../core/control.mjs';
+import { createMaintenanceGate } from './idle.mjs';
 
 function fixture() {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-54-updates-')));
@@ -78,6 +79,14 @@ test('update controls use protected signed history, exact host sources and await
     sha256: 'a'.repeat(64), sourceCommit: 'b'.repeat(40), gitTree: 'c'.repeat(40) };
   const envelope = canonicalJSON({ release, signature: sign(null, Buffer.from(canonicalJSON(release)), privateKey).toString('base64') });
   let now = 1000, trusted = true, foreground = true, mode = 'normal', calls = 0, settled = 0, releaseRead, update, vault, history;
+  let idle = true, holdInspection = false, inspectionCalls = 0, inspectionSettled = 0;
+  const maintenance = createMaintenanceGate({ ready: () => idle, verify: async signal => {
+    inspectionCalls++;
+    try {
+      if (holdInspection) await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
+      signal.throwIfAborted(); return true;
+    } finally { inspectionSettled++; }
+  } });
   try {
     vault = await openVault(f.root, { available: async () => true, encrypt: async text => Buffer.from(text),
       decrypt: async bytes => ({ result: bytes.toString(), shouldReEncrypt: false }) });
@@ -97,7 +106,7 @@ test('update controls use protected signed history, exact host sources and await
         return { envelope };
       } finally { settled++; }
     };
-    const open = () => createUpdateManager({ policy: f.policy, history, version: '0.1.0', sources: () => trusted ? [source] : [], reader,
+    const open = () => createUpdateManager({ policy: f.policy, history, version: '0.1.0', sources: () => trusted ? [source] : [], reader, maintenance,
       foreground: () => foreground, host: { platform: 'darwin', architecture: 'arm64' } });
     update = open(); await assert.rejects(update.dispatch({ operation: 'source', name: 'Unknown publisher' })); assert.equal(calls, 0);
     await update.dispatch({ operation: 'chat', text: 'Use Desktop update source Synthetic Releases' });
@@ -106,6 +115,17 @@ test('update controls use protected signed history, exact host sources and await
     await update.dispatch({ operation: 'apply' }); assert.equal(update.status().sourceQualified, true);
     await update.dispatch({ operation: 'chat', text: 'Check for Desktop updates' });
     assert.equal(update.status().lastCheck, now); assert.equal(update.status().release.version, '0.2.0'); assert.equal(update.status().installQualified, false);
+    const policyRevision = f.policy.worker.read(null).revision;
+    idle = false; await maintenance.control(() => update.dispatch({ operation: 'install' }));
+    assert.match(update.status().message, /deferred/); assert.equal(inspectionCalls, 0);
+    idle = true; await maintenance.control(() => update.dispatch({ operation: 'chat', text: 'Update Desktop when idle' }));
+    assert.match(update.status().message, /Idle work verified/); assert.equal(update.status().installQualified, false);
+    holdInspection = true;
+    const inspecting = maintenance.control(() => update.dispatch({ operation: 'install' }));
+    assert.equal(update.status().busy, true); assert.equal(maintenance.active(), true);
+    await maintenance.control(() => update.dispatch({ operation: 'stop' }), { passive: true }); await inspecting;
+    assert.equal(inspectionSettled, inspectionCalls); assert.equal(update.status().busy, false); assert.equal(maintenance.active(), false);
+    assert.equal(calls, 1); assert.equal(f.policy.worker.read(null).revision, policyRevision); holdInspection = false;
     await update.poll(); assert.equal(calls, 1);
     await update.close(); update = open(); await update.poll(); assert.equal(calls, 1);
     now += 86400000; foreground = false; await update.poll(); assert.equal(calls, 1);

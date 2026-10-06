@@ -87,7 +87,9 @@ test('a switched repository aborts old work and preserves its draft without muta
   try {
     await preview(f); let release; f.remote.delay(() => new Promise(resolve => { release = resolve; }));
     f.manager.dispatch({ operation: 'create' }); await new Promise(resolve => setImmediate(resolve));
-    f.store.select('repo_second'); f.manager.sync(); release(); await f.manager.idle();
+    f.store.select('repo_second'); f.manager.sync();
+    assert.equal(f.manager.status().busy, false); assert.equal(f.manager.busy(), true);
+    release(); await f.manager.idle(); assert.equal(f.manager.busy(), false);
     assert.equal(f.manager.status().workspaceId, 'repo_second'); assert.equal(f.manager.status().draft, null); assert.equal(f.remote.writes.length, 0);
     f.store.select(f.workspace.id); f.manager.sync(); assert.equal(f.manager.status().draft.state, 'failed');
     await preview(f); f.disconnect(); f.manager.dispatch({ operation: 'create' }); await f.manager.idle(); assert.equal(f.remote.writes.length, 0);

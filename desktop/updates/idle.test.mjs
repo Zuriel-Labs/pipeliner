@@ -13,7 +13,7 @@ test('host maintenance fences competing controls, stale continuations, late work
   const channel = createUpdateControlChannel({ status: () => ({ revision: 1 }), dispatch: () => gate.exclusive(async checkpoint => {
     checkpoint(); consumed++; return { snapshot: { revision: 1 } };
   }) }, { contents, url: frame.url, context: () => ({ revision: 1 }) });
-  const request = (event, payload) => gate.control(() => channel.dispatch(event, payload), { readOnly: payload?.operation === 'status' });
+  const request = (event, payload) => gate.control(() => channel.dispatch(event, payload), { passive: payload?.operation === 'status' });
   const payload = { operation: 'install', contextRevision: 1 };
   idle = false;
   await assert.rejects(request(event, payload), /maintenance-deferred/); assert.equal(inspectionCalls, 0); assert.equal(gate.active(), false);
@@ -33,7 +33,8 @@ test('host maintenance fences competing controls, stale continuations, late work
   idle = true;
   const cancelled = new AbortController();
   const operation = gate.control(() => gate.exclusive(() => { consumed++; }, { signal: cancelled.signal }));
-  cancelled.abort(); finishInspection(); await assert.rejects(operation, /abort/i); assert.equal(consumed, 0); assert.equal(gate.active(), false);
+  await gate.control(() => cancelled.abort(), { passive: true });
+  assert.equal(gate.active(), true); finishInspection(); await assert.rejects(operation, /abort/i); assert.equal(consumed, 0); assert.equal(gate.active(), false);
   let checkpoint;
   const success = gate.control(() => gate.exclusive(check => { checkpoint = check; check(); consumed++; return 'prepared'; }));
   finishInspection(); assert.equal(await success, 'prepared'); assert.equal(consumed, 1); assert.equal(gate.active(), false);

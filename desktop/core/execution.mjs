@@ -26,7 +26,8 @@ export function acquireExecutionOwner(directory) {
   return Object.freeze({ close() { if (!closed) { db.close(); closed = true; } } });
 }
 
-export function openExecutionSupervisor(directory, { store }) {
+export function openExecutionSupervisor(directory, { store, maintenance = () => false }) {
+  if (typeof maintenance !== 'function') throw Error('Execution maintenance inspection unavailable');
   const owner = acquireExecutionOwner(directory);
   let db, environment, closed = false, foregroundPausing = false, foregroundError = null;
   try {
@@ -64,7 +65,7 @@ export function openExecutionSupervisor(directory, { store }) {
     const repository = db.prepare('SELECT repository FROM workers WHERE run_id=? ORDER BY epoch DESC LIMIT 1').get(binding.runId)?.repository;
     const run = repository ? store.runtime.status(repository) : [...identities.keys()].map(repo => store.runtime.status(repo)).find(value => value?.id === binding.runId);
     if (!run || run.id !== binding.runId || run.epoch !== binding.epoch) throw new Error('Stale execution epoch');
-    if (running && (foregroundPausing || run.control !== 'running')) throw new Error('Execution paused, stopped or recovery-required');
+    if (running && (maintenance() || foregroundPausing || run.control !== 'running')) throw new Error('Execution paused, stopped or recovery-required');
     if (running) { const authority = store.worker.authority(run.repository, run.policyRevision); if (!runtimeDeveloperAllowed(authority, run.dev) || !authority.capabilities.includes('worker.exec')) throw new Error('Execution authority unavailable or revoked'); }
     return run;
   }
@@ -87,7 +88,24 @@ export function openExecutionSupervisor(directory, { store }) {
   }
   const supervisor = {
     attach(identity) { requireOpen(); const workspace = workspaceData(identity); identities.set(workspace.repository, identity); },
-    prepare: () => environment.prepare(),
+    prepare() { requireOpen(); if (maintenance()) throw Error('Execution maintenance fence active'); return environment.prepare(); },
+    async verifyIdle(signal) {
+      requireOpen(); if (maintenance() !== true) throw Error('Execution maintenance fence required');
+      const idle = () => {
+        requireOpen(); signal?.throwIfAborted();
+        if (maintenance() !== true || inFlight.size || pendingControls.size || monitorWork || foregroundPausing || foregroundError
+          || db.prepare("SELECT 1 FROM workers WHERE state NOT IN ('stopped','exited') LIMIT 1").get()) throw Error('Execution remains busy or unverified');
+      };
+      idle();
+      const inventory = () => db.prepare('SELECT * FROM workers ORDER BY run_id,epoch').all();
+      const rows = inventory(), snapshot = canonicalJSON(rows);
+      for (const binding of rows) {
+        const row = rowFor({ runId: binding.run_id, epoch: binding.epoch });
+        const observed = await environment.inspect(row.data.manifest, row.state === 'stopped' ? null : row.cid);
+        idle(); if (!['exited', 'absent', 'vm-stopped'].includes(observed.state)) throw Error('Owned worker still running');
+      }
+      idle(); if (canonicalJSON(inventory()) !== snapshot) throw Error('Execution inventory changed'); return true;
+    },
     async start(identity, binding, { candidate, program, allowedPath }) {
       this.attach(identity); const run = current(binding, true); candidateCheck(identity, candidate);
       if (!filename(allowedPath)) throw new Error('Invalid scoped effect target');
@@ -225,6 +243,7 @@ export function openExecutionSupervisor(directory, { store }) {
     control(binding, operation) {
       const run = current(binding);
       if (!['status', 'pause', 'resume', 'stop'].includes(operation)) throw new Error('Invalid execution control');
+      if (operation === 'resume' && maintenance()) throw Error('Execution maintenance fence active');
       if (operation === 'status') return this.status(run.repository);
       if (operation === 'resume' && foregroundPausing) throw new Error('Foreground execution is pausing');
       if ((operation === 'pause' && run.control === 'paused' || operation === 'stop' && run.control === 'stopped') && !inFlight.has(run.id)) return immutable({ received: true, verified: true });
@@ -290,7 +309,7 @@ export function openExecutionSupervisor(directory, { store }) {
   };
   // Inspect authority and elapsed budgets locally; no provider call or automatic resume.
   const monitor = setInterval(() => {
-    if (closed || monitorWork) return;
+    if (closed || monitorWork || maintenance()) return;
     monitorWork = (async () => {
       for (const resource of db.prepare("SELECT run_id,epoch,repository FROM workers WHERE state IN ('running','created')").all()) {
         if (inFlight.has(resource.run_id)) continue;

@@ -44,8 +44,9 @@ export function createUpdateManager({ policy, version = null, history = null, so
   function status() {
     const context = sync(), { view, selected, approved } = context; let saved = null;
     try { if (capable(context)) saved = history.read(selected.trust, context.current); } catch { /* Preserve history and fail closed. */ }
-    const display = values => Object.fromEntries(Object.entries(values).filter(([id]) => ['updates.channel', 'updates.source'].includes(id)).map(([id, value]) =>
-      [id, id === 'updates.source' ? { ...value, value: value.value === null ? null : approved.items.find(item => item.trust.id === value.value)?.label ?? 'Unavailable saved source' } : value]));
+    const sourceName = id => id === null ? null : approved.items.find(item => item.trust.id === id)?.label ?? 'Unavailable saved source';
+    const display = values => Object.fromEntries(preview.keys.map(id => [id, id === 'updates.source'
+      ? { ...values[id], value: sourceName(values[id].value), configuredValue: sourceName(values[id].configuredValue) } : values[id]]));
     return { revision, storageAvailable: Boolean(view), scope: 'host', policyRevision: view?.revision ?? null, installedVersion: version,
       values: view ? { 'updates.channel': view.values['updates.channel'] } : null,
       sources: approved.items.map(item => ({ name: item.label })), sourceName: selected?.label ?? null,
@@ -61,7 +62,8 @@ export function createUpdateManager({ policy, version = null, history = null, so
     record(changes, [], ['updates.channel', 'updates.source']); invalidate();
     const input = policy.control.capture({ commandId: randomUUID(), conversationId, target: null, text: 'Review this Mac’s Desktop update settings.' });
     try {
-      preview = policy.control.prepare({ inputId: input.id, requestId: randomUUID(), conversationId, scope: 'host', target: null, changes, reset });
+      preview = { ...policy.control.prepare({ inputId: input.id, requestId: randomUUID(), conversationId, scope: 'host', target: null, changes, reset }),
+        keys: [...Object.keys(changes), ...reset] };
       message = 'Review this Mac’s update settings. Applying saves settings only; no update is checked, downloaded or installed.';
     } catch (error) {
       policy.control.invalidate(input.id);

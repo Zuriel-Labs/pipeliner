@@ -10,6 +10,7 @@ import { initTools } from './tools.mjs';
 import { initPrivacy } from './privacy.mjs';
 import { initAppearance } from './appearance.mjs';
 import { initDelivery } from './delivery.mjs';
+import { initUpdates } from './updates.mjs';
 import { initPermissions } from './permissions.mjs';
 
 let state = null, returnFocus = null; const drafts = new Map(), previousBusy = new Set();
@@ -152,6 +153,7 @@ const appearance = await initAppearance({ el, message, preserveReadingPosition, 
 const permissions = await initPermissions({ el, message, show: () => { showSettings(); $('settings-permissions').click(); } });
 const delivery = await initDelivery({ el, message, show: () => { showSettings(); $('settings-delivery').click(); },
   editRelease: scope => { showSettings(); $('settings-pipelines').click(); pipelines.chat('Edit ' + scope + ' Release pipeline'); } });
+const updates = await initUpdates({ el, message, show: () => { showSettings(); $('settings-updates').click(); } });
 $('prompt').addEventListener('input', () => { promptRevision++; void privacy.draft($('prompt').value).catch(() => {}); });
 $('composer').addEventListener('submit', event => { event.preventDefault(); const text = $('prompt').value.trim(); if (!text) return;
   if (containsSecret(text) && !(skills.handles(text) && skills.safe(text)) && !(tools.handles(text) && tools.safe(text))) { $('prompt').value = ''; promptRevision++; void privacy.draft('').catch(() => {}); message('Use the protected connection surface for keys. Nothing was sent; protected-looking text was not saved.'); $('prompt').focus(); return; }
@@ -163,6 +165,7 @@ $('composer').addEventListener('submit', event => { event.preventDefault(); cons
   if (!connectionCommand(text).connection && appearance.handles(text)) appearance.chat(text);
   else if (!connectionCommand(text).connection && permissions.handles(text)) permissions.chat(text);
   else if (!connectionCommand(text).connection && delivery.handles(text)) delivery.chat(text);
+  else if (!connectionCommand(text).connection && updates.handles(text)) updates.chat(text);
   else if (!connectionCommand(text).connection && skills.handles(text)) skills.chat(text);
   else if (!connectionCommand(text).connection && tools.handles(text)) tools.chat(text);
   else if (!connectionCommand(text).connection && background.handles(text)) background.chat(text);
@@ -174,7 +177,7 @@ $('composer').addEventListener('submit', event => { event.preventDefault(); cons
   else request({ operation: 'chat', text }, text);
 });
 $('chat-nav').addEventListener('click', () => showSettings(false)); $('settings-nav').addEventListener('click', () => showSettings());
-for (const category of ['connections', 'pipelines', 'agents', 'schedule', 'background', 'skills', 'privacy', 'appearance', 'delivery', 'permissions']) $('settings-' + category).addEventListener('click', () => {
+for (const category of ['connections', 'pipelines', 'agents', 'schedule', 'background', 'skills', 'privacy', 'appearance', 'delivery', 'permissions', 'updates']) $('settings-' + category).addEventListener('click', () => {
   $('connection-settings').hidden = category !== 'connections'; $('pipeline-settings').hidden = category !== 'pipelines'; $('agent-settings').hidden = category !== 'agents'; $('schedule-settings').hidden = category !== 'schedule';
   $('background-settings').hidden = category !== 'background';
   $('skill-settings').hidden = category !== 'skills';
@@ -183,7 +186,8 @@ for (const category of ['connections', 'pipelines', 'agents', 'schedule', 'backg
   $('appearance-settings').hidden = category !== 'appearance';
   $('delivery-settings').hidden = category !== 'delivery';
   $('permission-settings').hidden = category !== 'permissions';
-  for (const name of ['connections', 'pipelines', 'agents', 'schedule', 'background', 'skills', 'privacy', 'appearance', 'delivery', 'permissions']) $('settings-' + name).setAttribute('aria-pressed', String(name === category));
+  $('update-settings').hidden = category !== 'updates';
+  for (const name of ['connections', 'pipelines', 'agents', 'schedule', 'background', 'skills', 'privacy', 'appearance', 'delivery', 'permissions', 'updates']) $('settings-' + name).setAttribute('aria-pressed', String(name === category));
 });
 for (const button of document.querySelectorAll('[data-settings]')) button.addEventListener('click', () => showSettings());
 for (const button of document.querySelectorAll('[data-chat]')) button.addEventListener('click', () => request({ operation: 'chat', text: button.dataset.chat }, button.dataset.chat));

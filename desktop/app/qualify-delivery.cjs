@@ -5,7 +5,7 @@ const { createHash, randomUUID } = require('node:crypto');
 const { join } = require('node:path');
 const { pathToFileURL } = require('node:url');
 
-exports.run = async ({ window, directory, vault, privacy, delivery, artifacts, appearance, channel, policy, js, wait, check, measurements }) => {
+exports.run = async ({ window, directory, vault, privacy, delivery, updates, updateChannel, artifacts, appearance, channel, policy, js, wait, check, measurements }) => {
   const chat = text => js(`document.getElementById('chat-nav').click();document.getElementById('prompt').value=${JSON.stringify(text)};document.getElementById('composer').requestSubmit()`);
   const show = () => js("document.getElementById('settings-nav').click();document.getElementById('settings-delivery').click()");
   const change = async text => { await chat(text); await wait(() => Boolean(delivery.status().preview)); await chat('Apply this delivery change'); await wait(() => !delivery.status().preview); };
@@ -172,5 +172,58 @@ exports.run = async ({ window, directory, vault, privacy, delivery, artifacts, a
       assert.equal(readFileSync(join(root, backups[0])).includes(Buffer.from('one.dmg')), false);
       measurements.push({ inspection: 'actual-Mac-vault-compatible-synthetic-artifact-schema-upgrade', from: 1, to: 2, encryptedOriginalVerified: true, replayedBuilds: 0, milliseconds: performance.now() - started });
     } finally { db?.close(); await store?.close(); }
+  });
+  await check('updates-host-chat-exact-preview-native-keyboard-and-unqualified-delivery', async () => {
+    const before = policy.worker.read(null).values, frame = window.webContents.mainFrame, event = { sender: window.webContents, senderFrame: frame };
+    await chat('Show Desktop updates'); await wait(() => js("!document.getElementById('update-settings').hidden && Boolean(document.getElementById('update-channel'))"));
+    assert.equal(updates.status().scope, 'host'); assert.equal(updates.status().sourceConfigured, false); assert.equal(updates.status().sourceQualified, false);
+    assert.equal(updates.status().installedVersion, null); assert.equal(updates.status().lastCheck, null); assert.equal(updates.status().release, null);
+    assert.equal(await js("document.getElementById('update-check').disabled && document.getElementById('update-install').disabled && document.getElementById('update-availability').textContent.includes('No trusted source configured')"), true);
+    const payload = { operation: 'prepare', contextRevision: updates.status().revision, changes: { 'updates.channel': 'beta' } };
+    assert.throws(() => updateChannel.dispatch({ ...event, sender: {} }, payload));
+    assert.throws(() => updateChannel.dispatch({ ...event, senderFrame: { url: frame.url, parent: frame } }, payload));
+    assert.throws(() => updateChannel.dispatch(event, { ...payload, scope: 'repository' }));
+    await chat('Use the Beta update channel'); await wait(() => Boolean(updates.status().preview));
+    const p = updates.status().preview; assert.equal(p.scope, 'host'); assert.equal(p.target, null); assert.equal(p.before['updates.channel'].value, 'stable'); assert.equal(p.after['updates.channel'].value, 'beta');
+    assert.equal(policy.worker.read(null).values['updates.channel'].value, 'stable');
+    await wait(() => js("Boolean(document.getElementById('update-apply-chat')) && document.getElementById('update-chat-preview').textContent.includes('This Mac')"));
+    await js("document.getElementById('settings-nav').click();document.getElementById('settings-updates').click();document.getElementById('update-apply').scrollIntoView({block:'center'});document.getElementById('update-apply').focus()");
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+    await wait(() => policy.worker.read(null).values['updates.channel'].value === 'beta' && !updates.status().preview);
+    await wait(() => js("document.getElementById('update-channel').value==='beta' && document.activeElement.id==='update-channel'"));
+    const revision = policy.worker.read(null).revision; assert.equal((await updates.dispatch({ operation: 'apply', hash: p.hash })).applied, false);
+    await chat('Use the Alpha update channel'); await wait(() => Boolean(updates.status().preview));
+    await chat('Cancel this update change'); await wait(() => !updates.status().preview);
+    for (const text of ['Check for Desktop updates', 'Update Desktop when idle']) { await chat(text); await wait(() => updates.status().message.includes(text.startsWith('Check') ? 'No check or download ran' : 'No app files changed')); }
+    assert.equal(policy.worker.read(null).revision, revision); assert.equal(updates.status().lastCheck, null); assert.equal(updates.status().release, null);
+    const after = policy.worker.read(null).values;
+    for (const key of ['permissions.ceiling', 'background.enabled', 'background.startAtLogin', 'updates.automaticDownload', 'updates.automaticInstall', 'updates.automaticRestart']) assert.deepEqual(after[key].value, before[key].value);
+    const status = updates.status(); measurements.push({ inspection: 'Desktop-update-controls-only', hostChannel: status.values['updates.channel'].value,
+      sourceQualified: status.sourceQualified, installQualified: status.installQualified, lastCheck: status.lastCheck, availableRelease: status.release });
+  });
+  await check('updates-preserved-draft-stale-policy-reload-labels-and-200-percent-reflow', async () => {
+    const showUpdates = () => js("document.getElementById('settings-nav').click();document.getElementById('settings-updates').click()");
+    await showUpdates(); await js("document.getElementById('update-channel').value='alpha';document.getElementById('update-channel').focus()"); updates.sync();
+    await js('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+    assert.equal(await js("document.getElementById('update-channel').value==='alpha' && document.activeElement.id==='update-channel'"), true);
+    await js("document.getElementById('update-form').requestSubmit()"); await wait(() => Boolean(updates.status().preview)); const old = updates.status();
+    appearance.dispatch({ operation: 'prepare', changes: { 'appearance.textScale': 2 } }); appearance.dispatch({ operation: 'apply' });
+    await wait(() => !updates.status().preview); const frame = window.webContents.mainFrame;
+    assert.throws(() => updateChannel.dispatch({ sender: window.webContents, senderFrame: frame }, { operation: 'apply', hash: old.preview.hash, contextRevision: old.revision }));
+    assert.equal(policy.worker.read(null).values['updates.channel'].value, 'beta');
+    window.setSize(420, 760); await showUpdates(); await new Promise(resolve => setTimeout(resolve, 150));
+    assert.equal(await js("document.getElementById('update-channel').value"), 'alpha'); assert.equal(await js('document.documentElement.scrollWidth<=innerWidth'), true);
+    assert.equal(await js("document.querySelector('#update-form label').htmlFor==='update-channel' && Array.from(document.querySelectorAll('#update-settings button, #update-channel')).every(node=>node.getBoundingClientRect().height>=44)"), true);
+    await js("(()=>{const card=document.getElementById('update-form');window.scrollTo(0,window.scrollY+card.getBoundingClientRect().top-document.querySelector('.app-nav').getBoundingClientRect().bottom-24)})()");
+    await js('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+    writeFileSync(join(directory, 'layout-capture.png'), (await window.webContents.capturePage()).toPNG(), { flag: 'wx', mode: 0o600 });
+    window.setSize(1180, 840); appearance.dispatch({ operation: 'prepare', changes: { 'appearance.textScale': 1 } }); appearance.dispatch({ operation: 'apply' });
+    await new Promise((resolve, reject) => { window.webContents.once('did-finish-load', resolve); window.webContents.once('did-fail-load', reject); window.reload(); });
+    await wait(() => js("Boolean(document.getElementById('update-form'))")); await showUpdates();
+    assert.equal(await js("document.getElementById('update-channel').value"), 'beta');
+    await js("document.getElementById('update-reset').click()"); await wait(() => Boolean(updates.status().preview));
+    assert.deepEqual(Object.keys(updates.status().preview.after), ['updates.channel']);
+    await chat('Apply this update change'); await wait(() => !updates.status().preview);
+    assert.equal(policy.worker.read(null).values['updates.channel'].value, 'stable');
   });
 };

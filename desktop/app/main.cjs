@@ -30,10 +30,10 @@ if (startup.testMode) {
 } else { app.setPath('userData', dataDirectory); app.setPath('crashDumps', path.join(dataDirectory, 'crashes')); }
 protocol.registerSchemesAsPrivileged([{ scheme: 'pipeliner', privileges: { standard: true, secure: true } }]);
 if (!app.requestSingleInstanceLock()) app.exit(0);
-let window, manager, vault, workspaces, workspaceStore, issues, pipelines, policy, development, developmentStore, supervisor, scheduling, scheduler, background, backgroundHost, backgroundNative, skills, skillStore, tools, toolStore, toolConnections, privacy, privacyRecords, appearance, delivery, permissions, artifacts, retentionMonitor, attachWindow, attachment, requestShutdown, authorizationMonitor, shutdownPaused = false, closing = false, verifiedClose = false;
+let window, manager, vault, workspaces, workspaceStore, issues, pipelines, policy, development, developmentStore, supervisor, scheduling, scheduler, background, backgroundHost, backgroundNative, skills, skillStore, tools, toolStore, toolConnections, privacy, privacyRecords, appearance, delivery, updates, permissions, artifacts, retentionMonitor, attachWindow, attachment, requestShutdown, authorizationMonitor, shutdownPaused = false, closing = false, verifiedClose = false;
 const hostCapabilities = Object.freeze(['workspace.read', 'workspace.write', 'worker.exec', 'provider.turn', 'git.push', 'github.read', 'github.issue.write', 'github.pr.write', 'github.project.write', 'extension.install', 'extension.invoke']);
 const moduleAt = file => import(pathToFileURL(path.join(__dirname, file)).href);
-const assets = new Map(['index.html', 'app.css', 'app.mjs', 'workspaces.mjs', 'issues.mjs', 'pipelines.mjs', 'development.mjs', 'notices.mjs', 'scheduling.mjs', 'background.mjs', 'skills.mjs', 'tools.mjs', 'privacy.mjs', 'appearance.mjs', 'delivery.mjs', 'permissions.mjs'].map(file => [file, path.join(__dirname, file)]));
+const assets = new Map(['index.html', 'app.css', 'app.mjs', 'workspaces.mjs', 'issues.mjs', 'pipelines.mjs', 'development.mjs', 'notices.mjs', 'scheduling.mjs', 'background.mjs', 'skills.mjs', 'tools.mjs', 'privacy.mjs', 'appearance.mjs', 'delivery.mjs', 'updates.mjs', 'permissions.mjs'].map(file => [file, path.join(__dirname, file)]));
 assets.set('commands.mjs', path.join(__dirname, '../connections/commands.mjs')); assets.set('tokens.css', path.join(__dirname, '../prototype/style.css'));
 assets.set('issue-commands.mjs', path.join(__dirname, '../issues/commands.mjs')); assets.set('connections/commands.mjs', path.join(__dirname, '../connections/commands.mjs'));
 assets.set('pipeline-commands.mjs', path.join(__dirname, '../pipelines/commands.mjs'));
@@ -46,6 +46,7 @@ assets.set('privacy-commands.mjs', path.join(__dirname, '../privacy/commands.mjs
 assets.set('appearance-commands.mjs', path.join(__dirname, '../appearance/commands.mjs'));
 assets.set('issue-view.mjs', path.join(__dirname, '../issues/view.mjs'));
 assets.set('delivery-commands.mjs', path.join(__dirname, '../delivery/commands.mjs'));
+assets.set('update-commands.mjs', path.join(__dirname, '../updates/commands.mjs'));
 assets.set('permission-commands.mjs', path.join(__dirname, '../permissions/commands.mjs'));
 assets.set('tools/commands.mjs', path.join(__dirname, '../tools/commands.mjs'));
 function asset(value) {
@@ -84,6 +85,8 @@ app.whenReady().then(async () => {
   const { createAppearanceManager } = await moduleAt('../appearance/manager.mjs');
   const { createDeliveryControlChannel } = await moduleAt('../core/control.mjs');
   const { createDeliveryManager } = await moduleAt('../delivery/manager.mjs');
+  const { createUpdateControlChannel } = await moduleAt('../core/control.mjs');
+  const { createUpdateManager } = await moduleAt('../updates/manager.mjs');
   const { inspectMacDelivery } = await moduleAt('../delivery/mac.mjs');
   const { createPermissionManager } = await moduleAt('../permissions/manager.mjs');
   const { createPermissionControlChannel } = await moduleAt('../core/control.mjs');
@@ -124,7 +127,7 @@ app.whenReady().then(async () => {
   manager = createConnectionManager({ vault: null, adapters, onChange: publish });
   const workspaceOptions = qualifying ? await require('./qualify.cjs').workspaceOptions({ directory, helper, nativeFolderEntry }) : {};
   let workspaceBusy = false;
-  const publishWorkspaces = snapshot => { permissions?.sync(); delivery?.sync(); appearance?.sync(); issues?.sync(); pipelines?.sync(); development?.sync(); scheduling?.sync(); skills?.sync(); tools?.sync(); privacy?.sync(); void scheduler?.sync().catch(() => {}); if (window && !window.isDestroyed()) { window.webContents.send('workspaces:status', snapshot); if (workspaceBusy && !snapshot.busy && !closing) { window.show(); window.focus(); window.webContents.focus(); } } workspaceBusy = snapshot.busy; };
+  const publishWorkspaces = snapshot => { permissions?.sync(); delivery?.sync(); updates?.sync(); appearance?.sync(); issues?.sync(); pipelines?.sync(); development?.sync(); scheduling?.sync(); skills?.sync(); tools?.sync(); privacy?.sync(); void scheduler?.sync().catch(() => {}); if (window && !window.isDestroyed()) { window.webContents.send('workspaces:status', snapshot); if (workspaceBusy && !snapshot.busy && !closing) { window.show(); window.focus(); window.webContents.focus(); } } workspaceBusy = snapshot.busy; };
   const makeWorkspaces = initialRevision => createWorkspaceManager({ store: workspaceStore, initialRevision, onChange: publishWorkspaces,
     connections: { status: () => manager.status(), acquire: (...args) => manager.acquire(...args), epoch: id => manager.epoch(id) },
     folder: (signal, existing) => nativeFolderEntry(helper, directory, signal, existing),
@@ -136,7 +139,7 @@ app.whenReady().then(async () => {
     connections: { acquire: (...args) => manager.acquire(...args), epoch: id => manager.epoch(id) },
     ...(qualifying ? { api: require('./qualify.cjs').issueApi } : {}) });
   issues = makeIssues(1);
-  const publishPipelines = snapshot => { permissions?.sync(); delivery?.sync(); appearance?.sync(); development?.sync(); scheduling?.sync(); skills?.sync(); tools?.sync(); void scheduler?.sync().catch(() => {}); if (window && !window.isDestroyed()) window.webContents.send('pipelines:status', snapshot); };
+  const publishPipelines = snapshot => { permissions?.sync(); delivery?.sync(); updates?.sync(); appearance?.sync(); development?.sync(); scheduling?.sync(); skills?.sync(); tools?.sync(); void scheduler?.sync().catch(() => {}); if (window && !window.isDestroyed()) window.webContents.send('pipelines:status', snapshot); };
   const makePipelines = initialRevision => createPipelineManager({ store: workspaceStore, policy, skills: skillStore, tools: toolStore, initialRevision, onChange: publishPipelines, onApplied: () => issues.sync() });
   pipelines = makePipelines(1);
   const previousRuns = new Map();
@@ -173,7 +176,7 @@ app.whenReady().then(async () => {
   tools = makeTools(1);
   const privatePaths = () => [directory, __dirname, path.join(app.getPath('home'), 'Library'), app.getPath('appData'), path.join(app.getPath('home'), '.codex'), path.join(app.getPath('home'), '.agents'), path.join(app.getPath('home'), '.ollama'),
     ...(workspaceStore?.workspaces() ?? []).map(item => path.join(item.path, '.git'))];
-  const publishPrivacy = snapshot => { delivery?.sync(); appearance?.sync(); if (window && !window.isDestroyed()) window.webContents.send('privacy:status', snapshot); };
+  const publishPrivacy = snapshot => { delivery?.sync(); updates?.sync(); appearance?.sync(); if (window && !window.isDestroyed()) window.webContents.send('privacy:status', snapshot); };
   let recoveryHolds = new Set(), recoveryInventory = [];
   const refreshRecovery = () => {
     recoveryInventory = developmentStore?.recovery() ?? [];
@@ -217,21 +220,25 @@ app.whenReady().then(async () => {
   };
   const makeAppearance = initialRevision => createAppearanceManager({ policy, initialRevision, onChange: publishAppearance,
     workspace: () => workspaceStore?.workspaces().find(item => item.id === workspaceStore.selected()) ?? null,
-    onApplied: () => { issues?.sync(); pipelines?.sync(); development?.sync(); scheduling?.sync(); background?.sync(); skills?.sync(); tools?.sync(); privacy?.sync(); } });
+    onApplied: () => { issues?.sync(); pipelines?.sync(); development?.sync(); scheduling?.sync(); background?.sync(); skills?.sync(); tools?.sync(); privacy?.sync(); updates?.sync(); } });
   appearance = makeAppearance(1);
   const publishDelivery = snapshot => { if (window && !window.isDestroyed()) window.webContents.send('delivery:status', snapshot); };
   const makeDelivery = initialRevision => createDeliveryManager({ policy, artifacts, initialRevision, onChange: publishDelivery, inspect: inspectMacDelivery,
     workspace: () => { const selected = workspaceStore?.selected(); return workspaceStore?.workspaces().find(item => item.id === selected) ?? null; },
     openHelp: kind => shell.openExternal(kind === 'tools' ? 'https://apps.apple.com/us/app/xcode/id497799835' : 'https://developer.apple.com/developer-id/'),
-    onApplied: () => { issues?.sync(); pipelines?.sync(); development?.sync(); scheduling?.sync(); background?.sync(); skills?.sync(); tools?.sync(); appearance?.sync(); privacy?.sync(); } });
+    onApplied: () => { issues?.sync(); pipelines?.sync(); development?.sync(); scheduling?.sync(); background?.sync(); skills?.sync(); tools?.sync(); appearance?.sync(); privacy?.sync(); updates?.sync(); } });
   delivery = makeDelivery(1);
+  const publishUpdates = snapshot => { if (window && !window.isDestroyed()) window.webContents.send('updates:status', snapshot); };
+  const makeUpdates = initialRevision => createUpdateManager({ policy, version: app.isPackaged ? app.getVersion() : null, initialRevision, onChange: publishUpdates,
+    onApplied: () => { issues?.sync(); pipelines?.sync(); development?.sync(); scheduling?.sync(); background?.sync(); skills?.sync(); tools?.sync(); appearance?.sync(); privacy?.sync(); delivery?.sync(); } });
+  updates = makeUpdates(1);
   const publishPermissions = snapshot => { if (window && !window.isDestroyed()) window.webContents.send('permissions:status', snapshot); };
   const makePermissions = initialRevision => createPermissionManager({ policy, initialRevision, onChange: publishPermissions,
     workspace: () => workspaceStore?.workspaces().find(item => item.id === workspaceStore.selected()) ?? null,
     available: () => ({ capabilities: [...hostCapabilities], resources: [] }),
     onApplied: async ({ repositories }) => {
       await development.permissionsChanged(repositories ?? workspaceStore.workspaces().map(item => item.id));
-      issues?.sync(); pipelines?.sync(); development?.sync(); scheduling?.sync(); background?.sync(); skills?.sync(); tools?.sync(); privacy?.sync(); delivery?.sync();
+      issues?.sync(); pipelines?.sync(); development?.sync(); scheduling?.sync(); background?.sync(); skills?.sync(); tools?.sync(); privacy?.sync(); delivery?.sync(); updates?.sync();
     } });
   permissions = makePermissions(1);
   protocol.handle('pipeliner', request => {
@@ -292,6 +299,8 @@ app.whenReady().then(async () => {
   ipcMain.handle('appearance:control', (event, payload) => { if (closing) throw new Error('App closing'); return appearanceChannel().dispatch(event, payload); });
   const deliveryChannel = () => createDeliveryControlChannel(delivery, { contents: window.webContents, url, context: () => ({ revision: delivery.status().revision }) });
   ipcMain.handle('delivery:control', (event, payload) => { if (closing) throw new Error('App closing'); return deliveryChannel().dispatch(event, payload); });
+  const updateChannel = () => createUpdateControlChannel(updates, { contents: window.webContents, url, context: () => ({ revision: updates.status().revision }) });
+  ipcMain.handle('updates:control', (event, payload) => { if (closing) throw new Error('App closing'); return updateChannel().dispatch(event, payload); });
   const permissionChannel = () => createPermissionControlChannel(permissions, { contents: window.webContents, url, context: () => ({ revision: permissions.status().revision }) });
   ipcMain.handle('permissions:control', (event, payload) => { if (closing) throw new Error('App closing'); return permissionChannel().dispatch(event, payload); });
   const suspendHost = () => { scheduler?.suspend(); void backgroundHost?.suspend().catch(() => {}); };
@@ -307,7 +316,7 @@ app.whenReady().then(async () => {
       powerMonitor.removeListener('suspend', suspendHost); powerMonitor.removeListener('resume', wakeHost); powerMonitor.removeListener('shutdown', endSession);
       await tools.close(); await toolConnections?.close();
       await privacy.close(); privacyRecords?.close();
-      await permissions.close(); await delivery.close(); await artifacts?.close(); backgroundHost?.close(); background.close(); scheduling.close(); pipelines.close(); skills.close(); appearance.close();
+      await permissions.close(); updates.close(); await delivery.close(); await artifacts?.close(); backgroundHost?.close(); background.close(); scheduling.close(); pipelines.close(); skills.close(); appearance.close();
       developmentStore?.close(); policy?.close(); skillStore?.close(); toolStore?.close(); workspaceStore?.close(); vault?.close(); verifiedClose = true; app.quit();
     } catch { closing = false; console.error('Pipeliner shutdown needs verified recovery. Work remains preserved.'); await attachWindow(); publish(manager.status()); }
   };
@@ -334,6 +343,7 @@ app.whenReady().then(async () => {
         continuity: input => development.inspectContinuity(input),
         effect: action => action.operation === 'github.pr.merge' ? development.inspectIntegration(action) : supervisor.inspectEffect(action) } });
     const appearanceRevision = appearance.status().revision + 1; appearance.close(); appearance = makeAppearance(appearanceRevision); publishAppearance(appearance.status());
+    const updateRevision = updates.status().revision + 1; updates.close(); updates = makeUpdates(updateRevision); publishUpdates(updates.status());
     const { openArtifactStore } = await moduleAt('../delivery/artifacts.mjs');
     try {
       artifacts = await openArtifactStore(directory, { vault, limits: repository => {
@@ -376,7 +386,7 @@ app.whenReady().then(async () => {
     authorizationMonitor = setInterval(() => { if (!closing) void backgroundHost.refresh().catch(() => {}); }, 1000); authorizationMonitor.unref();
     await scheduler.check('startup');
   } catch { publish(manager.status()); }
-  if (qualifying) await require('./qualify.cjs').run({ window, directory, helper, vault, manager, workspaces, issues, pipelines, policy, development, scheduler, scheduling, background, backgroundHost, backgroundNative, skills, skillStore, tools, toolStore, privacy, privacyRecords, appearance, delivery, permissions, artifacts, permissionChannel: permissionChannel(), deliveryChannel: deliveryChannel(), appearanceChannel: appearanceChannel(), privacyChannel: privacyChannel(), toolChannel: toolChannel(), skillChannel: skillChannel(), attachWindow, backgroundChannel: backgroundChannel(), schedulingChannel: schedulingChannel(), developmentChannel: developmentChannel(), workspaceChannel: workspaceChannel(), issueChannel: issueChannel(), pipelineChannel: pipelineChannel(), channel: channel(), windowReadyMs });
+  if (qualifying) await require('./qualify.cjs').run({ window, directory, helper, vault, manager, workspaces, issues, pipelines, policy, development, scheduler, scheduling, background, backgroundHost, backgroundNative, skills, skillStore, tools, toolStore, privacy, privacyRecords, appearance, delivery, updates, permissions, artifacts, permissionChannel: permissionChannel(), updateChannel: updateChannel(), deliveryChannel: deliveryChannel(), appearanceChannel: appearanceChannel(), privacyChannel: privacyChannel(), toolChannel: toolChannel(), skillChannel: skillChannel(), attachWindow, backgroundChannel: backgroundChannel(), schedulingChannel: schedulingChannel(), developmentChannel: developmentChannel(), workspaceChannel: workspaceChannel(), issueChannel: issueChannel(), pipelineChannel: pipelineChannel(), channel: channel(), windowReadyMs });
 }).catch(() => { console.error('Pipeliner could not start safely.'); app.exit(1); });
 
 async function githubPrompt({ connection, verificationUri, userCode, signal, cancel }) {

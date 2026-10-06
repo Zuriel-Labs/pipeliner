@@ -1,20 +1,32 @@
 'use strict';
+const path = require('node:path');
 const { app, BrowserWindow, Menu, protocol, session, ipcMain, dialog, shell, safeStorage, powerMonitor, nativeTheme } = require('electron');
 const { mkdirSync, lstatSync, realpathSync, readFileSync } = require('node:fs');
-const path = require('node:path');
 const { pathToFileURL } = require('node:url');
-if (app.isPackaged && process.argv.some(value => /^(?:--qualify(?:-|=|$)|--(?:data-directory|key-helper|calendar-helper)(?:=|$))/i.test(value))) {
+if (app.isPackaged && process.argv.some(value => /^(?:--qualify(?:-|=|$)|--(?:test-data-directory|data-directory|key-helper|calendar-helper)(?:=|$))/i.test(value))) {
   console.error('Pipeliner rejected an unsupported packaged startup option.'); app.exit(2); return;
+}
+// The packaged app has no developer storage dependency or test authority.
+const testStorage = app.isPackaged ? undefined : require('../test-storage.cjs');
+const startup = testStorage?.classifyStartup(process.argv) ?? { qualifying: false, testMode: false };
+const qualifying = startup.qualifying;
+let testContext;
+if (startup.testMode) {
+  if (startup.testDirectory === undefined) throw new Error('test-storage-directory-required');
+  testContext = testStorage.validateContext(path.resolve(__dirname, '../..'));
+  testStorage.validateOwnedDataDirectory(testContext, startup.testDirectory);
 }
 const origin = 'pipeliner://app', url = `${origin}/index.html`;
 const argument = name => process.argv.find(value => value.startsWith(`${name}=`))?.slice(name.length + 1);
-const qualifying = process.argv.includes('--qualify');
 const backgroundLaunch = process.argv.includes('--background-helper');
 const entryStarted = performance.now(); let windowReadyMs;
-const dataDirectory = argument('--data-directory') ?? path.join(app.getPath('appData'), 'Pipeliner');
+const dataDirectory = startup.testDirectory ?? argument('--data-directory') ?? path.join(app.getPath('appData'), 'Pipeliner');
 const helper = argument('--key-helper') ?? (app.isPackaged ? path.join(process.resourcesPath, 'helpers/secure-entry') : undefined);
 const calendarHelper = argument('--calendar-helper') ?? (app.isPackaged ? path.join(process.resourcesPath, 'helpers/calendar') : undefined);
-app.setName('Pipeliner'); app.setPath('userData', dataDirectory); app.setPath('crashDumps', path.join(dataDirectory, 'crashes'));
+app.setName('Pipeliner');
+if (startup.testMode) {
+  testStorage.configureOwnedPaths(app, testContext, dataDirectory);
+} else { app.setPath('userData', dataDirectory); app.setPath('crashDumps', path.join(dataDirectory, 'crashes')); }
 protocol.registerSchemesAsPrivileged([{ scheme: 'pipeliner', privileges: { standard: true, secure: true } }]);
 if (!app.requestSingleInstanceLock()) app.exit(0);
 let window, manager, vault, workspaces, workspaceStore, issues, pipelines, policy, development, developmentStore, supervisor, scheduling, scheduler, background, backgroundHost, backgroundNative, skills, skillStore, tools, toolStore, toolConnections, privacy, privacyRecords, appearance, delivery, permissions, artifacts, retentionMonitor, attachWindow, attachment, requestShutdown, authorizationMonitor, shutdownPaused = false, closing = false, verifiedClose = false;

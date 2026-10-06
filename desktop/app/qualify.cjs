@@ -37,7 +37,16 @@ exports.workspaceOptions = async ({ directory, helper, nativeFolderEntry }) => {
     const target = args[name === 'readCatalog' ? 2 : 1]; let fixture = issueFixtures.get(target.id);
     if (!fixture) { fixture = issueFixture(target); issueFixtures.set(target.id, fixture); } return fixture.api[name](...args);
   }]));
-  const fixture = path.join(app.getPath('documents'), 'pipeliner-36-native-' + process.pid);
+  const nativeRoot = process.env.PIPELINER_NATIVE_WORKSPACE_ROOT;
+  if (typeof nativeRoot !== 'string' || !path.isAbsolute(nativeRoot)) throw new Error('native-fixture-root-required');
+  const fs = require('node:fs'), rootInfo = fs.lstatSync(nativeRoot), dataInfo = fs.lstatSync(directory);
+  if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink() || rootInfo.uid !== process.getuid()
+      || (rootInfo.mode & 0o777) !== 0o700 || rootInfo.dev !== dataInfo.dev
+      || fs.realpathSync(nativeRoot) !== nativeRoot || path.dirname(nativeRoot) !== path.dirname(directory)
+      || !path.basename(nativeRoot).startsWith('pipeliner-native-workspace-') || nativeRoot === directory) {
+    throw new Error('native-fixture-root-invalid');
+  }
+  const fixture = path.join(nativeRoot, 'repository');
   mkdirSync(fixture, { mode: 0o700 });
   const info = require('node:fs').lstatSync(fixture);
   writeFileSync(path.join(directory, 'native-ownership.json'), JSON.stringify({ pid: process.pid, path: fixture, key: info.dev + ':' + info.ino }), { flag: 'wx', mode: 0o600 });
@@ -89,10 +98,18 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
   const wait = async predicate => { const until = Date.now() + 10000; while (!await predicate()) { if (Date.now() >= until) throw new Error('qualification-wait-timeout'); await new Promise(resolve => setTimeout(resolve, 50)); } };
   let pipelineControl;
   async function check(name, fn) { const begin = performance.now(); try { await fn(); checks.push({ name, passed: true, milliseconds: Math.round(performance.now() - begin) }); } catch (error) { checks.push({ name, passed: false, category: error.code === 'ERR_ASSERTION' ? 'assertion' : 'native-failure', failureLine: Number(/qualify(?:-[a-z]+)?\.cjs:(\d+)/.exec(error.stack)?.[1]) || null, ...(name.startsWith('privacy-') ? { publicMessage: privacy.status().message, publicCode: privacy.status().errorCode, privacyBusy: privacy.status().busy, previewKind: privacy.status().preview?.kind ?? null } : {}), ...(name.startsWith('pipeline-') ? { control: pipelineControl, publicError: pipelines.status().error } : {}), ...(name.startsWith('tools-') ? { publicError: tools.status().error, publicMessage: tools.status().message, toolBusy: tools.status().busy, catalogPresent: Boolean(tools.status().catalog), pipelineError: pipelines.status().error } : {}) }); throw error; } }
-  let capture, nativeEvidence, workspaceStage = null, workspaceEvidence = null;
+  let capture, nativeEvidence, storageRouting, workspaceStage = null, workspaceEvidence = null;
   try {
     await wait(() => js("Boolean(document.getElementById('connection-list').children.length)"));
-    await check('actual-macos-protected-key', async () => { assert(vault); assert.equal(await safeStorage.isAsyncEncryptionAvailable(), true); assert.equal(existsSync(path.join(directory, 'connections.sqlite')), true); });
+    await check('actual-macos-protected-key-and-owned-storage-paths', async () => {
+      assert(vault); assert.equal(await safeStorage.isAsyncEncryptionAvailable(), true);
+      assert.equal(existsSync(path.join(directory, 'connections.sqlite')), true);
+      const expected = { userData: directory, temp: path.join(directory, 'temporary'),
+        sessionData: path.join(directory, 'session'), crashDumps: path.join(directory, 'crashes'), logs: path.join(directory, 'logs') };
+      const observed = Object.fromEntries(Object.keys(expected).map(name => [name, app.getPath(name)]));
+      assert.deepEqual(observed, expected);
+      storageRouting = { appPathsVerified: true, paths: observed, osAndServiceScratch: 'unverified' };
+    });
     if (privacyScope) await check('actual-macos-protected-legacy-workspace-development-migration', async () => {
       const { qualifyProtectedMigration } = await moduleAt('../privacy/qualify-migration.mjs');
       const result = qualifyProtectedMigration(directory, vault); assert.deepEqual(result.schemas, { workspaces: 5, development: 2 }); assert.equal(result.replayedEffects, 0);
@@ -735,7 +752,7 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
     });
   } catch { const snapshot = workspaces.status(); workspaceEvidence = { checkpoint: workspaceStage, busy: snapshot.busy, state: snapshot.draft?.state, error: snapshot.draft?.error, folderSelected: Boolean(snapshot.draft?.folder), projectCount: snapshot.draft?.projects?.length ?? 0 }; process.exitCode = 1; }
   const report = { desktopQualification: permissionScope ? 'permissions-and-local-testing-controls' : deliveryScope ? 'delivery-custody-recovery-and-installation-data-inventory' : appearanceScope ? 'appearance-and-accessibility-preferences' : privacyScope ? 'protected-local-privacy-and-recovery' : toolsScope ? 'scoped-tools-and-custom-pipelines' : skillsScope ? 'starter-skill-management' : backgroundScope ? 'optional-background-host' : schedulingScope ? 'deterministic-scheduling' : developmentScope ? 'development-controls' : pipelineScope ? 'versioned-pipeline-editing' : 'protected-issue-intake', checks, passed: checks.length === (permissionScope ? 24 : deliveryScope ? 26 : appearanceScope ? 23 : privacyScope ? 27 : toolsScope ? 26 : skillsScope ? 26 : backgroundScope ? 25 : schedulingScope ? 23 : developmentScope ? 22 + (pipelineScope ? 6 : 0) : pipelineScope ? 24 : issueScope ? 18 : 21) && checks.every(c => c.passed), milliseconds: Math.round(performance.now() - started), windowReadyFromMainEntryMs: windowReadyMs, measurements,
-    versions: { electron: process.versions.electron, chromium: process.versions.chrome, node: process.versions.node, sqlite: process.versions.sqlite, os: process.platform, architecture: process.arch },
+    versions: { electron: process.versions.electron, chromium: process.versions.chrome, node: process.versions.node, sqlite: process.versions.sqlite, os: process.platform, architecture: process.arch }, storageRouting,
     nativeEvidence, workspaceEvidence, folderFailure, folderCancelled, synthetic: 'Synthetic GitHub/model replies, first folder selection, optional tool catalog and background-service adapters; actual native secure fields, folder-panel cancellation, protected storage, local Git and own window. External tool compatibility and actual SMAppService/bootstrap are qualified separately.',
     notRun: issueScope ? ['Unchanged Codex unauthenticated discovery', 'Unchanged public GitHub App qualification', 'Unchanged invalid Cloud key probe'] : [],
     pending: ['Human native folder selection', 'Authenticated provider/GitHub PM journeys', 'Human task observation', 'Screen reader', 'Windows/Linux', 'Stable signed package storage identity'], captureAvailable: Boolean(capture),

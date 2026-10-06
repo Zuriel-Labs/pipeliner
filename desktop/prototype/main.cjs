@@ -1,15 +1,17 @@
 'use strict';
+const path = require('node:path');
+const testStorage = require('../test-storage.cjs');
+const startup = testStorage.classifyStartup(process.argv);
+const testContext = testStorage.validateContext(path.resolve(__dirname, '../..'));
+if (startup.testDirectory !== undefined) testStorage.validateOwnedDataDirectory(testContext, startup.testDirectory);
 const { app, BrowserWindow, Menu, protocol, session } = require('electron');
 const { readFileSync, mkdtempSync, rmSync } = require('node:fs');
-const { tmpdir } = require('node:os');
-const path = require('node:path');
 
 const origin = 'pipeliner-prototype://app';
 const assets = new Set(['index.html', 'style.css', 'state.mjs', 'renderer.mjs']);
 const mime = { html: 'text/html', css: 'text/css', mjs: 'text/javascript' };
-const dataPath = mkdtempSync(path.join(tmpdir(), 'pipeliner-prototype-'));
-app.setPath('userData', dataPath);
-app.setPath('crashDumps', path.join(dataPath, 'crashes'));
+const dataPath = startup.testDirectory ?? mkdtempSync(path.join(testContext.paths.tmp, 'pipeliner-prototype-'));
+testStorage.configureOwnedPaths(app, testContext, dataPath);
 app.setName('Pipeliner Prototype');
 protocol.registerSchemesAsPrivileged([{ scheme: 'pipeliner-prototype', privileges: { standard: true, secure: true, supportFetchAPI: true } }]);
 

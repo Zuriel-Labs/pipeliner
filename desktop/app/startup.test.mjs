@@ -14,11 +14,14 @@ function entry(packaged, args, storageAvailable = true) {
     exit(code) { throw new Error('captured-exit-' + code); } };
   const context = { require:name=> {
     if (name === 'electron') return {app,protocol:{registerSchemesAsPrivileged(){calls.push(['protocol']);}}};
+    if (name === 'node:fs') return { ...require(name), readFileSync(file) {
+      assert.equal(file, '/private/owned-run/manifest.json'); calls.push(['manifest']); return '{}';
+    } };
     if (name === '../test-storage.cjs') {
       if (packaged) throw new Error('packaged-developer-dependency');
       return { ...testStorage, validateContext() {
         calls.push(['storage']); if (!storageAvailable) throw new Error('test-storage-run-required');
-        return {paths:{tmp:'/private/owned-test'}};
+        return {run_path:'/private/owned-run',paths:{tmp:'/private/owned-test'}};
       }, validateOwnedDataDirectory(_storage, directory) {calls.push(['owned',directory]);},
       nativeTestEnvironment() {calls.push(['chromium']);if(storageAvailable==='foreign-ipc') throw new Error('test-storage-chromium-context');},
       configureOwnedPaths(_app,_storage,directory) {
@@ -41,6 +44,7 @@ test('Packaged entry rejects development authority inputs before initialization;
   }
   const sourceFixture=entry(false,['--qualify','--data-directory=/private/owned-test','--key-helper=/private/owned-key','--calendar-helper=/private/owned-calendar']);
   sourceFixture.run();assert.ok(sourceFixture.calls.some(call=>call[0]==='ready'));
+  assert.ok(sourceFixture.calls.findIndex(call=>call[0]==='manifest') < sourceFixture.calls.findIndex(call=>call[0]==='lock'));
   assert.ok(sourceFixture.calls.some(call=>call[0]==='setPath'&&call[1]==='userData'&&call[2]==='/private/owned-test'));
   assert.ok(sourceFixture.calls.findIndex(call=>call[0]==='owned') < sourceFixture.calls.findIndex(call=>call[0]==='setName'));
   assert.ok(sourceFixture.calls.findIndex(call=>call[0]==='chromium') < sourceFixture.calls.findIndex(call=>call[0]==='lock'));

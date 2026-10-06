@@ -13,7 +13,7 @@ const privateFile = value => value.isFile() && !value.isSymbolicLink() && value.
 
 // Host-only explicit staging. Protected history supplies authenticated metadata; no native trust or install is implied.
 export async function stageUpdateInstaller(options, { request = httpsRequest, resolve = destination, clock = Date.now } = {}) {
-  let parent, file, path, owner, root, timer, req, response, reqClosed, socketClosed, abort, signal, keep = false, repair = false, written = 0;
+  let parent, file, path, owner, root, verified, timer, req, response, reqClosed, socketClosed, abort, signal, keep = false, repair = false, written = 0;
   const hash = createHash('sha256'), started = performance.now();
   async function owned() {
     const directory = await lstat(options.directory), held = await parent.stat();
@@ -33,6 +33,7 @@ export async function stageUpdateInstaller(options, { request = httpsRequest, re
       if (!count) throw Error(); result.update(bytes.subarray(0, count)); position += count;
     }
     const after = await owned(); if (after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs) throw Error();
+    if (abortable) verified = after;
     return result.digest('hex');
   }
   async function closeRequest() {
@@ -111,7 +112,9 @@ export async function stageUpdateInstaller(options, { request = httpsRequest, re
     if (written !== release.bytes || hash.copy().digest('hex') !== release.sha256) throw Error();
     await file.sync(); await ready(); if (await digest(true) !== release.sha256) throw Error(); await ready();
     if (canonicalJSON(snapshot()) !== canonicalJSON(release)) throw Error();
-    await parent.sync(); keep = true; return immutable({ file: path, bytes: written, sha256: release.sha256, release });
+    await parent.sync(); const actual = await owned();
+    if (actual.mtimeMs !== verified.mtimeMs || actual.ctimeMs !== verified.ctimeMs) throw Error();
+    keep = true; return immutable({ file: path, bytes: written, sha256: release.sha256, release });
   } catch { throw Error('update-installer-unverified'); }
   finally {
     clearTimeout(timer);

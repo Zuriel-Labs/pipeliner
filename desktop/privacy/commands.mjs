@@ -1,6 +1,6 @@
 import { containsSecret } from '../connections/commands.mjs';
 
-export const privacyShapes = Object.freeze({ view: [[], ['scope']], diagnostics: [[], []], chat: [['text'], []], prepare: [['changes'], ['scope', 'reset']],
+export const privacyShapes = Object.freeze({ view: [[], ['scope']], diagnostics: [[], []], recovery: [[], []], chat: [['text'], []], prepare: [['changes'], ['scope', 'reset']],
   export: [['kind'], ['scope']], import: [[], ['scope']], delete: [['categories'], ['after']], apply: [[], ['hash']], cancel: [[], []],
   history: [[], ['before']], append: [['token', 'commandId', 'role', 'text'], []], draft: [['token', 'text'], []] });
 export function privacyCommand(text) {
@@ -9,6 +9,7 @@ export function privacyCommand(text) {
   if (/^what (?:local )?data do you (?:keep|store)$|^show (?:the |my )?installation data(?: inventory)?$/i.test(input)) return { operation: 'view' };
   if (/^(?:show|inspect|manage) (?:privacy|local data|data inventory|data destinations)$/i.test(input)) return { operation: 'view' };
   if (/^(?:show|inspect) (?:redacted )?diagnostics$/i.test(input)) return { operation: 'diagnostics' };
+  if (/^(?:show|inspect|open) (?:diagnostics and recovery|recovery|capability health)$/i.test(input)) return { operation: 'recovery' };
   if (/^export (?:redacted )?diagnostics$/i.test(input)) return { operation: 'export', kind: 'diagnostics' };
   if ((match = /^(export|restore) (?:(?:this (?:project|repository)'?s)|(?:global)|(?:this (?:computer|mac)'?s)) settings$/i.exec(input))) {
     const scope = /global/i.test(input) ? 'global' : /computer|mac/i.test(input) ? 'host' : 'repository';

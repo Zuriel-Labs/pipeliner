@@ -4,7 +4,7 @@ import { containsSecret, redactProtectedText } from '../connections/commands.mjs
 import { skillChatSafe } from '../skills/commands.mjs';
 import { toolChatSafe } from '../tools/commands.mjs';
 import { privacyShapes, privacyCommand } from './commands.mjs';
-import { createConfigurationExport, configurationChanges, createDiagnosticExport } from './model.mjs';
+import { createConfigurationExport, configurationChanges, createDiagnosticExport, createRecoverySnapshot } from './model.mjs';
 import { writeExportFile, readConfigurationFile } from './files.mjs';
 
 const digest = value => createHash('sha256').update(canonicalJSON(value)).digest('hex');
@@ -12,11 +12,11 @@ const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}(?:-[a-f0-9]{4})
 export const privacyKeys = Object.freeze(['privacy.conversationDays', 'privacy.logDays', 'privacy.auditDays', 'privacy.runLogMiB', 'privacy.totalLogMiB',
   'privacy.telemetry', 'privacy.automaticUpload', 'privacy.crossRepositoryReuse']);
 
-export function createPrivacyManager({ records, policy, workspace = () => null, chooseExport, chooseImport, diagnostics, managedInventory = () => [], artifactSummary = () => null, protectedPaths = [],
+export function createPrivacyManager({ records, policy, workspace = () => null, chooseExport, chooseImport, diagnostics, managedInventory = () => [], artifactSummary = () => null, recoverySummary = () => null, protectedPaths = [],
   initialRevision = 1, clock = Date.now, onChange = () => {}, onApplied = () => {} }) {
-  if (!Number.isSafeInteger(initialRevision) || initialRevision < 1 || ![workspace, managedInventory, artifactSummary, clock, onChange, onApplied].every(value => typeof value === 'function')) throw new Error('Privacy host controls unavailable');
+  if (!Number.isSafeInteger(initialRevision) || initialRevision < 1 || ![workspace, managedInventory, artifactSummary, recoverySummary, clock, onChange, onApplied].every(value => typeof value === 'function')) throw new Error('Privacy host controls unavailable');
   let revision = initialRevision, scope = workspace()?.id ? 'repository' : 'global', observed, preview = null, applied = null,
-    busy = false, pending = null, closed = false, message = null, diagnosticView = null, errorCode = null, finalStatus;
+    busy = false, pending = null, closed = false, message = null, diagnosticView = null, recoveryView = null, errorCode = null, finalStatus;
   const tokens = new Map(), receipts = new Map(), inFlight = new Set();
   const paths = () => typeof protectedPaths === 'function' ? protectedPaths() : protectedPaths;
   function context() { const current = workspace(); return { repository: current?.id ?? null, issue: current?.issue ?? null, policyRevision: policy?.worker.read(null).revision ?? null }; }
@@ -24,7 +24,7 @@ export function createPrivacyManager({ records, policy, workspace = () => null, 
   function sync() {
     if (closed) return;
     const next = canonicalJSON(context());
-    if (observed !== undefined && observed !== next) { pending?.controller.abort(); invalidate(); if (scope === 'repository' && !workspace()?.id) scope = 'global'; revision++; }
+    if (observed !== undefined && observed !== next) { pending?.controller.abort(); invalidate(); recoveryView = null; if (scope === 'repository' && !workspace()?.id) scope = 'global'; revision++; }
     observed = next;
   }
   function token() {
@@ -46,7 +46,8 @@ export function createPrivacyManager({ records, policy, workspace = () => null, 
       conversationToken: records && policy ? token() : null,
       values: view ? Object.fromEntries(privacyKeys.map(key => [key, view.values[key]])) : null,
       inventory: records?.inventory().categories.filter(row => row.repository === (current?.id ?? null)) ?? [],
-      managedInventory: managed, artifacts, preview: preview ? structuredClone(preview.visible) : null, diagnostics: diagnosticView ? structuredClone(diagnosticView) : null, errorCode, message };
+      managedInventory: managed, artifacts, preview: preview ? structuredClone(preview.visible) : null, diagnostics: diagnosticView ? structuredClone(diagnosticView) : null,
+      recovery: recoveryView ? structuredClone(recoveryView) : null, errorCode, message };
   }
   const publish = () => { if (!closed) onChange(status()); };
   function ready() { sync(); if (closed || !records || !policy) throw new Error('Privacy protected storage unavailable'); }
@@ -77,8 +78,15 @@ export function createPrivacyManager({ records, policy, workspace = () => null, 
     } finally { if (pending === operation) pending = null; busy = false; publish(); }
   }
   async function execute(payload) {
-    ready(); canonicalJSON(payload); const shape = privacyShapes[payload?.operation];
+    canonicalJSON(payload); const shape = privacyShapes[payload?.operation];
     if (!shape) throw new Error('Privacy operation unavailable'); record(payload, ['operation', ...shape[0]], shape[1]);
+    const recoveryOnly = payload.operation === 'recovery' || payload.operation === 'chat' && privacyCommand(payload.text)?.operation === 'recovery';
+    if (recoveryOnly) { sync(); if (closed) throw Error('Privacy protected storage unavailable'); } else ready();
+    if (payload.operation === 'recovery') {
+      try { recoveryView = createRecoverySnapshot(recoverySummary(), time()); message = 'Local recovery status captured. Recorded worker state needs verification before any recovery action. No recovery action or upload was performed.'; }
+      catch { recoveryView = null; message = 'Recovery inspection unavailable. Existing data is preserved. Review Connections and refresh after protected storage is ready.'; }
+      revision++; publish(); return { snapshot: status() };
+    }
     if (payload.operation === 'append' || payload.operation === 'draft') {
       const saved = tokens.get(payload.token); if (!saved || !uuid(payload.token)) throw new Error('Privacy conversation changed');
       if (typeof payload.text !== 'string' || payload.text.length > 16000) throw new Error('Privacy conversation requires bounded text');
@@ -102,7 +110,7 @@ export function createPrivacyManager({ records, policy, workspace = () => null, 
     if (payload.operation === 'chat') {
       const action = privacyCommand(payload.text);
       if (!action) return { snapshot: status(), message: 'Ask to show privacy, change retention, export settings, restore settings or delete local conversations.' };
-      if (!['apply', 'cancel'].includes(action.operation)) {
+      if (!['apply', 'cancel'].includes(action.operation) && records && policy) {
         const bound = canonicalJSON(context()), issued = token();
         records.saveDraft(context().repository, '');
         await execute({ operation: 'append', token: issued, commandId: randomUUID(), role: 'pm', text: payload.text });
@@ -203,7 +211,7 @@ export function createPrivacyManager({ records, policy, workspace = () => null, 
     }); inFlight.add(work);
     void work.then(() => inFlight.delete(work), () => inFlight.delete(work)); return work;
   }
-  return Object.freeze({ status, dispatch, sync() { sync(); publish(); }, async close() {
+  return Object.freeze({ status, dispatch, sync() { if (recoveryView) { recoveryView = null; revision++; } sync(); publish(); }, async close() {
     if (!closed) { finalStatus = status(); pending?.controller.abort(); invalidate(); closed = true; tokens.clear(); receipts.clear(); }
     // Save/Open panels have no documented AbortSignal. Keep their storage alive until the actual panel resolves.
     await Promise.allSettled([...inFlight]);

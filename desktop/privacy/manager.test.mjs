@@ -11,7 +11,7 @@ import { createPrivacyManager } from './manager.mjs';
 import { privacyCommand } from './commands.mjs';
 import { createPrivacyControlChannel } from '../core/control.mjs';
 
-async function fixture({ managedInventory, artifactSummary } = {}) {
+async function fixture({ managedInventory, artifactSummary, recoverySummary } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-privacy-manager-')));
   let vault, policy, records, manager, selected = 'first', clock = 1000, destination = join(root, 'export.json'), source = destination, select;
   async function close() { try { await manager?.close(); records?.close(); policy?.close(); vault?.close(); } finally { rmSync(root, { recursive: true }); assert.equal(existsSync(root), false); } }
@@ -23,6 +23,7 @@ async function fixture({ managedInventory, artifactSummary } = {}) {
     records = openPrivacyStore(root, { vault, clock: () => clock });
     manager = createPrivacyManager({ records, policy, clock: () => clock, workspace: () => ({ id: selected, name: selected }),
       ...(managedInventory ? { managedInventory } : {}), ...(artifactSummary ? { artifactSummary } : {}),
+      ...(recoverySummary ? { recoverySummary } : {}),
       chooseExport: async () => select ? select() : destination, chooseImport: async () => source, protectedPaths: [],
       diagnostics: () => ({ appVersion: '0.1.0', host: { platform: 'darwin', architecture: 'arm64', version: '27.0.1' }, storage: { protected: true, categories: { conversation: 0, log: 0, audit: 0 }, ciphertextBytes: 0 },
         connections: { github: 'disconnected', codex: 'disconnected', ollama: 'disconnected' }, recovery: { activeRuns: 0, uncertainEffects: 0, blockedRuns: 0 }, background: { configured: false, effective: false } }) });
@@ -40,6 +41,32 @@ test('installation metadata and scoped artifact inventory stay separate from con
     assert.equal(JSON.stringify(status).includes('private artifact failure'), false);
     await f.manager.dispatch({ operation: 'prepare', changes: { 'privacy.logDays': 12 } }); await f.manager.dispatch({ operation: 'apply' }); assert.equal(f.policy.worker.read('second').values['privacy.logDays'].value, 12);
   } finally { await f.close(); }
+});
+test('recovery chat shares read-only inspection, clears stale views and never applies policy or discloses host errors', async () => {
+  let calls = 0, failed = false;
+  const f = await fixture({ recoverySummary: () => { calls++; if (failed) throw Error('private host path');
+    return { connections: { github: 'disconnected', codex: 'blocked', ollama: 'disconnected' },
+      background: { configured: false, effective: false, qualified: false, authorization: 'not-found', cleanupPending: true },
+      permissions: { available: ['workspace.read'], ceiling: ['workspace.read'], grants: [], effective: null },
+      execution: { supervisorAvailable: false, activeRuns: 0, retainedRuns: 1, uncertainEffects: 1, selected: null } }; } });
+  try {
+    const revision = f.policy.worker.read('first').revision;
+    for (const text of ['Show recovery', 'Inspect capability health', 'Show diagnostics and recovery']) assert.equal(privacyCommand(text).operation, 'recovery');
+    assert.equal(privacyCommand('"Show recovery"'), null); assert.equal(privacyCommand('Show recovery and delete everything'), null);
+    await f.manager.dispatch({ operation: 'chat', text: 'Show recovery' }); assert.equal(calls, 1);
+    assert.equal(f.manager.status().recovery.background.cleanupPending, true); assert.equal(f.manager.status().preview, null);
+    assert.equal(f.policy.worker.read('first').revision, revision); f.manager.status(); assert.equal(calls, 1);
+    f.select('second'); assert.equal(f.manager.status().recovery, null); failed = true;
+    await f.manager.dispatch({ operation: 'recovery' }); assert.equal(f.manager.status().recovery, null);
+    assert.equal(JSON.stringify(f.manager.status()).includes('private host path'), false);
+    const frame = { parent: null, url: 'pipeliner://app/index.html' }, contents = { isDestroyed: () => false, mainFrame: frame };
+    const channel = createPrivacyControlChannel(f.manager, { contents, url: frame.url, context: () => ({ revision: f.manager.status().revision }) });
+    assert.throws(() => channel.dispatch({ sender: contents, senderFrame: frame }, { operation: 'recovery', contextRevision: f.manager.status().revision, path: '/private' }), /Invalid policy/);
+  } finally { await f.close(); }
+  const locked = createPrivacyManager({ records: null, policy: null, recoverySummary: () => { throw Error('private Keychain details'); } });
+  try { await locked.dispatch({ operation: 'chat', text: 'Show recovery' }); assert.equal(locked.status().recovery, null);
+    assert.match(locked.status().message, /unavailable/); assert.equal(JSON.stringify(locked.status()).includes('private Keychain'), false);
+  } finally { await locked.close(); }
 });
 test('chat and Settings share exact retention proposals and stale context cannot apply them', async () => {
   const f = await fixture();

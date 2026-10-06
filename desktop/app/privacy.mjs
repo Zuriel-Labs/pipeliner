@@ -2,19 +2,37 @@ import { privacyCommand } from './privacy-commands.mjs';
 import { containsSecret } from './commands.mjs';
 import { skillChatSafe } from './skill-commands.mjs';
 import { toolChatSafe } from './tool-commands.mjs';
+import { permissionLabels } from './permission-commands.mjs';
 
 export async function initPrivacy({ el, message, context, composer, history, show }) {
   const $ = id => document.getElementById(id), tokens = new Map(), pages = new Map(), loading = new Set();
   let state, pending = false, lastMessage, queue = Promise.resolve(), saveWarning = false;
-  const category = el('button', 'Privacy and Recovery', 'category-button'); category.id = 'settings-privacy'; category.setAttribute('aria-pressed', 'false');
+  const category = el('button', 'Privacy and Data', 'category-button'); category.id = 'settings-privacy'; category.setAttribute('aria-pressed', 'false');
   document.querySelector('.settings-categories').append(category);
-  const section = el('section'); section.id = 'privacy-settings'; section.hidden = true; section.setAttribute('aria-label', 'Privacy and recovery settings'); $('settings-view').append(section);
+  const section = el('section'); section.id = 'privacy-settings'; section.hidden = true; section.setAttribute('aria-label', 'Privacy and data settings'); $('settings-view').append(section);
+  const recoveryCategory = el('button', 'Diagnostics and Recovery', 'category-button'); recoveryCategory.id = 'settings-recovery'; recoveryCategory.setAttribute('aria-pressed', 'false');
+  document.querySelector('.settings-categories').append(recoveryCategory);
+  const recoverySection = el('section'); recoverySection.id = 'recovery-settings'; recoverySection.hidden = true; recoverySection.setAttribute('aria-label', 'Diagnostics and recovery settings'); $('settings-view').append(recoverySection);
+  const recoveryHeader = el('article', undefined, 'connection-card'), recoveryStatus = el('p'), recoveryContent = el('div'); recoveryContent.id = 'recovery-content';
+  const refresh = el('button', 'Refresh local status', 'secondary'); refresh.id = 'recovery-refresh'; refresh.type = 'button'; refresh.addEventListener('click', () => request({ operation: 'recovery' }));
+  recoveryHeader.append(el('p', 'Inspect before recovery', 'kicker'), el('h2', 'Diagnostics and recovery'),
+    el('p', 'This view reads local records. Recorded worker state does not verify a live process. Refresh does not reconnect, resume, remove data or upload anything.', 'small'), recoveryStatus, refresh);
+  const recoveryActions = el('article', undefined, 'connection-card'); recoveryActions.append(el('h3', 'Choose the control you need'));
+  const recoveryButtons = el('div', undefined, 'connection-actions');
+  for (const [id, label, target, focus] of [['connections', 'Review secure connections', 'connections'], ['permissions', 'Review permissions', 'permissions'],
+    ['work', 'Review work and recovery', 'agents'], ['background', 'Review background operation', 'background'], ['artifacts', 'Review retained artifacts', 'delivery'],
+    ['restore', 'Review settings restore', 'privacy', 'privacy-import'], ['diagnostics', 'Review diagnostic export', 'privacy', 'privacy-diagnostic-export']]) {
+    const button = el('button', label, 'secondary'); button.id = 'recovery-' + id; button.type = 'button';
+    button.addEventListener('click', () => { show(target); if (focus) $(focus)?.focus({ preventScroll: true }); }); recoveryButtons.append(button);
+  }
+  recoveryActions.append(recoveryButtons, el('p', 'Restore validates a nonsecret settings export in the selected scope. Credentials and authority-bearing references need secure repair. Existing work never resumes from an import.', 'small'));
+  recoverySection.append(recoveryHeader, recoveryContent, recoveryActions);
   const chatPreview = el('section'); chatPreview.id = 'privacy-chat-preview'; chatPreview.setAttribute('aria-label', 'Current privacy preview'); $('composer').before(chatPreview);
   const earlier = el('button', 'Load earlier messages', 'secondary'); earlier.id = 'history-earlier'; earlier.hidden = true;
   earlier.addEventListener('click', () => load(true)); $('transcript').before(earlier);
   function warn() {
     if (saveWarning) return; saveWarning = true;
-    message('Conversation could not be saved. Existing records remain protected. Check Privacy and Recovery before closing.', false, context(), false);
+    message('Conversation could not be saved. Existing records remain protected. Check Diagnostics and Recovery before closing.', false, context(), false);
     $('announcement').textContent = 'Conversation could not be saved.';
   }
   const invoke = payload => window.pipeliner.privacyRequest({ ...payload, contextRevision: state.revision });
@@ -62,13 +80,46 @@ export async function initPrivacy({ el, message, context, composer, history, sho
     }
     card.append(button(p.kind === 'delete' ? 'Delete this local batch' : p.kind === 'export' ? 'Save this export' : 'Apply this change', 'apply', { hash: p.hash }, 'privacy-apply' + suffix), button('Cancel change', 'cancel', {}, 'privacy-cancel' + suffix)); return card;
   }
+  function renderRecovery() {
+    refresh.disabled = state.busy; const view = state.recovery, nodes = [];
+    recoveryStatus.textContent = view ? 'Local records captured at ' + new Date(view.createdAt).toLocaleTimeString() + '. Selected repository: ' + (state.repositoryLabel ?? 'none') + '.'
+      : 'Local status has not been captured or changed since capture. Refresh to inspect the current records.';
+    if (!view) nodes.push(el('p', 'Protected storage may be loading or unavailable. Existing data is preserved; secure connection controls remain available.', 'availability'));
+    else {
+      const connections = el('article', undefined, 'connection-card'); connections.id = 'recovery-connection-health'; connections.append(el('h3', 'Connections'));
+      for (const [key, label] of [['github', 'GitHub'], ['codex', 'Codex'], ['ollama', 'Ollama']]) connections.append(el('p', label + ': ' + view.connections[key] + '.'));
+      const work = el('article', undefined, 'connection-card'); work.id = 'recovery-work-inventory'; const execution = view.execution;
+      work.append(el('h3', 'Recorded work and resources'), el('p', execution.activeRuns + ' reserved runs · ' + execution.retainedRuns + ' retained recovery records · ' + execution.uncertainEffects + ' uncertain effects across this installation.'),
+        el('p', 'Execution supervisor: ' + (execution.supervisorAvailable ? 'available' : 'unavailable') + '. This does not qualify native app installation or automation.', 'small'));
+      const selected = execution.selected;
+      work.append(el('p', selected ? 'Selected Issue #' + selected.issue + ': ' + selected.control + '. Recorded worker: ' + (selected.worker ?? 'not recorded') + '. '
+        + selected.uncertainEffects + ' uncertain effects.' + (selected.controlPending ? ' A control or effect is pending.' : '') : 'No reserved run in the selected repository.'));
+      work.append(el('p', 'Uncertain effects need scoped readback before replay. Use the existing work controls; this inspection grants no recovery authority.', 'small'));
+      const services = el('article', undefined, 'connection-card'); services.id = 'recovery-service-health'; const background = view.background;
+      services.append(el('h3', 'Background operation'), el('p', 'Configured: ' + (background.configured ? 'on' : 'off') + '. Effective: ' + (background.effective ? 'on' : 'off') + '.'),
+        el('p', 'Package qualification: ' + (background.qualified ? 'qualified' : 'unqualified') + '. OS authorization: ' + background.authorization + '.'),
+        el('p', background.cleanupPending ? 'Owned background cleanup remains unverified. Existing records are retained; review Background operation.' : 'No background cleanup is reported pending. Other resource cleanup has not been inspected.'));
+      const permissions = el('details', undefined, 'connection-card'); permissions.id = 'recovery-permission-health'; permissions.append(el('summary', 'Permission availability and current scope'));
+      for (const [key, label] of [['available', 'Host capability catalog'], ['ceiling', 'Host ceiling'], ['grants', 'Selected repository grants'], ['effective', 'Current run authority']]) {
+        const value = view.permissions[key]; permissions.append(el('p', label + ': ' + (value === null ? 'no current run' : value.length ? value.map(id => permissionLabels[id]).join(', ') : 'none') + '.'));
+      }
+      nodes.push(connections, work, services, permissions);
+    }
+    const backups = el('article', undefined, 'connection-card'); backups.id = 'recovery-backup-inventory'; const inventory = state.managedInventory?.find(item => item.id === 'migration');
+    backups.append(el('h3', 'Compatible backups and restore'), el('p', inventory && inventory.state !== 'unavailable'
+      ? inventory.count + ' compatible migration archive files · ' + inventory.bytes.toLocaleString() + ' bytes.' : 'Compatible archive inventory is not verified.'),
+      el('p', 'File counts do not verify archive contents or a successful restore. Migration archives stay protected; they are never automatically restored or used to replay work.', 'small'));
+    nodes.push(backups);
+    if (state.diagnostics) { const details = el('details', undefined, 'connection-card'); details.append(el('summary', 'Captured redacted diagnostics'), el('pre', JSON.stringify(state.diagnostics, null, 2), 'tool-schema')); nodes.push(details); }
+    const expanded = $('recovery-permission-health')?.open; recoveryContent.replaceChildren(...nodes); if ($('recovery-permission-health')) $('recovery-permission-health').open = Boolean(expanded);
+  }
   function render(snapshot) {
     if (state && snapshot.revision < state.revision) return;
     const focused = document.activeElement?.id, previous = state, saved = state && JSON.stringify(state.values) === JSON.stringify(snapshot.values) && $('privacy-form')
       ? Object.fromEntries([...$('privacy-form').querySelectorAll('input')].map(node => [node.dataset.key, node.value])) : null;
     state = snapshot;
     if (state.conversationToken) tokens.set(state.repository, state.conversationToken);
-    const nodes = [], head = el('article', undefined, 'connection-card'); head.append(el('p', 'Local data, deliberate destinations', 'kicker'), el('h2', 'Privacy and recovery'),
+    const nodes = [], head = el('article', undefined, 'connection-card'); head.append(el('p', 'Local data, deliberate destinations', 'kicker'), el('h2', 'Privacy and data'),
       el('p', 'Conversation records stay on this Mac, protected by the installation key. Repository work may be sent to its selected provider, GitHub or explicitly configured tools.', 'small'),
       el('p', 'Telemetry, automatic diagnostic upload and cross-repository reuse are unavailable and off. Export is a deliberate local copy.', 'small'));
     const scopeRow = el('div', undefined, 'setup-field'), label = el('label', 'Settings scope'), select = el('select'); select.id = 'privacy-scope'; label.htmlFor = select.id;
@@ -119,14 +170,15 @@ export async function initPrivacy({ el, message, context, composer, history, sho
     if (state.diagnostics) { const details = el('details', undefined, 'connection-card'); details.append(el('summary', 'Captured local diagnostics'), el('pre', JSON.stringify(state.diagnostics, null, 2), 'tool-schema')); nodes.push(details); }
     if (state.busy) nodes.push(el('p', 'Finish or cancel the native file panel. Cancel invalidates its result; close the panel with Cancel or Escape.', 'availability'), button('Cancel pending operation', 'cancel', {}, 'privacy-native-cancel'));
     if (state.message) nodes.push(el('p', state.message, 'protected-state'));
-    section.replaceChildren(...nodes); if (focused && $(focused) && !$(focused).disabled) $(focused).focus();
+    section.replaceChildren(...nodes); renderRecovery(); if (focused && $(focused) && !$(focused).disabled) $(focused).focus({ preventScroll: true });
     if (state.message && state.message !== lastMessage) { message(state.message, false, state.repository, false); $('announcement').textContent = state.message; lastMessage = state.message; }
     if (state.storageAvailable && context() === state.repository && (!pages.has(state.repository) || !previous?.storageAvailable)) void load();
   }
   async function request(payload, text) {
     if (!state || pending && payload.operation !== 'cancel') return; const target = context(), revision = state.revision, edit = composer().revision; pending = true;
     if (text) message(text, true, target, false);
-    if (text && ['view', 'diagnostics'].includes(privacyCommand(text)?.operation)) show();
+    const operation = text ? privacyCommand(text)?.operation : payload.operation;
+    if (text && ['view', 'diagnostics', 'recovery'].includes(operation)) show(operation === 'view' ? 'privacy' : 'recovery');
     try {
       await queue; const result = await window.pipeliner.privacyRequest({ ...payload, contextRevision: revision }); pending = false; render(result.snapshot ?? state);
       if (result.historyChanged) { pages.delete(target); await load(false, true, edit); }

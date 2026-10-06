@@ -122,7 +122,7 @@ async function request(payload, text) {
   else if (returnFocus && $(returnFocus) && !$(returnFocus).disabled) { $(returnFocus).focus(); returnFocus = null; }
 }
 privacy = await initPrivacy({ el, message, context: () => currentContext, composer: () => ({ value: $('prompt').value, revision: promptRevision }),
-  show: () => { showSettings(); $('settings-privacy').click(); }, history: page => {
+  show: (category = 'privacy') => { showSettings(); $('settings-' + category).click(); }, history: page => {
     if (page.repository !== currentContext) return;
     const restoreReading = preserveReadingPosition();
     const before = page.replace ? [] : [...$('transcript').childNodes], known = new Set(before.map(node => node.dataset?.receipt));
@@ -177,17 +177,18 @@ $('composer').addEventListener('submit', event => { event.preventDefault(); cons
   else request({ operation: 'chat', text }, text);
 });
 $('chat-nav').addEventListener('click', () => showSettings(false)); $('settings-nav').addEventListener('click', () => showSettings());
-for (const category of ['connections', 'pipelines', 'agents', 'schedule', 'background', 'skills', 'privacy', 'appearance', 'delivery', 'permissions', 'updates']) $('settings-' + category).addEventListener('click', () => {
+for (const category of ['connections', 'pipelines', 'agents', 'schedule', 'background', 'skills', 'privacy', 'recovery', 'appearance', 'delivery', 'permissions', 'updates']) $('settings-' + category).addEventListener('click', () => {
   $('connection-settings').hidden = category !== 'connections'; $('pipeline-settings').hidden = category !== 'pipelines'; $('agent-settings').hidden = category !== 'agents'; $('schedule-settings').hidden = category !== 'schedule';
   $('background-settings').hidden = category !== 'background';
   $('skill-settings').hidden = category !== 'skills';
   $('tool-settings').hidden = category !== 'skills';
   $('privacy-settings').hidden = category !== 'privacy';
+  $('recovery-settings').hidden = category !== 'recovery';
   $('appearance-settings').hidden = category !== 'appearance';
   $('delivery-settings').hidden = category !== 'delivery';
   $('permission-settings').hidden = category !== 'permissions';
   $('update-settings').hidden = category !== 'updates';
-  for (const name of ['connections', 'pipelines', 'agents', 'schedule', 'background', 'skills', 'privacy', 'appearance', 'delivery', 'permissions', 'updates']) $('settings-' + name).setAttribute('aria-pressed', String(name === category));
+  for (const name of ['connections', 'pipelines', 'agents', 'schedule', 'background', 'skills', 'privacy', 'recovery', 'appearance', 'delivery', 'permissions', 'updates']) $('settings-' + name).setAttribute('aria-pressed', String(name === category));
 });
 for (const button of document.querySelectorAll('[data-settings]')) button.addEventListener('click', () => showSettings());
 for (const button of document.querySelectorAll('[data-chat]')) button.addEventListener('click', () => request({ operation: 'chat', text: button.dataset.chat }, button.dataset.chat));

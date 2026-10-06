@@ -226,4 +226,48 @@ exports.run = async ({ window, directory, vault, privacy, delivery, updates, upd
     await chat('Apply this update change'); await wait(() => !updates.status().preview);
     assert.equal(policy.worker.read(null).values['updates.channel'].value, 'stable');
   });
+  await check('recovery-native-read-only-chat-settings-keyboard-and-scoped-navigation', async () => {
+    const revision = policy.worker.read(null).revision;
+    await chat('Show diagnostics and recovery'); await wait(() => js("!document.getElementById('recovery-settings').hidden && Boolean(document.getElementById('recovery-connection-health'))"));
+    const captured = privacy.status().recovery; assert.ok(captured); assert.equal(captured.background.configured, false);
+    assert.equal(captured.execution.selected, null); assert.equal(captured.permissions.available.includes('host.install'), false);
+    assert.equal(JSON.stringify(captured).includes(directory), false); assert.equal(Object.hasOwn(captured, 'account'), false);
+    assert.equal(await js("document.getElementById('settings-recovery').getAttribute('aria-pressed')==='true' && document.getElementById('privacy-settings').hidden"), true);
+    await js("document.getElementById('prompt').value='Unsent recovery draft';document.getElementById('prompt').dispatchEvent(new Event('input'));document.getElementById('privacy-logDays').value='23';document.getElementById('recovery-refresh').focus()");
+    const previous = captured.createdAt;
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+    await wait(() => privacy.status().recovery?.createdAt > previous);
+    await wait(() => js("document.activeElement.id==='recovery-refresh'"));
+    assert.equal(await js("document.getElementById('prompt').value"), 'Unsent recovery draft'); assert.equal(await js("document.getElementById('privacy-logDays').value"), '23');
+    await js("document.getElementById('recovery-connections').focus()"); window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+    await wait(() => js("!document.getElementById('connection-settings').hidden"));
+    assert.equal(policy.worker.read(null).revision, revision); assert.equal(policy.runtime.status(delivery.status().repository.id), null);
+    await js("document.getElementById('settings-recovery').click();document.getElementById('recovery-restore').click()");
+    assert.equal(await js("!document.getElementById('privacy-settings').hidden && document.activeElement.id==='privacy-import'"), true);
+    assert.equal(privacy.status().preview, null); assert.equal(privacy.status().busy, false);
+    measurements.push({ inspection: 'read-only-recovery-surface', source: 'recorded-local-host-state', activeRuns: captured.execution.activeRuns,
+      uncertainEffects: captured.execution.uncertainEffects, backgroundConfigured: captured.background.configured, backgroundQualified: captured.background.qualified });
+  });
+  await check('recovery-native-stale-view-reload-focus-and-200-percent-reflow', async () => {
+    await chat('Inspect capability health'); await wait(() => Boolean(privacy.status().recovery));
+    await js("document.getElementById('recovery-refresh').focus()"); privacy.sync();
+    await wait(() => js("!document.getElementById('recovery-connection-health')"));
+    assert.equal(await js("document.activeElement.id==='recovery-refresh'"), true); assert.equal(privacy.status().recovery, null);
+    await js("document.getElementById('recovery-refresh').click()"); await wait(() => Boolean(privacy.status().recovery));
+    appearance.dispatch({ operation: 'prepare', changes: { 'appearance.textScale': 2 } }); appearance.dispatch({ operation: 'apply' });
+    window.setSize(420, 760); await js("document.getElementById('settings-recovery').click();document.getElementById('recovery-refresh').click()");
+    await wait(() => Boolean(privacy.status().recovery)); await new Promise(resolve => setTimeout(resolve, 150));
+    assert.equal(await js('document.documentElement.scrollWidth<=innerWidth'), true);
+    assert.equal(await js("Array.from(document.querySelectorAll('#recovery-settings button,#recovery-settings summary')).every(node=>node.getBoundingClientRect().height>=44)"), true);
+    await js("document.getElementById('recovery-permission-health').open=true;document.getElementById('recovery-refresh').focus()");
+    await js("document.getElementById('recovery-refresh').click()"); await wait(() => Boolean(privacy.status().recovery));
+    assert.equal(await js("document.getElementById('recovery-permission-health').open"), true);
+    await js("(()=>{const card=document.getElementById('recovery-service-health');window.scrollTo(0,window.scrollY+card.getBoundingClientRect().top-document.querySelector('.app-nav').getBoundingClientRect().bottom-24)})()");
+    await js('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+    writeFileSync(join(directory, 'layout-capture.png'), (await window.webContents.capturePage()).toPNG(), { flag: 'wx', mode: 0o600 });
+    window.setSize(1180, 840); appearance.dispatch({ operation: 'prepare', changes: { 'appearance.textScale': 1 } }); appearance.dispatch({ operation: 'apply' });
+    await new Promise((resolve, reject) => { window.webContents.once('did-finish-load', resolve); window.webContents.once('did-fail-load', reject); window.reload(); });
+    await wait(() => js("Boolean(document.getElementById('settings-recovery'))"));
+    await chat('Show recovery'); await wait(() => Boolean(privacy.status().recovery)); assert.equal(privacy.status().preview, null);
+  });
 };

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { canonicalJSON, fields, record, validateValue } from '../core/settings.mjs';
+import { canonicalJSON, fields, record, validateValue, capabilityNames } from '../core/settings.mjs';
 import { containsSecret } from '../connections/commands.mjs';
 
 // These identities or controls require repair on the current installation; an import cannot recreate their authority.
@@ -85,4 +85,32 @@ export function createDiagnosticExport(input, createdAt) {
     const document = { kind: 'pipeliner-diagnostics', version: 1, createdAt, ...structuredClone(input) };
     return { ...document, digest: digest(document) };
   } catch { throw new Error('Diagnostic fields unavailable; raw content was excluded'); }
+}
+
+// Recorded local health only. Never accept an account, path, raw error or executable recovery instruction.
+export function createRecoverySnapshot(input, createdAt) {
+  try {
+    canonicalJSON(input); record(input, ['connections', 'background', 'permissions', 'execution']);
+    record(input.connections, ['github', 'codex', 'ollama']);
+    record(input.background, ['configured', 'effective', 'qualified', 'authorization', 'cleanupPending']);
+    record(input.permissions, ['available', 'ceiling', 'grants', 'effective']);
+    record(input.execution, ['supervisorAvailable', 'activeRuns', 'retainedRuns', 'uncertainEffects', 'selected']);
+    const count = value => integer(value) && value <= 100000000;
+    const capabilities = value => Array.isArray(value) && value.length <= capabilityNames.length && new Set(value).size === value.length && value.every(id => capabilityNames.includes(id));
+    const service = input.background, execution = input.execution;
+    if (!integer(createdAt) || Object.values(input.connections).some(value => !['disconnected', 'connected', 'blocked'].includes(value))
+      || ['configured', 'effective', 'qualified', 'cleanupPending'].some(key => typeof service[key] !== 'boolean')
+      || !['not-found', 'not-registered', 'enabled', 'requires-approval'].includes(service.authorization)
+      || service.effective && (!service.configured || !service.qualified || service.authorization !== 'enabled' || service.cleanupPending)
+      || ['available', 'ceiling', 'grants'].some(key => !capabilities(input.permissions[key]))
+      || input.permissions.effective !== null && !capabilities(input.permissions.effective)
+      || typeof execution.supervisorAvailable !== 'boolean' || ['activeRuns', 'retainedRuns', 'uncertainEffects'].some(key => !count(execution[key]))) throw Error();
+    if (execution.selected !== null) {
+      const selected = execution.selected; record(selected, ['issue', 'control', 'worker', 'controlPending', 'uncertainEffects']);
+      if (!Number.isSafeInteger(selected.issue) || selected.issue < 1 || !['running', 'pause-requested', 'stop-requested', 'paused', 'stopped', 'complete', 'recovery-required'].includes(selected.control)
+        || selected.worker !== null && !['starting', 'created', 'running', 'stopping', 'stopped', 'exited', 'blocked', 'absent', 'vm-stopped'].includes(selected.worker)
+        || typeof selected.controlPending !== 'boolean' || !count(selected.uncertainEffects)) throw Error();
+    }
+    return { createdAt, ...structuredClone(input) };
+  } catch { throw Error('Recovery inspection unavailable'); }
 }

@@ -113,7 +113,7 @@ app.whenReady().then(async () => {
   const { nativeKeyEntry, nativeFolderEntry, nativeMCPEntry } = await moduleAt('../connections/native-entry.mjs');
   const activeConnections = new Set();
   const publish = snapshot => {
-    development?.sync(); scheduling?.sync(); background?.sync();
+    development?.sync(); scheduling?.sync(); background?.sync(); privacy?.sync();
     let returned = false;
     for (const connection of snapshot.connections) { if (activeConnections.has(connection.id) && !connection.busy) returned = true; if (connection.busy) activeConnections.add(connection.id); else activeConnections.delete(connection.id); }
     if (window && !window.isDestroyed()) { window.webContents.send('connections:status', snapshot); if (returned && !closing) { window.show(); window.focus(); window.webContents.focus(); } }
@@ -144,7 +144,7 @@ app.whenReady().then(async () => {
   pipelines = makePipelines(1);
   const previousRuns = new Map();
   const publishDevelopment = snapshot => {
-    permissions?.sync(); pipelines?.sync(); skills?.sync(); tools?.sync();
+    permissions?.sync(); pipelines?.sync(); skills?.sync(); tools?.sync(); privacy?.sync();
     if (scheduler && workspaceStore && !closing) for (const workspace of workspaceStore.workspaces()) {
       const current = policy.runtime.status(workspace.id), previous = previousRuns.get(workspace.id); previousRuns.set(workspace.id, current?.id ?? null);
       if (previous && !current) void scheduler.completed(workspace.id).catch(() => {});
@@ -160,7 +160,7 @@ app.whenReady().then(async () => {
   const publishScheduling = snapshot => { background?.sync(); pipelines?.sync(); skills?.sync(); tools?.sync(); if (window && !window.isDestroyed()) window.webContents.send('scheduling:status', snapshot); };
   const makeScheduling = initialRevision => createSchedulingManager({ store: workspaceStore, policy, scheduler, initialRevision, onChange: publishScheduling });
   scheduling = makeScheduling(1);
-  const publishBackground = snapshot => { pipelines?.sync(); skills?.sync(); tools?.sync(); if (window && !window.isDestroyed()) window.webContents.send('background:status', snapshot); };
+  const publishBackground = snapshot => { pipelines?.sync(); skills?.sync(); tools?.sync(); privacy?.sync(); if (window && !window.isDestroyed()) window.webContents.send('background:status', snapshot); };
   const makeBackground = initialRevision => createBackgroundManager({ policy, host: backgroundHost, initialRevision, onChange: publishBackground,
     scheduler: () => workspaceStore && scheduler ? workspaceStore.workspaces().map(workspace => ({ repository: workspace.name, ...scheduler.status(workspace.id) })) : [] });
   background = makeBackground(1);
@@ -186,6 +186,23 @@ app.whenReady().then(async () => {
   };
   const makePrivacy = initialRevision => createPrivacyManager({ records: privacyRecords, policy, initialRevision, onChange: publishPrivacy,
     managedInventory: () => inspectManagedData(directory), artifactSummary: repository => artifacts ? artifacts.summary(repository) : { unavailable: true },
+    recoverySummary: () => {
+      if (!vault || !policy || !workspaceStore || !developmentStore) throw Error('Recovery inspection unavailable');
+      refreshRecovery(); const selected = workspaceStore.selected(), current = policy.worker.read(selected).values, states = manager.status().connections,
+        run = selected ? policy.runtime.status(selected) : null, worker = run && supervisor ? supervisor.status(selected) : null,
+        service = backgroundHost?.status(), native = backgroundNative.inspect();
+      return { connections: Object.fromEntries(['github', 'codex', 'ollama'].map(id => { const value = states.find(item => item.id === id);
+          return [id, ['connected', 'limited'].includes(value?.health) ? 'connected' : value?.health === 'disconnected' ? 'disconnected' : 'blocked']; })),
+        background: { configured: current['background.enabled'].value, effective: service?.effective ?? false, qualified: service?.qualified ?? native.qualified,
+          authorization: service?.authorization ?? native.status, cleanupPending: service?.cleanupPending ?? false },
+        permissions: { available: [...hostCapabilities], ceiling: current['permissions.ceiling'].value, grants: selected ? current['permissions.grants'].value : [],
+          effective: run ? policy.worker.authority(selected, run.policyRevision).capabilities : null },
+        execution: { supervisorAvailable: Boolean(supervisor), activeRuns: workspaceStore.workspaces().filter(item => policy.runtime.status(item.id)).length,
+          retainedRuns: recoveryInventory.length, uncertainEffects: recoveryInventory.reduce((sum, item) => sum + item.uncertainEffects, 0) + workspaceStore.pending().length,
+          selected: run ? { issue: run.issue, control: run.control, worker: worker?.worker ?? null, controlPending: Boolean(worker?.pending || run.pendingAction),
+            uncertainEffects: recoveryInventory.filter(item => item.runId === run.id).reduce((sum, item) => sum + item.uncertainEffects, 0)
+              + workspaceStore.pending().filter(item => item.binding.repository === selected).length } : null } };
+    },
     workspace: () => { const id = workspaceStore?.selected(); const item = workspaceStore?.workspaces().find(value => value.id === id);
       return item ? { id, name: item.name, issue: workspaceStore.issueContext(id)?.selected ?? null } : null; },
     protectedPaths: privatePaths, onApplied: () => { issues?.sync(); pipelines?.sync(); development?.sync(); scheduling?.sync(); background?.sync(); skills?.sync(); tools?.sync(); },

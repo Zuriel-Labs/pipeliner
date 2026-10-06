@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createConfigurationExport, configurationChanges, createDiagnosticExport } from './model.mjs';
+import { createConfigurationExport, configurationChanges, createDiagnosticExport, createRecoverySnapshot } from './model.mjs';
 import { developmentTemplate } from '../core/settings.mjs';
 
 const snapshot = settings => ({ scope: 'repository', target: 'first', revision: 7, hash: 'a'.repeat(64), settings });
@@ -42,4 +42,19 @@ test('diagnostics allow only bounded version, status and count fields, with no r
   for (const value of [{ ...diagnostic(), rawLog: 'secret' }, { ...diagnostic(), connections: { ...diagnostic().connections, account: 'private' } },
     { ...diagnostic(), host: { ...diagnostic().host, path: '/Users/private' } }, { ...diagnostic(), recovery: { ...diagnostic().recovery, activeRuns: -1 } }])
     assert.throws(() => createDiagnosticExport(value, 1000), /Diagnostic/);
+});
+const recovery = () => ({ connections: { github: 'disconnected', codex: 'connected', ollama: 'blocked' },
+  background: { configured: false, effective: false, qualified: false, authorization: 'not-found', cleanupPending: false },
+  permissions: { available: ['workspace.read'], ceiling: ['workspace.read'], grants: [], effective: null },
+  execution: { supervisorAvailable: true, activeRuns: 1, retainedRuns: 2, uncertainEffects: 1,
+    selected: { issue: 54, control: 'recovery-required', worker: 'blocked', controlPending: false, uncertainEffects: 1 } } });
+test('recovery captures only bounded recorded health and never accepts private host fields or unknown authority', () => {
+  const input = recovery(), value = createRecoverySnapshot(input, 1000);
+  assert.equal(value.createdAt, 1000); assert.equal(value.execution.selected.control, 'recovery-required');
+  input.permissions.ceiling.push('host.install'); assert.deepEqual(value.permissions.ceiling, ['workspace.read']);
+  for (const item of [{ ...recovery(), account: 'private' }, { ...recovery(), connections: { ...recovery().connections, github: 'raw private error' } },
+    { ...recovery(), permissions: { ...recovery().permissions, available: ['host.shell'] } },
+    { ...recovery(), execution: { ...recovery().execution, activeRuns: -1 } },
+    { ...recovery(), execution: { ...recovery().execution, selected: { ...recovery().execution.selected, path: '/private' } } },
+    { ...recovery(), background: { ...recovery().background, effective: true } }]) assert.throws(() => createRecoverySnapshot(item, 1000), /Recovery inspection unavailable/);
 });

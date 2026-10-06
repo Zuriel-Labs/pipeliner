@@ -1,6 +1,6 @@
 'use strict';
 const assert = require('node:assert/strict');
-const { readFileSync, existsSync, mkdirSync, writeFileSync, lstatSync } = require('node:fs');
+const { readFileSync, existsSync, mkdirSync, writeFileSync, lstatSync, realpathSync, rmdirSync } = require('node:fs');
 const { execFileSync } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
 const path = require('node:path');
@@ -745,13 +745,14 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
     if (process.argv.includes('--qualify-issues')) await check('issues-native-protected-25-workspace-10000-item-cache-and-warm-navigation', async () => {
       await wait(() => js("Boolean(document.getElementById('connection-list').children.length)"));
       const { openWorkspaceStore } = await moduleAt('../repositories/store.mjs'), { issueFixture } = await moduleAt('../issues/fixture.mjs');
-      const original = workspaces.status().selected, store = openWorkspaceStore(directory, { vault }), saved = new Map(), coldMs = [], warmMs = [];
+      const original = workspaces.status().selected, store = openWorkspaceStore(directory, { vault }), saved = new Map(), coldMs = [], warmMs = [], seeded = [];
       let targets;
+      try {
       try {
         const present = store.workspaces(), first = present[0]; assert.equal(present.length, 2);
         for (let index = present.length; index < 25; index++) {
           const id = 'repo_workload_' + index, folder = path.join(path.dirname(workspaceFixture.path), 'workload-' + index);
-          mkdirSync(folder, { mode: 0o700 }); const info = lstatSync(folder), slug = 'fixture/workload-' + index;
+          mkdirSync(folder, { mode: 0o700 }); const info = lstatSync(folder), slug = 'fixture/workload-' + index; seeded.push({ folder, info });
           // Synthetic imported metadata only; no Git or remote connection qualification is claimed.
           store.register({ ...first, id, repositoryId: 'RWorkload' + index, numericId: 100 + index, slug, name: slug, path: folder,
             localKey: info.dev + ':' + info.ino, commonPath: folder, project: { ...first.project, id: 'PWorkload' + index, title: 'Synthetic workload ' + index } });
@@ -793,6 +794,14 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
       } finally {
         for (const [id, rows] of saved) { const fixture = issueFixtures.get(id); fixture.issues.splice(0, fixture.issues.length, ...rows); }
         workspaces.dispatch({ operation: 'select', workspace: original }); await issues.dispatch({ operation: 'refresh' }); await issues.idle();
+      }
+      } finally {
+        for (const { folder, info } of seeded) {
+          const current = lstatSync(folder);
+          assert(current.isDirectory() && !current.isSymbolicLink() && current.uid === process.getuid()
+            && current.dev === info.dev && current.ino === info.ino && realpathSync(folder) === folder && (current.mode & 0o777) === 0o700);
+          rmdirSync(folder); assert.equal(existsSync(folder), false);
+        }
       }
     });
     await check('themes-narrow-zoom-high-contrast-reduced-motion', async () => {

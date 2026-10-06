@@ -25,8 +25,13 @@ test('installer staging requires protected signed history, exact bytes, current 
     const attempt = history.begin(trust, current), envelope = Buffer.from(canonicalJSON({ release, signature: sign(null, Buffer.from(canonicalJSON(release)), privateKey).toString('base64') }));
     history.complete(attempt.token, envelope);
     async function invoke(change = {}) {
-      let authorized = true; const controller = new AbortController(); if (change.preAbort) controller.abort();
-      return stageUpdateInstaller({ directory, history, trust, current, maxBytes: change.maxBytes ?? 2 * 1024 ** 2, reserveBytes: 1024 ** 2,
+      let authorized = true, reads = 0; const controller = new AbortController(); if (change.preAbort) controller.abort();
+      const checkedHistory = change.tamperAtPublication ? { read(...args) {
+        const value = history.read(...args);
+        if (++reads === 2) writeFileSync(join(directory, readdirSync(directory)[0]), Buffer.alloc(bytes.length, 8));
+        return value;
+      } } : history;
+      return stageUpdateInstaller({ directory, history: checkedHistory, trust, current, maxBytes: change.maxBytes ?? 2 * 1024 ** 2, reserveBytes: 1024 ** 2,
         signal: controller.signal, timeoutMs: change.hang || change.bodyHang ? 100 : 30000, isCurrent: () => authorized }, {
         clock: () => now,
         resolve: async (url, local, signal) => { assert.equal(url.href, release.url); assert.equal(local, undefined); signal.throwIfAborted(); return change.privateDNS ? { address: '127.0.0.1', family: 4 } : { address: '8.8.8.8', family: 4 }; },
@@ -68,6 +73,9 @@ test('installer staging requires protected signed history, exact bytes, current 
     now = 1000; const before = requests;
     for (const change of [{ preAbort: true }, { privateDNS: true }, { maxBytes: bytes.length - 1 }]) await assert.rejects(invoke(change), /^Error: update-installer-unverified$/);
     assert.equal(requests, before); assert.deepEqual(readdirSync(directory), []);
+    await assert.rejects(invoke({ tamperAtPublication: true }), /^Error: update-installer-recovery-required$/);
+    const changed = readdirSync(directory); assert.equal(changed.length, 1);
+    assert.deepEqual(readFileSync(join(directory, changed[0])), Buffer.alloc(bytes.length, 8)); unlinkSync(join(directory, changed[0]));
     await assert.rejects(invoke({ replace: true }), /^Error: update-installer-recovery-required$/);
     const held = readdirSync(directory); assert.equal(held.length, 1); assert.equal(readFileSync(join(directory, held[0]), 'utf8'), 'preserve replaced file');
     assert.equal(history.read(trust, current).sequence, 1); assert.equal(closed, requests);

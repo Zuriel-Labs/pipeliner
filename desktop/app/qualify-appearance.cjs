@@ -5,7 +5,7 @@ const { join } = require('node:path');
 const { nativeTheme } = require('electron');
 
 // Development-only. Actual renderer, native theme, keyboard and protected policy; no Human/VoiceOver acceptance claim.
-exports.run = async ({ window, directory, appearance, channel, policy, development, js, wait, check }) => {
+exports.run = async ({ window, directory, appearance, channel, policy, development, js, wait, check, measurements }) => {
   const chat = text => js(`document.getElementById('chat-nav').click();document.getElementById('prompt').value=${JSON.stringify(text)};document.getElementById('composer').requestSubmit()`);
   const show = () => js("document.getElementById('settings-nav').click();document.getElementById('settings-appearance').click()");
   async function change(text) { await chat(text); await wait(() => Boolean(appearance.status().preview)); await chat('Apply this appearance change'); await wait(() => !appearance.status().preview); }
@@ -120,7 +120,10 @@ exports.run = async ({ window, directory, appearance, channel, policy, developme
     await wait(() => window.isFocused());
     window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
     await wait(() => js("document.getElementById('chat-new-activity').hidden&&document.activeElement.id==='transcript'"));
-    assert.equal(await js("Math.abs(document.getElementById('transcript').scrollHeight-document.getElementById('transcript').clientHeight-document.getElementById('transcript').scrollTop)<=1&&scrollY===window.layoutPage"), true);
+    const geometry = await js("(()=>{const log=document.getElementById('transcript');return {bottomGap:log.scrollHeight-log.clientHeight-log.scrollTop,pageBefore:window.layoutPage,pageAfter:scrollY,cueVisibility:getComputedStyle(document.getElementById('chat-new-activity')).visibility}})()");
+    measurements.push({ interaction: 'chat-jump-to-new-activity', ...geometry });
+    assert(Math.abs(geometry.bottomGap) <= 1); assert.equal(geometry.pageAfter, geometry.pageBefore); assert.equal(geometry.cueVisibility, 'hidden');
+    await js("document.getElementById('chat-new-activity').focus({preventScroll:true})"); assert.equal(await js('document.activeElement.id'), 'transcript');
     const revision = policy.worker.read(null).revision;
     await new Promise((resolve, reject) => { window.webContents.once('did-finish-load', resolve); window.webContents.once('did-fail-load', reject); window.reload(); });
     await wait(() => js("document.getElementById('appearance-layout')?.value==='beside'")); assert.equal(policy.worker.read(null).revision, revision);

@@ -706,7 +706,7 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
       });
     }
     if (privacyScope) await require('./qualify-privacy.cjs').run({ window, directory, vault, privacy, records: privacyRecords, channel: privacyChannel, workspaces, policy, js, wait, check });
-    if (appearanceScope) await require('./qualify-appearance.cjs').run({ window, directory, appearance, channel: appearanceChannel, policy, development, js, wait, check });
+    if (appearanceScope) await require('./qualify-appearance.cjs').run({ window, directory, appearance, channel: appearanceChannel, policy, development, js, wait, check, measurements });
     if (deliveryScope) await require('./qualify-delivery.cjs').run({ window, directory, vault, privacy, delivery, artifacts, appearance, channel: deliveryChannel, policy, js, wait, check, measurements });
     if (permissionScope) await require('./qualify-permissions.cjs').run({ window, directory, permissions, appearance, channel: permissionChannel, policy, js, wait, check, measurements });
     if (process.argv.includes('--qualify-issues')) await check('issues-cached-10000-row-bounded-search-pages-dependencies-and-native-keyboard', async () => {

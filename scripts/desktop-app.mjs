@@ -15,18 +15,21 @@ if (storageFixture && process.argv.some(arg => qualificationFlags.includes(arg) 
 const qualifying = storageFixture || process.argv.some(arg => qualificationFlags.includes(arg));
 if (process.argv.slice(2).some(arg => ![...qualificationFlags, '--retain-owned-capture', '--storage-fixture'].includes(arg))) throw new Error('argument-denied');
 if (process.platform !== 'darwin' || process.arch !== 'arm64') throw new Error('host-unqualified');
-const { validateContext } = createRequire(import.meta.url)('../desktop/test-storage.cjs');
-let storage;
+const { validateContext, nativeTestEnvironment, nativeTestLauncher } = createRequire(import.meta.url)('../desktop/test-storage.cjs');
+let storage, chromiumEnvironment;
 {
-  const launcher = '/Users/chris/.local/bin/test-artifacts';
+  const nativeQualification = qualifying && !storageFixture;
+  const launcher = nativeQualification ? nativeTestLauncher() : '/Users/chris/.local/bin/test-artifacts';
   if (!process.env.TEST_ARTIFACT_RUN) {
     const options = [launcher, 'run', '--repo', root, '--issue', process.env.TEST_ARTIFACT_ISSUE || 'desktop-development'];
     if (storageFixture) options.push('--run-bytes', '4194304', '--seconds', '15');
+    if (nativeQualification) options.push('--chromium-singleton');
     const result = spawnSync(options.shift(), [...options, '--', process.execPath,
       fileURLToPath(import.meta.url), ...process.argv.slice(2)], { stdio: 'inherit' });
     process.exit(Number.isInteger(result.status) ? result.status : 74);
   }
   storage = validateContext(root);
+  if (nativeQualification) chromiumEnvironment = nativeTestEnvironment(storage);
   if (resolve(tmpdir()) !== storage.paths.tmp) throw new Error('test-storage-context-mismatch');
   if (storageFixture) {
     const path = join(storage.paths.recordings, 'synthetic-storage-capture.bin');
@@ -54,7 +57,7 @@ try {
   await exec('/usr/bin/clang', ['-fobjc-arc', '-framework', 'Foundation', '-mmacosx-version-min=13.0', join(root, 'desktop/scheduling/calendar.m'), '-o', calendar], { timeout: 30000 });
   const electron = join(root, 'desktop/prototype/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron'); await access(electron);
   child = spawn(electron, [join(root, 'desktop/app/main.cjs'), `--key-helper=${helper}`, `--calendar-helper=${calendar}`, ...(qualifying ? ['--qualify', ...process.argv.filter(arg => qualificationFlags.includes(arg) && arg !== '--qualify'), `--test-data-directory=${temporary}`] : [])], {
-    env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: homedir(), TMPDIR: temporary, LANG: 'en_US.UTF-8', ...(storage ? { TEST_ARTIFACT_RUN: storage.run_path, ...Object.fromEntries(['tmp','logs','recordings','outputs'].map(name => ['TEST_ARTIFACT_' + name.toUpperCase(), storage.paths[name]])) } : {}), ...(nativeRoot ? { PIPELINER_NATIVE_WORKSPACE_ROOT: nativeRoot } : {}), ...(privacyExport ? { PIPELINER_PRIVACY_EXPORT_DIRECTORY: privacyExport } : {}) }, stdio: ['ignore', 'pipe', 'pipe'],
+    env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: homedir(), TMPDIR: temporary, LANG: 'en_US.UTF-8', ...chromiumEnvironment, ...(storage ? { TEST_ARTIFACT_RUN: storage.run_path, ...Object.fromEntries(['tmp','logs','recordings','outputs'].map(name => ['TEST_ARTIFACT_' + name.toUpperCase(), storage.paths[name]])) } : {}), ...(nativeRoot ? { PIPELINER_NATIVE_WORKSPACE_ROOT: nativeRoot } : {}), ...(privacyExport ? { PIPELINER_PRIVACY_EXPORT_DIRECTORY: privacyExport } : {}) }, stdio: ['ignore', 'pipe', 'pipe'],
   });
   if (qualifying) timer = setTimeout(() => child.kill('SIGTERM'), 180000);
   child.stdout.setEncoding('utf8'); child.stdout.on('data', bytes => {

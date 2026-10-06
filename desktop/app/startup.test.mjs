@@ -20,6 +20,7 @@ function entry(packaged, args, storageAvailable = true) {
         calls.push(['storage']); if (!storageAvailable) throw new Error('test-storage-run-required');
         return {paths:{tmp:'/private/owned-test'}};
       }, validateOwnedDataDirectory(_storage, directory) {calls.push(['owned',directory]);},
+      nativeTestEnvironment() {calls.push(['chromium']);if(storageAvailable==='foreign-ipc') throw new Error('test-storage-chromium-context');},
       configureOwnedPaths(_app,_storage,directory) {
         assert.ok(!calls.some(call=>call[0]==='ready'));
         calls.push(['setPath','userData',directory]);
@@ -42,6 +43,9 @@ test('Packaged entry rejects development authority inputs before initialization;
   sourceFixture.run();assert.ok(sourceFixture.calls.some(call=>call[0]==='ready'));
   assert.ok(sourceFixture.calls.some(call=>call[0]==='setPath'&&call[1]==='userData'&&call[2]==='/private/owned-test'));
   assert.ok(sourceFixture.calls.findIndex(call=>call[0]==='owned') < sourceFixture.calls.findIndex(call=>call[0]==='setName'));
+  assert.ok(sourceFixture.calls.findIndex(call=>call[0]==='chromium') < sourceFixture.calls.findIndex(call=>call[0]==='lock'));
   const denied=entry(false,['--qualify','--test-data-directory=/private/owned-test'],false);
   assert.throws(denied.run,/test-storage-run-required/);assert.deepEqual(denied.calls,[['storage']]);
+  const foreignIpc=entry(false,['--qualify','--test-data-directory=/private/owned-test'],'foreign-ipc');
+  assert.throws(foreignIpc.run,/test-storage-chromium-context/);assert.deepEqual(foreignIpc.calls,[['storage'],['chromium']]);
 });

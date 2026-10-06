@@ -14,6 +14,7 @@ let testContext;
 if (startup.testMode) {
   if (startup.testDirectory === undefined) throw new Error('test-storage-directory-required');
   testContext = testStorage.validateContext(path.resolve(__dirname, '../..'));
+  testStorage.nativeTestEnvironment(testContext);
   testStorage.validateOwnedDataDirectory(testContext, startup.testDirectory);
 }
 const origin = 'pipeliner://app', url = `${origin}/index.html`;

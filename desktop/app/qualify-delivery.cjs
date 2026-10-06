@@ -6,8 +6,9 @@ const { join } = require('node:path');
 const { pathToFileURL } = require('node:url');
 
 exports.run = async ({ window, directory, vault, privacy, delivery, updates, updateChannel, artifacts, appearance, channel, policy, js, wait, check, measurements }) => {
-  const chat = text => js(`document.getElementById('chat-nav').click();document.getElementById('prompt').value=${JSON.stringify(text)};document.getElementById('composer').requestSubmit()`);
-  const show = () => js("document.getElementById('settings-nav').click();document.getElementById('settings-delivery').click()");
+  const ready = () => wait(() => js("Boolean(document.getElementById('connection-list').children.length)"));
+  const chat = async text => { await ready(); return js(`document.getElementById('chat-nav').click();document.getElementById('prompt').value=${JSON.stringify(text)};document.getElementById('composer').requestSubmit()`); };
+  const show = async () => { await ready(); return js("document.getElementById('settings-nav').click();document.getElementById('settings-delivery').click()"); };
   const change = async text => { await chat(text); await wait(() => Boolean(delivery.status().preview)); await chat('Apply this delivery change'); await wait(() => !delivery.status().preview); };
   await check('delivery-empty-installer-and-exact-registered-control', async () => {
     await chat('Where is the installer?'); await wait(() => js("!document.getElementById('delivery-settings').hidden"));

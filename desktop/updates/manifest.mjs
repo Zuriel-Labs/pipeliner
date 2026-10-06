@@ -1,7 +1,7 @@
 import { KeyObject, verify } from 'node:crypto';
 import { canonicalJSON, immutable, record } from '../core/settings.mjs';
 
-function version(value) {
+export function parseUpdateVersion(value) {
   if (typeof value !== 'string' || value.length > 96) throw Error();
   const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(value);
   if (!match) throw Error();
@@ -10,7 +10,7 @@ function version(value) {
   return { core: match.slice(1, 4).map(BigInt), pre };
 }
 function newer(candidate, installed) {
-  const a = version(candidate), b = version(installed);
+  const a = parseUpdateVersion(candidate), b = parseUpdateVersion(installed);
   for (let i = 0; i < 3; i++) if (a.core[i] !== b.core[i]) return a.core[i] > b.core[i];
   if (!a.pre.length || !b.pre.length) return !a.pre.length && Boolean(b.pre.length);
   for (let i = 0; i < Math.max(a.pre.length, b.pre.length); i++) {
@@ -29,7 +29,7 @@ export function checkUpdateContext(trust, current, now) {
       || typeof trust.id !== 'string' || !/^[A-Za-z][A-Za-z0-9_-]{0,95}$/.test(trust.id) || !Number.isSafeInteger(now) || now < 0
       || !Number.isSafeInteger(current.sequence) || current.sequence < 0 || current.platform !== 'darwin' || current.architecture !== 'arm64'
       || !['stable', 'beta', 'alpha'].includes(current.channel) || typeof trust.origin !== 'string' || trust.origin.length > 2048) throw Error();
-    version(current.version);
+    parseUpdateVersion(current.version);
     const origin = new URL(trust.origin);
     if (origin.protocol !== 'https:' || origin.origin !== trust.origin || origin.username || origin.password || origin.search || origin.hash
       || typeof trust.path !== 'string' || trust.path.length > 1024 || !/^\/(?:[A-Za-z0-9_-]+\/)+$/.test(trust.path)) throw Error();

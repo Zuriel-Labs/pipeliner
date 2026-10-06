@@ -61,7 +61,8 @@ test('Mac update trust binds signed build identity, pinned Developer ID and dist
     }
     for (const text of ['\ufeff' + original, JSON.stringify(identity) + '\n', original.slice(0, -1), original + ' ',
       canonicalJSON({ ...identity, schemaVersion: 2 }) + '\n', canonicalJSON({ ...identity, architecture: 'x64' }) + '\n',
-      canonicalJSON({ ...identity, gitTree: 'invalid' }) + '\n', canonicalJSON({ ...identity, extra: true }) + '\n']) {
+      canonicalJSON({ ...identity, gitTree: 'invalid' }) + '\n', canonicalJSON({ ...identity, extra: true }) + '\n',
+      ...['1.02.3', '1.2.3-01', 'version-1', ''].map(version => canonicalJSON({ ...identity, version }) + '\n')]) {
       save(text); await assert.rejects(readBuildIdentity(bundle)); assert.equal(readFileSync(file, 'utf8'), text);
     }
     save(original); const other = join(root, 'linked.json'); linkSync(file, other); await assert.rejects(readBuildIdentity(bundle)); unlinkSync(other);

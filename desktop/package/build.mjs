@@ -2,14 +2,14 @@ import { constants } from 'node:fs';
 import { open, lstat, realpath } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { canonicalJSON, immutable, record } from '../core/settings.mjs';
-import { newer } from '../updates/manifest.mjs';
+import { parseUpdateVersion } from '../updates/manifest.mjs';
 
 export const buildIdentityName = 'pipeliner-build.json';
 export function buildIdentity(value) {
   record(value, ['kind', 'schemaVersion', 'sourceCommit', 'gitTree', 'version', 'platform', 'architecture']); canonicalJSON(value);
   if (value.kind !== 'pipeliner-desktop-build' || value.schemaVersion !== 1 || value.platform !== 'darwin' || value.architecture !== 'arm64'
     || ![value.sourceCommit, value.gitTree].every(item => typeof item === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(item))) throw Error('package-build-identity-invalid');
-  newer(value.version, value.version); return immutable(value);
+  parseUpdateVersion(value.version); return immutable(value);
 }
 const stable = (a, b) => ['dev', 'ino', 'mode', 'uid', 'nlink', 'size', 'mtimeMs', 'ctimeMs'].every(key => a[key] === b[key]);
 const owner = value => value.uid === process.getuid() || value.uid === 0;

@@ -97,7 +97,7 @@ async function workerTool() {
     try {
     if (Object.hasOwn(request, 'input')) {
       checkedJSON(request.input, 'data'); if (sourceSecretPattern.test(canonicalJSON(request.input))) throw new Error('Tool sensitive command input');
-      inputDirectory = fs.mkdtempSync('/tmp/pipeliner-step-'); fs.chmodSync(inputDirectory, 0o700);
+      inputDirectory = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'pipeliner-step-')); fs.chmodSync(inputDirectory, 0o700);
       environment.PIPELINER_STEP_INPUT_FILE = path.join(inputDirectory, 'input.json');
       fs.writeFileSync(environment.PIPELINER_STEP_INPUT_FILE, canonicalJSON(request.input), { flag: 'wx', mode: 0o600 });
     }

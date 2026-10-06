@@ -1,34 +1,42 @@
-import { execFile, execFileSync } from 'node:child_process';
-import { promisify } from 'node:util';
+import { spawn, execFileSync } from 'node:child_process';
 import { realpath, stat, mkdir, lstat, access } from 'node:fs/promises';
 import { resolve, join, sep } from 'node:path';
 import { repositoryOrigin } from '../core/identity.mjs';
 import { canonicalJSON, record } from '../core/settings.mjs';
 import { cloneRepository } from '../github/repository-git.mjs';
 
-const exec = promisify(execFile);
 export async function inspectLocal(directory, remote, signal, { onProcess = () => {} } = {}) {
   const control = signal ? AbortSignal.any([signal, AbortSignal.timeout(60000)]) : AbortSignal.timeout(60000);
   const members = pid => execFileSync('/bin/ps', ['-axo','pid=,pgid='], { encoding:'utf8', timeout:3000 }).split('\n')
     .filter(line => line.trim().split(/\s+/)[1] === String(pid));
   async function git(checkout, args, { missing = false, status = false } = {}) {
     control.throwIfAborted();
-    const task = exec('/usr/bin/git', ['-c','core.fsmonitor=false','-c','core.hooksPath=/dev/null','-c','credential.helper=','-C',checkout,...args],
+    const child = spawn('/usr/bin/git', ['-c','core.fsmonitor=false','-c','core.hooksPath=/dev/null','-c','credential.helper=','-C',checkout,...args],
       { env:{PATH:'/usr/bin:/bin',GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:'/dev/null',GIT_TERMINAL_PROMPT:'0',GIT_OPTIONAL_LOCKS:'0',LC_ALL:'C'},
-        detached:true, encoding:'utf8', timeout:status ? 10000 : 5000, maxBuffer:status ? 1024*1024 : 16384, signal:control });
-    const pid = task.child.pid;
+        detached:true, stdio:['ignore','pipe','pipe'] });
+    const pid = child.pid, maximum = status ? 1024 * 1024 : 16384;
     // Observe only owned groups; cancellation never targets the host application's group.
     const stop = action => { if (pid) { try { process.kill(-pid,action); } catch(error) { if(error.code!=='ESRCH')throw error; } } };
-    task.catch(()=>{});
+    const task = new Promise((resolveCode,reject)=>{child.once('close',resolveCode);child.once('error',reject);}); task.catch(()=>{});
+    let output = '', stdoutBytes = 0, stderrBytes = 0, exceeded = false, timedOut = false, force;
+    const cancel = () => { stop('SIGTERM'); force ??= setTimeout(()=>stop('SIGKILL'),1000); };
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data',part=>{stdoutBytes+=Buffer.byteLength(part);if(stdoutBytes>maximum){exceeded=true;cancel();}else output+=part;});
+    child.stderr.on('data',part=>{stderrBytes+=part.length;if(stderrBytes>maximum){exceeded=true;cancel();}});
+    const timer = setTimeout(()=>{timedOut=true;cancel();},status ? 10000 : 5000);
     try {
-      onProcess({pid,state:'started'});
-      return (await task).stdout;
+      control.addEventListener('abort',cancel,{once:true}); if(control.aborted)cancel();
+      onProcess({pid,state:'started'}); const code = await task; control.throwIfAborted();
+      if(!exceeded&&!timedOut&&missing&&code===1)return '';
+      if(exceeded||timedOut||code!==0)throw new Error('local-identity-invalid');
+      return output;
     } catch (error) {
       control.throwIfAborted();
-      if (missing && error.code === 1) return '';
       throw new Error('local-identity-invalid');
     } finally {
-      await task.catch(()=>{}); stop('SIGTERM');
+      clearTimeout(timer); control.removeEventListener('abort',cancel);
+      if(child.exitCode===null&&child.signalCode===null)cancel();
+      await task.catch(()=>{}); clearTimeout(force); stop('SIGTERM');
       for(let attempt=0;pid && members(pid).length && attempt<20;attempt++)await new Promise(r=>setTimeout(r,25));
       if(pid && members(pid).length)stop('SIGKILL');
       for(let attempt=0;pid && members(pid).length && attempt<20;attempt++)await new Promise(r=>setTimeout(r,25));

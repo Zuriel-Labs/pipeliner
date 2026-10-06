@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, ChildProcess } from 'node:child_process';
 import { mkdtemp, realpath, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -41,4 +41,16 @@ test('Cancellation closes the actual owned Git group before inspection rejects',
     assert.equal(rows.some(line=>line.trim().split(/\s+/)[1]===String(events[0].pid)),false);
     assert.equal(await readFile(join(f.directory,'tracked'),'utf8'),'original');
   } finally { await rm(f.directory,{recursive:true}); }
+});
+
+test('Local Git inspection requests actual detached construction, not an ignored execFile option', async () => {
+  const f = await fixture(), original = ChildProcess.prototype.spawn;
+  let launches = 0;
+  ChildProcess.prototype.spawn = function(options) {
+    if (options.file === '/usr/bin/git') { launches++; assert.equal(options.detached, true); }
+    return original.call(this, options);
+  };
+  try {
+    assert.equal((await inspectLocal(f.directory, f.remote)).slug, 'example/fixture'); assert(launches > 1);
+  } finally { ChildProcess.prototype.spawn = original; await rm(f.directory, { recursive: true }); }
 });

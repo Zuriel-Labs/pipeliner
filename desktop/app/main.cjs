@@ -16,6 +16,10 @@ if (startup.testMode) {
   testContext = testStorage.validateContext(path.resolve(__dirname, '../..'));
   testStorage.nativeTestEnvironment(testContext);
   testStorage.validateOwnedDataDirectory(testContext, startup.testDirectory);
+  if (JSON.parse(readFileSync(path.join(testContext.run_path, 'manifest.json'), 'utf8')).quality_groups) {
+    if (!process.env.PIPELINER_TEST_NODE) throw Error('test-process-node-required');
+    require('../../scripts/desktop-test-process.cjs').activate({ node: process.env.PIPELINER_TEST_NODE });
+  }
 }
 const origin = 'pipeliner://app', url = `${origin}/index.html`;
 const argument = name => process.argv.find(value => value.startsWith(`${name}=`))?.slice(name.length + 1);

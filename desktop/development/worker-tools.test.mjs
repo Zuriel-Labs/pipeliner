@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, realpathSync, rmSync, symlinkSync, linkSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { workerToolProgram } from './worker-tools.mjs';
 import { sourceTree } from './source.mjs';
@@ -11,7 +11,7 @@ import { sourceTree } from './source.mjs';
 function fixture() {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-development-tools-')));
   const invoke = request => JSON.parse(execFileSync(process.execPath, ['-e', workerToolProgram], { cwd: directory, env: {
-    PATH: '/usr/bin:/bin:/usr/local/bin', PIPELINER_RUN_ID: 'fixture-run', PIPELINER_EPOCH: '1', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' },
+    PATH: '/usr/bin:/bin:/usr/local/bin', TMPDIR: tmpdir(), PIPELINER_RUN_ID: 'fixture-run', PIPELINER_EPOCH: '1', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' },
     input: JSON.stringify({ runId: 'fixture-run', epoch: 1, ...request }), encoding: 'utf8', timeout: 10000, maxBuffer: 1048576 }));
   return { directory, invoke, cleanup: () => rmSync(directory, { recursive: true }) };
 }
@@ -50,6 +50,7 @@ test('typed custom command input stays JSON in an owned file, never shell interp
     const result = f.invoke({ operation: 'run', command: executable + " -e 'const fs=require(\"fs\"); const path=process.env.PIPELINER_STEP_INPUT_FILE; console.log(JSON.stringify({path,input:JSON.parse(fs.readFileSync(path,\"utf8\"))}));'", timeoutMs: 1000, input: { title } });
     assert.equal(result.ok, true); assert.equal(result.result.exitCode, 0); const readback = JSON.parse(result.result.output.trim());
     assert.deepEqual(readback.input, { title }); assert.match(readback.path, /pipeliner-step-[^/]+\/input.json$/);
+    assert.equal(dirname(dirname(readback.path)), tmpdir());
     assert.throws(() => readFileSync(readback.path), { code: 'ENOENT' }); assert.throws(() => readFileSync(join(f.directory, 'escaped')), { code: 'ENOENT' });
     assert.equal(f.invoke({ operation: 'run', command: 'true', timeoutMs: 1000, input: JSON.parse('{"__proto__":{}}') }).ok, false);
   } finally { f.cleanup(); }

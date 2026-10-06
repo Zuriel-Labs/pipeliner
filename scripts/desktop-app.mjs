@@ -16,7 +16,7 @@ const qualifying = storageFixture || process.argv.some(arg => qualificationFlags
 if (process.argv.slice(2).some(arg => ![...qualificationFlags, '--retain-owned-capture', '--storage-fixture'].includes(arg))) throw new Error('argument-denied');
 if (process.platform !== 'darwin' || process.arch !== 'arm64') throw new Error('host-unqualified');
 const { validateContext, nativeTestEnvironment, nativeTestLauncher } = createRequire(import.meta.url)('../desktop/test-storage.cjs');
-let storage, chromiumEnvironment;
+let storage, chromiumEnvironment, processAdmission;
 {
   const nativeQualification = qualifying && !storageFixture;
   const launcher = nativeQualification ? nativeTestLauncher() : '/Users/chris/.local/bin/test-artifacts';
@@ -30,6 +30,9 @@ let storage, chromiumEnvironment;
   }
   storage = validateContext(root);
   if (nativeQualification) chromiumEnvironment = nativeTestEnvironment(storage);
+  if (JSON.parse(await readFile(join(storage.run_path, 'manifest.json'), 'utf8')).quality_groups) {
+    processAdmission = createRequire(import.meta.url)('./desktop-test-process.cjs').activate();
+  }
   if (resolve(tmpdir()) !== storage.paths.tmp) throw new Error('test-storage-context-mismatch');
   if (storageFixture) {
     const path = join(storage.paths.recordings, 'synthetic-storage-capture.bin');
@@ -57,7 +60,7 @@ try {
   await exec('/usr/bin/clang', ['-fobjc-arc', '-framework', 'Foundation', '-mmacosx-version-min=13.0', join(root, 'desktop/scheduling/calendar.m'), '-o', calendar], { timeout: 30000 });
   const electron = join(root, 'desktop/prototype/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron'); await access(electron);
   child = spawn(electron, [join(root, 'desktop/app/main.cjs'), `--key-helper=${helper}`, `--calendar-helper=${calendar}`, ...(qualifying ? ['--qualify', ...process.argv.filter(arg => qualificationFlags.includes(arg) && arg !== '--qualify'), `--test-data-directory=${temporary}`] : [])], {
-    env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: homedir(), TMPDIR: temporary, LANG: 'en_US.UTF-8', ...chromiumEnvironment, ...(storage ? { TEST_ARTIFACT_RUN: storage.run_path, ...Object.fromEntries(['tmp','logs','recordings','outputs'].map(name => ['TEST_ARTIFACT_' + name.toUpperCase(), storage.paths[name]])) } : {}), ...(nativeRoot ? { PIPELINER_NATIVE_WORKSPACE_ROOT: nativeRoot } : {}), ...(privacyExport ? { PIPELINER_PRIVACY_EXPORT_DIRECTORY: privacyExport } : {}) }, stdio: ['ignore', 'pipe', 'pipe'],
+    env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: homedir(), TMPDIR: temporary, LANG: 'en_US.UTF-8', ...chromiumEnvironment, ...(storage ? { TEST_ARTIFACT_RUN: storage.run_path, ...Object.fromEntries(['tmp','logs','recordings','outputs'].map(name => ['TEST_ARTIFACT_' + name.toUpperCase(), storage.paths[name]])) } : {}), ...(processAdmission ? { PIPELINER_TEST_NODE: process.execPath } : {}), ...(nativeRoot ? { PIPELINER_NATIVE_WORKSPACE_ROOT: nativeRoot } : {}), ...(privacyExport ? { PIPELINER_PRIVACY_EXPORT_DIRECTORY: privacyExport } : {}) }, stdio: ['ignore', 'pipe', 'pipe'],
   });
   if (qualifying) timer = setTimeout(() => child.kill('SIGTERM'), 180000);
   child.stdout.setEncoding('utf8'); child.stdout.on('data', bytes => {

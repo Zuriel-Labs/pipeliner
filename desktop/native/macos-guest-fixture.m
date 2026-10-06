@@ -4,6 +4,32 @@
 #include <spawn.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
+#include <assert.h>
+
+static BOOL guestConfigurationValid(id value) {
+  if (![value isKindOfClass:NSDictionary.class] || [value count] != 4) return NO;
+  for (NSString *key in @[@"nonce", @"neighbor", @"targetSHA256", @"targetIdentifier"])
+    if (![value[key] isKindOfClass:NSString.class]) return NO;
+  NSCharacterSet *hex = [NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"];
+  for (NSString *key in @[@"nonce", @"targetSHA256"])
+    if ([value[key] length] != ([key isEqual:@"nonce"] ? 32 : 64) || [value[key] rangeOfCharacterFromSet:hex.invertedSet].location != NSNotFound) return NO;
+  NSString *neighbor = value[@"neighbor"];
+  NSArray *parts = neighbor.pathComponents;
+  NSArray *fixed = @[@"/", @"Volumes", @"TESTING", @"TestArtifacts", @"projects", @"pipeliner", @"issues", @"54", @"runs"];
+  if (parts.count != 13 || ![neighbor.stringByStandardizingPath isEqual:neighbor]
+    || ![[parts subarrayWithRange:NSMakeRange(0, 9)] isEqual:fixed] || ![parts[10] isEqual:@"tmp"] || ![parts[12] isEqual:@"neighbor"]) return NO;
+  NSString *run = parts[9], *worker = parts[11], *prefix = @"pipeliner-54-macos-worker-";
+  NSCharacterSet *digits = [NSCharacterSet characterSetWithCharactersInString:@"0123456789"], *letters = [NSCharacterSet characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"];
+  if (run.length != 49 || ![[run substringWithRange:NSMakeRange(8, 1)] isEqual:@"T"] || ![[run substringWithRange:NSMakeRange(15, 2)] isEqual:@"Z-"]
+    || [[run substringToIndex:8] rangeOfCharacterFromSet:digits.invertedSet].location != NSNotFound
+    || [[run substringWithRange:NSMakeRange(9, 6)] rangeOfCharacterFromSet:digits.invertedSet].location != NSNotFound
+    || [[run substringFromIndex:17] rangeOfCharacterFromSet:hex.invertedSet].location != NSNotFound
+    || ![worker hasPrefix:prefix] || worker.length != prefix.length + 6
+    || [[worker substringFromIndex:prefix.length] rangeOfCharacterFromSet:letters.invertedSet].location != NSNotFound) return NO;
+  return [value[@"targetIdentifier"] isEqual:[NSString stringWithFormat:@"com.pipeliner.qualification.%@.target", value[@"nonce"]]];
+}
+
+#ifndef PIPELINER_GUEST_CONFIG_TEST
 
 // Original, synthetic qualification apps. They must never run in the host account.
 static NSString *const input = @"/Volumes/My Shared Files/input";
@@ -140,12 +166,24 @@ int main(int argc, const char *argv[]) {
     if (argc != 1 || ![NSUserName() isEqual:@"pipeliner"] || ![NSHomeDirectory().lastPathComponent isEqual:@"pipeliner"]) return 2;
     NSData *data = [NSData dataWithContentsOfURL:at(input, @"qualification.json")];
     id value = data.length > 0 && data.length <= 4096 ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
-    if (![value isKindOfClass:NSDictionary.class] || [value count] != 4) return 2; configuration = value;
-    for (NSString *key in @[@"nonce", @"neighbor", @"targetSHA256", @"targetIdentifier"]) if (![configuration[key] isKindOfClass:NSString.class]) return 2;
-    NSCharacterSet *hex = [NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"];
-    if ([configuration[@"nonce"] length] != 32 || [configuration[@"nonce"] rangeOfCharacterFromSet:hex.invertedSet].location != NSNotFound
-      || [configuration[@"targetSHA256"] length] != 64 || ![configuration[@"neighbor"] hasPrefix:@"/private/var/folders/"]
-      || [configuration[@"neighbor"] length] > 2048 || ![configuration[@"targetIdentifier"] hasPrefix:@"com.pipeliner.qualification."]) return 2;
+    if (!guestConfigurationValid(value)) return 2; configuration = value;
     [NSApplication sharedApplication]; GuestQualification *delegate = [GuestQualification new]; NSApp.delegate = delegate; [NSApp run]; return 1;
   }
 }
+#else
+int main(void) {
+  @autoreleasepool {
+    NSString *nonce = @"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", *root = @"/Volumes/TESTING/TestArtifacts/projects/pipeliner/issues/54/runs/20261006T192509Z-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/tmp/pipeliner-54-macos-worker-Ab12Cd/neighbor";
+    NSDictionary *valid = @{@"nonce": nonce, @"neighbor": root, @"targetSHA256": @"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", @"targetIdentifier": [NSString stringWithFormat:@"com.pipeliner.qualification.%@.target", nonce]};
+    assert(guestConfigurationValid(valid)); NSUInteger passed = 1;
+    for (NSArray *change in @[@[@"nonce", @"bad"], @[@"targetSHA256", @"gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg"],
+      @[@"targetIdentifier", @"com.pipeliner.qualification.other.target"], @[@"neighbor", @"/private/var/folders/legacy/neighbor"],
+      @[@"neighbor", [root stringByReplacingOccurrencesOfString:@"issues/54" withString:@"issues/55"]], @[@"neighbor", [root stringByReplacingOccurrencesOfString:@"projects/pipeliner" withString:@"projects/other"]],
+      @[@"neighbor", [root stringByReplacingOccurrencesOfString:@"/tmp/" withString:@"/tmp/../tmp/"]], @[@"neighbor", [root stringByAppendingString:@"/sibling"]],
+      @[@"neighbor", [root stringByReplacingOccurrencesOfString:@"Ab12Cd" withString:@"short"]], @[@"neighbor", [root stringByReplacingOccurrencesOfString:@"20261006T192509Z" withString:@"invalid"]], @[@"nonce", @1], @[@"extra", @"unknown"]]) {
+      NSMutableDictionary *bad = [valid mutableCopy]; bad[change[0]] = change[1]; assert(!guestConfigurationValid(bad)); passed++;
+    }
+    printf("Guest configuration boundary OK: %lu cases.\n", (unsigned long)passed); return 0;
+  }
+}
+#endif

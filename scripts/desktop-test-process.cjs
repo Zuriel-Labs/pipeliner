@@ -4,11 +4,11 @@ const fs = require('node:fs'), path = require('node:path'), cp = require('node:c
 const { createHash, randomUUID } = require('node:crypto');
 const { syncBuiltinESMExports } = require('node:module');
 const root = fs.realpathSync(path.join(__dirname, '..'));
-const home = '/Users/chris/.local/share/eaglepro-test-storage-candidates/pipeliner-54-quality-groups-9a1a595dd66417b9';
+const home = '/Users/chris/.local/share/eaglepro-test-storage-candidates/pipeliner-54-quality-groups-81274f31a293491d';
 const wrapper = home + '/test-artifacts-quality-groups';
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const pins = Object.freeze({
-  [home + '/groups.py']: '9a1a595dd66417b94745659daed5b96df65b9a78e4c7b821c0f5b2bab6b9e78c',
+  [home + '/groups.py']: '81274f31a293491d3e3302b3a79462b115bc9dace46e886ac63ec24232127f3f',
   '/Users/chris/.local/share/eaglepro-test-storage-candidates/pipeliner-54-quality-65b461aef6d8e9c5/quality.py': '65b461aef6d8e9c5647f88784084e93f689e72d973ceddd51ed7383babc5f355',
   '/Users/chris/.local/share/eaglepro-test-storage-candidates/pipeliner-54-contracts-5f78740e471545f0/entry.py': 'c28a82fd39f72954690f78bbf595a9d115037470994aae6c6837e41cd1e4b59a',
   '/Users/chris/.local/share/eaglepro-test-storage-candidates/pipeliner-54-contracts-5f78740e471545f0/diagnostics.py': 'f286d78fd994a899598259f93b39e03d86808861843def203c3b3699656e2119',
@@ -55,7 +55,7 @@ exports.activate = function activate({ run = process.env.TEST_ARTIFACT_RUN, node
       || value.quality_groups?.version !== 1 || Object.keys(value.diagnostic_context.source_sha256).length !== Object.keys(expected).length
       || Object.entries(expected).some(([file, digest]) => value.diagnostic_context.source_sha256[file] !== digest || hash(owned(file)) !== digest)
       || ['tmp', 'logs', 'outputs', 'recordings'].some(name => value.paths?.[name] !== path.join(run, name))) throw Error('test-process-receipt-unverified');
-    if (hash(owned(wrapper)) !== '2e2e23cc50e37a4adac59da44406e399e8b4afe3882e85c4dc30142ef2aa4cf8') throw Error('test-process-wrapper-unverified');
+    if (hash(owned(wrapper)) !== '8100a69bc9d536a2689e0811bcefb541f527c7f26949825f2cb8e2bf5fcdc621') throw Error('test-process-wrapper-unverified');
     return value;
   }
   const environment = { TEST_ARTIFACT_RUN: run, ...Object.fromEntries(['tmp','logs','outputs','recordings'].map(name => ['TEST_ARTIFACT_' + name.toUpperCase(), path.join(run, name)])),

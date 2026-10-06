@@ -1,13 +1,13 @@
 'use strict';
 const assert = require('node:assert/strict');
-const { readFileSync, existsSync, mkdirSync, writeFileSync } = require('node:fs');
+const { readFileSync, existsSync, mkdirSync, writeFileSync, lstatSync } = require('node:fs');
 const { execFileSync } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
 const path = require('node:path');
 const { app, safeStorage, nativeTheme } = require('electron');
 const moduleAt = file => import(pathToFileURL(path.join(__dirname, file)).href);
 const fixtureKey = 'synthetic-native-entry-only';
-let nativeResult, workspaceFixture, folderFailure = null, folderCancelled = false;
+let nativeResult, workspaceFixture, folderFailure = null, folderCancelled = false, providerTurns = 0, catalogReads = 0;
 const issueFixtures = new Map();
 // Only the explicit qualification launcher uses this adapter. No macOS authorization is fabricated.
 exports.backgroundNative = () => {
@@ -22,6 +22,7 @@ exports.adapters = async ({ directory, helper, nativeKeyEntry }) => {
   const send = async (url, request) => {
     assert.equal(new URL(url).origin, 'https://ollama.com'); assert.equal(request.headers.Authorization, `Bearer ${fixtureKey}`);
     if (url.endsWith('/api/tags')) return Response.json({ models: [{ name: 'deepseek-v4.1-flash' }] });
+    providerTurns++;
     const body = JSON.parse(request.body);
     return new Response(`${JSON.stringify({ model: body.model, done: true, done_reason: 'stop', message: body.tools ? { role: 'assistant', content: '', tool_calls: [{ function: { name: 'lookup_fixture', arguments: {
       target: 'synthetic-pipeliner-connection', nonce: /nonce ([0-9a-f-]+),/.exec(body.messages[0].content)[1], epoch: 1 } } }] } : { role: 'assistant', content: 'fixture-ok' } })}\n`);
@@ -34,6 +35,7 @@ exports.workspaceOptions = async ({ directory, helper, nativeFolderEntry }) => {
   const { definitions, planFields, verifyFields } = await moduleAt('../repositories/github.mjs');
   const { issueFixture } = await moduleAt('../issues/fixture.mjs');
   exports.issueApi = Object.fromEntries(['readCatalog', 'readIssue', 'readDependencies', 'readDetail', 'createIssue', 'addItem', 'setField', 'addDependency', 'ensureReadyLabel', 'setReady'].map(name => [name, async (...args) => {
+    if (name === 'readCatalog') catalogReads++;
     const target = args[name === 'readCatalog' ? 2 : 1]; let fixture = issueFixtures.get(target.id);
     if (!fixture) { fixture = issueFixture(target); issueFixtures.set(target.id, fixture); } return fixture.api[name](...args);
   }]));
@@ -740,6 +742,59 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
         await wait(() => js("Boolean(document.getElementById('appearance-form'))"));
       }
     });
+    if (process.argv.includes('--qualify-issues')) await check('issues-native-protected-25-workspace-10000-item-cache-and-warm-navigation', async () => {
+      await wait(() => js("Boolean(document.getElementById('connection-list').children.length)"));
+      const { openWorkspaceStore } = await moduleAt('../repositories/store.mjs'), { issueFixture } = await moduleAt('../issues/fixture.mjs');
+      const original = workspaces.status().selected, store = openWorkspaceStore(directory, { vault }), saved = new Map(), coldMs = [], warmMs = [];
+      let targets;
+      try {
+        const present = store.workspaces(), first = present[0]; assert.equal(present.length, 2);
+        for (let index = present.length; index < 25; index++) {
+          const id = 'repo_workload_' + index, folder = path.join(path.dirname(workspaceFixture.path), 'workload-' + index);
+          mkdirSync(folder, { mode: 0o700 }); const info = lstatSync(folder), slug = 'fixture/workload-' + index;
+          // Synthetic imported metadata only; no Git or remote connection qualification is claimed.
+          store.register({ ...first, id, repositoryId: 'RWorkload' + index, numericId: 100 + index, slug, name: slug, path: folder,
+            localKey: info.dev + ':' + info.ino, commonPath: folder, project: { ...first.project, id: 'PWorkload' + index, title: 'Synthetic workload ' + index } });
+        }
+        targets = store.workspaces(); assert.equal(targets.length, 25);
+        for (const target of targets) {
+          const fixture = issueFixtures.get(target.id) ?? issueFixture(target); issueFixtures.set(target.id, fixture); saved.set(target.id, [...fixture.issues]);
+          const first = fixture.issues[0]; fixture.issues.splice(0, fixture.issues.length, ...Array.from({ length: 400 }, (_, index) => ({ ...first,
+            id: 'Scale_' + target.id + '_' + (index + 1), numericId: index + 1, number: index + 1, title: 'Synthetic ' + target.name + ' Issue ' + (index + 1),
+            itemId: 'ScaleItem_' + target.id + '_' + (index + 1), dependencies: [], url: 'https://github.com/' + target.slug + '/issues/' + (index + 1) })));
+        }
+      } finally { store.close(); }
+      try {
+        const writes = [...issueFixtures.values()].reduce((count, fixture) => count + fixture.writes.length, 0), coldReads = catalogReads;
+        for (const target of targets) {
+          const started = performance.now(); workspaces.dispatch({ operation: 'select', workspace: target.id });
+          await issues.dispatch({ operation: 'refresh' }); await issues.idle();
+          assert.equal(issues.status().error, null); assert.equal(issues.status().catalog.repositoryId, target.repositoryId); assert.equal(issues.status().catalog.issues.length, 400);
+          coldMs.push(performance.now() - started);
+        }
+        assert.equal(catalogReads - coldReads, 25); const reads = catalogReads, turns = providerTurns;
+        await wait(() => js("document.querySelectorAll('#workspace-list>article').length===25"));
+        for (const target of targets) {
+          const label = JSON.stringify(target.name), began = await js(`(()=>{document.getElementById('repositories-nav').click();const card=[...document.querySelectorAll('#workspace-list>article')].find(node=>node.querySelector('h2').textContent===${label});const began=performance.now();card.querySelector('button').click();return began})()`);
+          await wait(() => js(`document.getElementById('chat-title').textContent===${label}&&document.getElementById('workspace-context').textContent===${label}`));
+          await js('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+          warmMs.push(await js('performance.now()-' + began));
+          assert.equal(issues.status().workspaceId, target.id); assert.equal(issues.status().catalog.repositoryId, target.repositoryId);
+          await js("document.getElementById('issues-nav').click()");
+          assert.equal(await js("document.querySelectorAll('#issue-list>article').length===50&&document.getElementById('issue-list-count').textContent.includes('400 matching')"), true);
+        }
+        const sorted = [...warmMs].sort((a, b) => a - b), warmP95Ms = sorted[Math.ceil(sorted.length * .95) - 1];
+        assert(warmP95Ms < 2000); assert.equal(catalogReads, reads); assert.equal(providerTurns, turns);
+        assert.equal([...issueFixtures.values()].reduce((count, fixture) => count + fixture.writes.length, 0), writes);
+        const reopened = openWorkspaceStore(directory, { vault }); try { assert.equal(reopened.workspaces().length, 25); } finally { reopened.close(); }
+        measurements.push({ interaction: 'synthetic-protected-25-repository-10000-total-item-workload', repositories: 25, totalItems: 10000, itemsPerRepository: 400,
+          transport: 'synthetic-no-network', coldLoadMs: coldMs, warmNavigationMs: warmMs, warmNavigationP95Ms: warmP95Ms,
+          warmCatalogRequests: catalogReads - reads, warmFixtureProviderTurns: providerTurns - turns, memory: process.memoryUsage(), actualWorkers: 0 });
+      } finally {
+        for (const [id, rows] of saved) { const fixture = issueFixtures.get(id); fixture.issues.splice(0, fixture.issues.length, ...rows); }
+        workspaces.dispatch({ operation: 'select', workspace: original }); await issues.dispatch({ operation: 'refresh' }); await issues.idle();
+      }
+    });
     await check('themes-narrow-zoom-high-contrast-reduced-motion', async () => {
       if (developmentScope) await js("document.getElementById('settings-nav').click();document.getElementById('settings-agents').click()");
       for (const theme of ['light', 'dark']) for (const view of ['repositories', 'issues', 'settings']) { nativeTheme.themeSource = theme; await js(`document.getElementById('${view}-nav').click()`); assert.equal(await js('document.documentElement.scrollWidth<=innerWidth'), true); }
@@ -782,7 +837,7 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
       assert.equal(folderCancelled, true);
     });
   } catch { const snapshot = workspaces.status(); workspaceEvidence = { checkpoint: workspaceStage, busy: snapshot.busy, state: snapshot.draft?.state, error: snapshot.draft?.error, folderSelected: Boolean(snapshot.draft?.folder), projectCount: snapshot.draft?.projects?.length ?? 0 }; process.exitCode = 1; }
-  const report = { desktopQualification: permissionScope ? 'permissions-and-local-testing-controls' : deliveryScope ? 'delivery-updates-recovery-controls-and-installation-data-inventory' : appearanceScope ? 'appearance-and-accessibility-preferences' : privacyScope ? 'protected-local-privacy-and-recovery' : toolsScope ? 'scoped-tools-and-custom-pipelines' : skillsScope ? 'starter-skill-management' : backgroundScope ? 'optional-background-host' : schedulingScope ? 'deterministic-scheduling' : developmentScope ? 'development-controls' : pipelineScope ? 'versioned-pipeline-editing' : 'protected-issue-intake', checks, passed: checks.length === (permissionScope ? 24 : deliveryScope ? 30 : appearanceScope ? 26 : privacyScope ? 27 : toolsScope ? 26 : skillsScope ? 26 : backgroundScope ? 25 : schedulingScope ? 23 : developmentScope ? 22 + (pipelineScope ? 6 : 0) : pipelineScope ? 24 : issueScope ? 18 : 21) + (process.argv.includes('--qualify-issues') ? 1 : 0) && checks.every(c => c.passed), milliseconds: Math.round(performance.now() - started), windowReadyFromMainEntryMs: windowReadyMs, measurements,
+  const report = { desktopQualification: permissionScope ? 'permissions-and-local-testing-controls' : deliveryScope ? 'delivery-updates-recovery-controls-and-installation-data-inventory' : appearanceScope ? 'appearance-and-accessibility-preferences' : privacyScope ? 'protected-local-privacy-and-recovery' : toolsScope ? 'scoped-tools-and-custom-pipelines' : skillsScope ? 'starter-skill-management' : backgroundScope ? 'optional-background-host' : schedulingScope ? 'deterministic-scheduling' : developmentScope ? 'development-controls' : pipelineScope ? 'versioned-pipeline-editing' : 'protected-issue-intake', checks, passed: checks.length === (permissionScope ? 24 : deliveryScope ? 30 : appearanceScope ? 26 : privacyScope ? 27 : toolsScope ? 26 : skillsScope ? 26 : backgroundScope ? 25 : schedulingScope ? 23 : developmentScope ? 22 + (pipelineScope ? 6 : 0) : pipelineScope ? 24 : issueScope ? 18 : 21) + (process.argv.includes('--qualify-issues') ? 2 : 0) && checks.every(c => c.passed), milliseconds: Math.round(performance.now() - started), windowReadyFromMainEntryMs: windowReadyMs, measurements,
     versions: { electron: process.versions.electron, chromium: process.versions.chrome, node: process.versions.node, sqlite: process.versions.sqlite, os: process.platform, architecture: process.arch }, storageRouting,
     nativeEvidence, workspaceEvidence, folderFailure, folderCancelled, synthetic: 'Synthetic GitHub/model replies, first folder selection, optional tool catalog and background-service adapters; actual native secure fields, folder-panel cancellation, protected storage, local Git and own window. External tool compatibility and actual SMAppService/bootstrap are qualified separately.',
     notRun: issueScope ? ['Unchanged Codex unauthenticated discovery', 'Unchanged public GitHub App qualification', 'Unchanged invalid Cloud key probe'] : [],

@@ -97,7 +97,8 @@ function nativeTestEnvironment(storage, environment = process.env, io = fs, uid 
     for (const directory of [path.dirname(temp), temp]) {
       const info = io.lstatSync(directory);
       if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== uid || info.dev !== device
-        || (info.mode & 0o777) !== 0o700 || io.realpathSync(directory) !== directory) throw new Error();
+        || (info.mode & 0o022) || (directory === temp && (info.mode & 0o777) !== 0o700)
+        || io.realpathSync(directory) !== directory) throw new Error();
       if (directory === temp && JSON.stringify([info.dev,info.ino,info.uid,info.mode,null,null]) !== JSON.stringify(record.temp_identity)) throw new Error();
     }
     return Object.freeze({ TEST_ARTIFACT_CHROMIUM_HELPER: chromiumHelper, TEST_ARTIFACT_CHROMIUM_TMP: temp, MAC_CHROMIUM_TMPDIR: temp });

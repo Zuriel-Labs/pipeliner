@@ -40,8 +40,8 @@ test('Native Chromium environment requires the exact declared external IPC ident
   const metadata={managed_by:'eaglepro-test-storage',owner_uid:uid,project:'pipeliner',status:'running',run_path:run,volume_uuid:volume,paths,
     chromium_singleton:{version:1,project:'pipeliner',run_path:run,temp_path:temp,temp_identity:[7,42,uid,0o40700,null,null],
       phase:'prepared',profile_pattern:'pipeliner-app-[A-Za-z0-9]{6}',ipc_limit_bytes:65536,bindings:{}}};
-  let changed=metadata, directory=info, fileChange={}, closed=0;
-  const io={lstatSync:()=>directory,realpathSync:value=>value,openSync:()=>9,closeSync:()=>{closed++;},
+  let changed=metadata, directory=info, parentMode=0o40755, fileChange={}, closed=0;
+  const io={lstatSync:value=>value===base+'/manifests'?{...info,mode:parentMode}:directory,realpathSync:value=>value,openSync:()=>9,closeSync:()=>{closed++;},
     fstatSync:()=>({...info,size:1024,nlink:1,isFile:()=>true,...fileChange}),readFileSync:()=>JSON.stringify(changed)};
   assert.equal(chromiumLauncher,helper.replace('storage.py','test-artifacts'));
   assert.deepEqual(nativeTestEnvironment(storage,env,io,uid),{
@@ -63,6 +63,7 @@ test('Native Chromium environment requires the exact declared external IPC ident
     directory={...info,...change};assert.throws(()=>nativeTestEnvironment(storage,env,io,uid),/test-storage-chromium-context/);
   }
   directory=info;
+  parentMode=0o40777;assert.throws(()=>nativeTestEnvironment(storage,env,io,uid),/test-storage-chromium-context/);parentMode=0o40755;
   for(const change of [{size:65537},{nlink:2},{uid:uid+1},{mode:0o100622},{isFile:()=>false}]) {
     fileChange=change;assert.throws(()=>nativeTestEnvironment(storage,env,io,uid),/test-storage-chromium-context/);
   }

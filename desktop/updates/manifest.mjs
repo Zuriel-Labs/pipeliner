@@ -21,6 +21,7 @@ function newer(candidate, installed) {
   }
   return false;
 }
+export { newer as isNewerUpdateVersion };
 
 export function checkUpdateContext(trust, current, now) {
   try {

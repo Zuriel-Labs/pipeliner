@@ -8,7 +8,7 @@ export async function initUpdates({ el, message, show }) {
   const chatPreview = el('section'); chatPreview.id = 'update-chat-preview'; chatPreview.setAttribute('aria-label', 'Current Desktop update preview'); $('composer').before(chatPreview);
   function button(text, operation, extra = {}, id) {
     const node = el('button', text, operation === 'apply' ? 'primary' : 'secondary'); node.type = 'button'; if (id) node.id = id;
-    node.disabled = !state.storageAvailable || operation !== 'stop' && (requests > 0 || state.busy); node.addEventListener('click', () => request({ operation, ...extra })); return node;
+    node.disabled = !state.storageAvailable || operation !== 'stop' && (requests > 0 || state.busy || state.recoveryRequired); node.addEventListener('click', () => request({ operation, ...extra })); return node;
   }
   function preview(p, suffix = '') {
     const card = el('article', undefined, 'setup-preview'); card.id = 'update-preview' + suffix;
@@ -37,7 +37,8 @@ export async function initUpdates({ el, message, show }) {
       for (const value of ['stable', 'beta', 'alpha']) { const option = el('option', channelName(value)); option.value = value; select.append(option); }
       select.value = draft ?? state.values['updates.channel'].value;
       row.append(label, select, el('p', 'Saved: ' + channelName(state.values['updates.channel'].value) + '. Source: ' + state.values['updates.channel'].source + '. Stable is the default.', 'small'));
-      const review = el('button', 'Review update channel', 'primary'); review.type = 'submit'; review.id = 'update-review'; review.disabled = requests > 0 || state.busy;
+      select.disabled = Boolean(state.recoveryRequired);
+      const review = el('button', 'Review update channel', 'primary'); review.type = 'submit'; review.id = 'update-review'; review.disabled = requests > 0 || state.busy || state.recoveryRequired;
       form.append(row, review, button('Review Stable default', 'reset', {}, 'update-reset'));
       form.addEventListener('submit', event => { event.preventDefault(); request({ operation: 'prepare', changes: { 'updates.channel': select.value } }); }); nodes.push(form);
       const sourceForm = el('form', undefined, 'connection-card'), sourceRow = el('div', undefined, 'setup-field'), sourceLabel = el('label', 'Trusted update source'), sourceSelect = el('select');
@@ -51,15 +52,16 @@ export async function initUpdates({ el, message, show }) {
       }
       sourceSelect.value = sourceValue;
       const sourceReview = el('button', 'Review update source', 'primary'); sourceReview.type = 'submit'; sourceReview.id = 'update-source-review';
-      sourceReview.disabled = requests > 0 || state.busy || sourceSelect.selectedOptions[0]?.disabled;
-      sourceSelect.addEventListener('change', () => { sourceReview.disabled = requests > 0 || state.busy || sourceSelect.selectedOptions[0]?.disabled; });
+      sourceSelect.disabled = Boolean(state.recoveryRequired);
+      sourceReview.disabled = requests > 0 || state.busy || state.recoveryRequired || sourceSelect.selectedOptions[0]?.disabled;
+      sourceSelect.addEventListener('change', () => { sourceReview.disabled = requests > 0 || state.busy || state.recoveryRequired || sourceSelect.selectedOptions[0]?.disabled; });
       sourceRow.append(sourceLabel, sourceSelect, el('p', state.sources.length ? 'Choose a host-approved publisher. A check reads signed availability only.' : 'No qualified publisher is available in this installation. Saved settings remain preserved.', 'small'));
       sourceForm.append(sourceRow, sourceReview); sourceForm.addEventListener('submit', event => { event.preventDefault(); if (!sourceSelect.selectedOptions[0]?.disabled) request({ operation: 'source', name: sourceSelect.value || null }); }); nodes.push(sourceForm);
       const availability = el('article', undefined, 'connection-card'); availability.id = 'update-availability'; availability.append(el('h3', 'Availability and installation'));
       const data = el('dl', undefined, 'connection-data');
       for (const [name, value] of [['Installed version', state.installedVersion ?? 'Not verified'], ['Trusted source', state.sourceQualified ? state.sourceName : state.sourceConfigured ? 'Saved source needs qualification or repair' : 'No trusted source configured'],
         ['Last check', state.lastCheck === null ? 'Not checked' : new Date(state.lastCheck).toLocaleString()], ['Available release', state.release ? state.release.version + ' · ' + channelName(state.release.channel) : state.upToDate ? 'No newer signed release provided' : 'No verified release'],
-        ['Migration and recovery', 'No installation preview or verified rollback target']]) data.append(el('dt', name), el('dd', value));
+        ['Migration and recovery', state.recoveryRequired ? 'Unresolved Desktop maintenance; work stays blocked' : 'No installation preview or verified rollback target']]) data.append(el('dt', name), el('dd', value));
       if (state.release) data.append(el('dt', 'Release checksum'), el('dd', state.release.sha256), el('dt', 'Release source'), el('dd', state.release.sourceCommit));
       availability.append(data, el('p', state.busy ? 'Checking signed availability. Cancel safely before any installer download.' : 'Availability checks read signed metadata. Installation requires a verified installer, idle work and a recovery plan.', 'availability'),
         el('p', 'No automatic download, installation or restart. Updates cannot enable background operation or change permissions.', 'small'));

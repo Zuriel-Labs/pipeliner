@@ -34,7 +34,7 @@ if (startup.testMode) {
 } else { app.setPath('userData', dataDirectory); app.setPath('crashDumps', path.join(dataDirectory, 'crashes')); }
 protocol.registerSchemesAsPrivileged([{ scheme: 'pipeliner', privileges: { standard: true, secure: true } }]);
 if (!app.requestSingleInstanceLock()) app.exit(0);
-let window, manager, vault, workspaces, workspaceStore, issues, pipelines, policy, development, developmentStore, supervisor, scheduling, scheduler, background, backgroundHost, backgroundNative, skills, skillStore, tools, toolStore, toolConnections, privacy, privacyRecords, appearance, delivery, updates, updateHistory, maintenance, permissions, artifacts, retentionMonitor, attachWindow, attachment, requestShutdown, authorizationMonitor, shutdownPaused = false, closing = false, verifiedClose = false;
+let window, manager, vault, workspaces, workspaceStore, issues, pipelines, policy, development, developmentStore, supervisor, scheduling, scheduler, background, backgroundHost, backgroundNative, skills, skillStore, tools, toolStore, toolConnections, privacy, privacyRecords, appearance, delivery, updates, updateHistory, maintenanceStore, maintenance, permissions, artifacts, retentionMonitor, attachWindow, attachment, requestShutdown, authorizationMonitor, maintenanceUnavailable = false, shutdownPaused = false, closing = false, verifiedClose = false;
 const hostCapabilities = Object.freeze(['workspace.read', 'workspace.write', 'worker.exec', 'provider.turn', 'git.push', 'github.read', 'github.issue.write', 'github.pr.write', 'github.project.write', 'extension.install', 'extension.invoke']);
 // A production publisher requires reviewed provenance; none is invented for this preview.
 const trustedUpdateSources = Object.freeze([]);
@@ -94,6 +94,8 @@ app.whenReady().then(async () => {
   const { createUpdateControlChannel } = await moduleAt('../core/control.mjs');
   const { createUpdateManager } = await moduleAt('../updates/manager.mjs');
   const { openUpdateHistory } = await moduleAt('../updates/history.mjs');
+  const { openUpdateMaintenance } = await moduleAt('../updates/maintenance.mjs');
+  const { updateCommand } = await moduleAt('../updates/commands.mjs');
   const { createMaintenanceGate } = await moduleAt('../updates/idle.mjs');
   const { inspectMacDelivery } = await moduleAt('../delivery/mac.mjs');
   const { createPermissionManager } = await moduleAt('../permissions/manager.mjs');
@@ -120,8 +122,10 @@ app.whenReady().then(async () => {
   const { codexAdapter, ollamaAdapter } = await moduleAt('../connections/providers.mjs');
   const { nativeKeyEntry, nativeFolderEntry, nativeMCPEntry } = await moduleAt('../connections/native-entry.mjs');
   const activeConnections = new Set();
+  const maintenanceRecovery = () => maintenanceStore ? !maintenanceStore.clear() : maintenanceUnavailable;
   maintenance = createMaintenanceGate({ ready: () => {
-    if (closing || !vault || !workspaceStore || !policy || !developmentStore || !supervisor || !scheduler || !backgroundHost || !privacyRecords || !updateHistory) return false;
+    if (closing || !vault || !workspaceStore || !policy || !developmentStore || !supervisor || !scheduler || !backgroundHost || !privacyRecords || !updateHistory
+      || !maintenanceStore || !(maintenanceStore.clear() || maintenanceStore.owned())) return false;
     if (scheduler.busy() || issues.busy() || manager.status().connections.some(connection => connection.busy || connection.cleanupPending)
       || backgroundHost.status().busy || backgroundHost.status().cleanupPending
       || [workspaces, pipelines, scheduling, background, skills, tools, privacy, appearance, delivery, permissions].some(value => value.status().busy)) return false;
@@ -130,12 +134,13 @@ app.whenReady().then(async () => {
       return state.run || state.busy || workspaceStore.schedule(workspace.id)?.pending; })
       || workspaceStore.pending().length || developmentStore.recovery().some(run => run.uncertainEffects)) return false;
     return true;
-  }, verify: signal => supervisor.verifyIdle(signal) });
-  const executionAllowed = () => !closing && !maintenance.active() && (backgroundHost?.executionAllowed() ?? !backgroundLaunch);
+  }, verify: signal => supervisor.verifyIdle(signal), recovery: maintenanceRecovery });
+  const executionAllowed = () => !closing && !maintenance.active() && maintenanceStore?.clear() === true && (backgroundHost?.executionAllowed() ?? !backgroundLaunch);
   const registerControl = (name, channel) => ipcMain.handle(name, (event, payload) => {
     if (closing) throw Error('App closing');
     return maintenance.control(() => channel().dispatch(event, payload), {
-      passive: payload?.operation === 'status' || name === 'updates:control' && payload?.operation === 'stop'
+      passive: payload?.operation === 'status' || name === 'updates:control' && (['stop', 'view'].includes(payload?.operation)
+        || payload?.operation === 'chat' && updateCommand(payload.text)?.operation === 'view')
     });
   });
   const publish = snapshot => {
@@ -273,7 +278,7 @@ app.whenReady().then(async () => {
   delivery = makeDelivery(1);
   const publishUpdates = snapshot => { if (window && !window.isDestroyed()) window.webContents.send('updates:status', snapshot); };
   const makeUpdates = initialRevision => createUpdateManager({ policy, history: updateHistory, sources: () => trustedUpdateSources,
-    maintenance, foreground: () => !closing && !maintenance.active() && Boolean(window && !window.isDestroyed() && window.isVisible() && window.isFocused()),
+    maintenance, recovery: maintenanceRecovery, foreground: () => !closing && !maintenance.active() && Boolean(window && !window.isDestroyed() && window.isVisible() && window.isFocused()),
     version: app.isPackaged ? app.getVersion() : null, initialRevision, onChange: publishUpdates,
     onApplied: () => { issues?.sync(); pipelines?.sync(); development?.sync(); scheduling?.sync(); background?.sync(); skills?.sync(); tools?.sync(); appearance?.sync(); privacy?.sync(); delivery?.sync(); } });
   updates = makeUpdates(1);
@@ -360,7 +365,7 @@ app.whenReady().then(async () => {
       powerMonitor.removeListener('suspend', suspendHost); powerMonitor.removeListener('resume', wakeHost); powerMonitor.removeListener('shutdown', endSession);
       await tools.close(); await toolConnections?.close();
       await privacy.close(); privacyRecords?.close();
-      await permissions.close(); await updates.close(); updateHistory?.close(); await delivery.close(); await artifacts?.close(); backgroundHost?.close(); background.close(); scheduling.close(); pipelines.close(); skills.close(); appearance.close();
+      await permissions.close(); await updates.close(); updateHistory?.close(); maintenanceStore?.close(); await delivery.close(); await artifacts?.close(); backgroundHost?.close(); background.close(); scheduling.close(); pipelines.close(); skills.close(); appearance.close();
       developmentStore?.close(); policy?.close(); skillStore?.close(); toolStore?.close(); workspaceStore?.close(); vault?.close(); verifiedClose = true; app.quit();
     } catch { closing = false; console.error('Pipeliner shutdown needs verified recovery. Work remains preserved.'); await attachWindow(); publish(manager.status()); }
   };
@@ -371,6 +376,8 @@ app.whenReady().then(async () => {
     const { openVault } = await moduleAt('../connections/vault.mjs');
     vault = await openVault(directory, { available: () => safeStorage.isAsyncEncryptionAvailable(), encrypt: text => safeStorage.encryptStringAsync(text), decrypt: bytes => safeStorage.decryptStringAsync(bytes) });
     if (closing) { vault.close(); return; }
+    try { maintenanceStore = openUpdateMaintenance(directory, { vault }); }
+    catch { maintenanceUnavailable = true; console.error('Desktop maintenance needs protected recovery. Existing data preserved.'); }
     const initialRevision = manager.status().revision + 1;
     manager = createConnectionManager({ vault, adapters, onChange: publish, initialRevision }); publish(manager.status());
     const { openWorkspaceStore } = await moduleAt('../repositories/store.mjs');
@@ -402,7 +409,7 @@ app.whenReady().then(async () => {
     const { openDevelopmentStore } = await moduleAt('../development/state.mjs');
     const { openExecutionSupervisor } = await moduleAt('../core/execution.mjs');
     developmentStore = openDevelopmentStore(directory, { vault });
-    try { supervisor = openExecutionSupervisor(directory, { store: policy, maintenance: () => maintenance.active() }); } catch { supervisor = null; }
+    try { supervisor = openExecutionSupervisor(directory, { store: policy, maintenance: () => maintenance.active() || maintenanceRecovery() }); } catch { supervisor = null; }
     const developmentRevision = development.status().revision + 1; await development.close(); development = makeDevelopment(developmentRevision); publishDevelopment(development.status());
     const permissionRevision = permissions.status().revision + 1; await permissions.close(); permissions = makePermissions(permissionRevision); publishPermissions(permissions.status());
     const pipelineRevision = pipelines.status().revision + 1; pipelines.close(); pipelines = makePipelines(pipelineRevision); publishPipelines(pipelines.status());
@@ -425,11 +432,11 @@ app.whenReady().then(async () => {
     } });
     refreshRecovery(); const privacyRevision = privacy.status().revision + 1; await privacy.close(); privacy = makePrivacy(privacyRevision); publishPrivacy(privacy.status());
     let retentionCursor = null;
-    const retain = () => { if (closing || maintenance.active()) return; try { refreshRecovery(); const result = privacyRecords.expire({ after: retentionCursor, limit: 500 }); retentionCursor = result.more ? result.after : null; }
+    const retain = () => { if (closing || maintenance.active() || maintenanceRecovery()) return; try { refreshRecovery(); const result = privacyRecords.expire({ after: retentionCursor, limit: 500 }); retentionCursor = result.more ? result.after : null; }
       catch { console.error('Pipeliner local retention needs protected recovery; records were preserved.'); } };
     retain(); retentionMonitor = setInterval(retain, 60000); retentionMonitor.unref();
-    await backgroundHost.refresh();
-    authorizationMonitor = setInterval(() => { if (!closing && !maintenance.active()) void backgroundHost.refresh().catch(() => {}); }, 1000); authorizationMonitor.unref();
+    if (!maintenanceRecovery()) await backgroundHost.refresh();
+    authorizationMonitor = setInterval(() => { if (!closing && !maintenance.active() && !maintenanceRecovery()) void backgroundHost.refresh().catch(() => {}); }, 1000); authorizationMonitor.unref();
     await updates.poll();
     await scheduler.check('startup');
   } catch { publish(manager.status()); }

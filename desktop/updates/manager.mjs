@@ -6,14 +6,15 @@ import { readUpdateSource } from './source.mjs';
 import { endpointURL } from '../tools/transport.mjs';
 
 export function createUpdateManager({ policy, version = null, history = null, sources = () => [], reader = readUpdateSource,
-  host = { platform: process.platform, architecture: process.arch }, foreground = () => true, maintenance = null, initialRevision = 1, onChange = () => {}, onApplied = () => {} }) {
+  host = { platform: process.platform, architecture: process.arch }, foreground = () => true, maintenance = null, recovery = () => false, initialRevision = 1, onChange = () => {}, onApplied = () => {} }) {
   record(host, ['platform', 'architecture']);
-  if (!Number.isSafeInteger(initialRevision) || initialRevision < 1 || [onChange, onApplied, sources, reader, foreground].some(fn => typeof fn !== 'function')
+  if (!Number.isSafeInteger(initialRevision) || initialRevision < 1 || [onChange, onApplied, sources, reader, foreground, recovery].some(fn => typeof fn !== 'function')
     || history !== null && ['read', 'begin', 'complete', 'fail'].some(name => typeof history[name] !== 'function')
     || maintenance !== null && typeof maintenance.exclusive !== 'function'
     || Object.values(host).some(value => typeof value !== 'string' || !/^[a-z0-9_-]{1,16}$/.test(value))
     || version !== null && (typeof version !== 'string' || version.length > 128 || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?$/.test(version))) throw Error('Desktop update controls unavailable');
   host = { ...host };
+  const recovering = () => { try { return recovery() !== false; } catch { return true; } };
   const conversationId = randomUUID(); let revision = initialRevision, observed, preview = null, applied = null, message = null, closed = false, pending = null;
   function catalog() {
     const input = sources(), ids = new Set(), labels = new Set(); if (!Array.isArray(input) || input.length > 64) throw Error();
@@ -34,7 +35,7 @@ export function createUpdateManager({ policy, version = null, history = null, so
     const selected = approved.items.find(item => item.trust.id === view?.values['updates.source'].value) ?? null;
     return { view, approved, selected, current: view ? { ...host, channel: view.values['updates.channel'].value, version } : null };
   }
-  const signature = value => canonicalJSON({ revision: value.view?.revision ?? null, catalog: value.approved.fingerprint });
+  const signature = value => canonicalJSON({ revision: value.view?.revision ?? null, catalog: value.approved.fingerprint, recovery: recovering() });
   function invalidate() { if (preview) policy.control.invalidate(preview.inputId); preview = null; applied = null; }
   function sync() {
     const value = inspect(), current = signature(value);
@@ -48,7 +49,8 @@ export function createUpdateManager({ policy, version = null, history = null, so
     const sourceName = id => id === null ? null : approved.items.find(item => item.trust.id === id)?.label ?? 'Unavailable saved source';
     const display = values => Object.fromEntries(preview.keys.map(id => [id, id === 'updates.source'
       ? { ...values[id], value: sourceName(values[id].value), configuredValue: sourceName(values[id].configuredValue) } : values[id]]));
-    return { revision, storageAvailable: Boolean(view), scope: 'host', policyRevision: view?.revision ?? null, installedVersion: version,
+    const recoveryRequired = recovering();
+    return { revision, storageAvailable: Boolean(view), recoveryRequired, scope: 'host', policyRevision: view?.revision ?? null, installedVersion: version,
       values: view ? { 'updates.channel': view.values['updates.channel'] } : null,
       sources: approved.items.map(item => ({ name: item.label })), sourceName: selected?.label ?? null,
       sourceConfigured: Boolean(view?.values['updates.source'].value), sourceQualified: Boolean(saved), installQualified: false, busy: Boolean(pending),
@@ -56,7 +58,8 @@ export function createUpdateManager({ policy, version = null, history = null, so
       release: saved?.availability?.available ? Object.fromEntries(['version', 'channel', 'platform', 'architecture', 'sequence', 'bytes', 'sha256', 'sourceCommit', 'gitTree', 'expiresAt']
         .map(key => [key, saved.availability.release[key]])) : null,
       preview: preview ? { hash: preview.hash, scope: preview.scope, target: preview.target, baseRevision: preview.baseRevision, expiresAt: preview.expiresAt,
-        before: display(preview.before), after: display(preview.after) } : null, message };
+        before: display(preview.before), after: display(preview.after) } : null,
+      message: recoveryRequired ? 'Desktop maintenance needs verified recovery before work can resume. Keep the installed app and saved data; settings and repositories are preserved.' : message };
   }
   function publish() { try { onChange(status()); } catch { message = 'Update view needs refresh. Reopen Settings to inspect saved settings.'; } }
   function prepare(changes, reset = []) {
@@ -109,6 +112,7 @@ export function createUpdateManager({ policy, version = null, history = null, so
     if (payload.operation === 'chat') {
       const action = updateCommand(payload.text); if (!action) throw Error('Desktop update command unavailable'); return dispatch(action);
     }
+    if (recovering() && !['view', 'stop'].includes(payload.operation)) throw Error('maintenance-recovery-required');
     if (payload.operation === 'prepare') { record(payload.changes, [], ['updates.channel']); return prepare(payload.changes); }
     if (payload.operation === 'source') {
       if (payload.name === null) return prepare({ 'updates.source': null });
@@ -149,7 +153,7 @@ export function createUpdateManager({ policy, version = null, history = null, so
     publish(); return { snapshot: status() };
   }
   return Object.freeze({ status, dispatch, sync() { sync(); publish(); },
-    async poll() { if (closed || foreground() !== true) return { snapshot: status() }; return check(false); },
+    async poll() { if (closed || recovering() || foreground() !== true) return { snapshot: status() }; return check(false); },
     async stop() { const operation = pending; operation?.controller.abort(); await operation?.done; },
     async close() { if (!closed) { invalidate(); closed = true; } const operation = pending; operation?.controller.abort(); await operation?.done; } });
 }

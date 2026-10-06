@@ -10,7 +10,7 @@ const definitions = [
   ['extensions', 'Skill and tool definitions', ['skills.sqlite', 'tools.sqlite'], 'Private installation storage; credentials stored separately', 'Pinned definitions needed by captured runs remain retained', 'skills'],
   ['privacy', 'Conversations, logs and audit', ['privacy.sqlite'], 'Authenticated encryption with the installation key', 'Scoped category retention and previewed deletion', 'privacy'],
   ['artifacts', 'Artifact index and command receipts', ['artifacts.sqlite'], 'Authenticated encryption with the installation key', 'Minimal command identities remain after archive removal', 'delivery'],
-  ['updates', 'Verified update history', ['updates.sqlite'], 'Authenticated encryption with the installation key', 'Release watermarks and attempt limits survive settings restore and category deletion', 'updates'],
+  ['updates', 'Update history and maintenance intent', ['updates.sqlite', 'maintenance.sqlite'], 'Authenticated encryption with the installation key', 'Release watermarks, attempt limits and unresolved maintenance survive settings restore and category deletion', 'updates'],
 ];
 const folders = ['Cache', 'Code Cache', 'GPUCache', 'DawnGraphiteCache', 'DawnWebGPUCache', 'SharedDictionary', 'Network', 'crashes'];
 const uuid = '[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}';

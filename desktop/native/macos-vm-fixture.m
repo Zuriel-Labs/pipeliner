@@ -8,6 +8,29 @@
 #include <signal.h>
 #include <errno.h>
 #include <math.h>
+#include <assert.h>
+
+static BOOL emptyPrivateDisk(struct stat info) {
+  return S_ISREG(info.st_mode) && info.st_uid == getuid() && info.st_nlink == 1 && (info.st_mode & 0777) == 0600 && info.st_size == 0;
+}
+
+static int openOwnedEmptyDisk(NSString *root) {
+  int directory = open(root.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+  if (directory < 0) return -1;
+  struct stat parent, named, opened, current;
+  int fd = -1;
+  if (fstat(directory, &parent) != 0 || !S_ISDIR(parent.st_mode) || parent.st_uid != getuid() || (parent.st_mode & 0777) != 0700
+    || fstatat(directory, "Disk.img", &named, AT_SYMLINK_NOFOLLOW) != 0 || !emptyPrivateDisk(named)) goto done;
+  fd = openat(directory, "Disk.img", O_WRONLY | O_NOFOLLOW | O_NONBLOCK);
+  if (fd < 0) goto done;
+  if (fstat(fd, &opened) != 0 || fstatat(directory, "Disk.img", &current, AT_SYMLINK_NOFOLLOW) != 0
+    || opened.st_dev != named.st_dev || opened.st_ino != named.st_ino || current.st_dev != named.st_dev || current.st_ino != named.st_ino
+    || !emptyPrivateDisk(opened) || !emptyPrivateDisk(current)) { close(fd); fd = -1; }
+done:
+  close(directory); return fd;
+}
+
+#ifndef PIPELINER_VM_DISK_TEST
 
 // Native qualification only. Bridge mode shares only fresh synthetic input/output folders.
 static void report(NSDictionary *value) {
@@ -119,9 +142,9 @@ static NSDictionary *readPrivateJSON(NSURL *url) {
       VZMacOSConfigurationRequirements *requirements = image.mostFeaturefulSupportedConfiguration;
       if (!image || loadError || !image.supported || ![image.buildVersion isEqualToString:@"26A434"] || !requirements
         || requirements.minimumSupportedCPUCount > 2 || requirements.minimumSupportedMemorySize > 4ULL * 1024 * 1024 * 1024) fail(@"restore-image-configuration", loadError);
-      int fd = open(childURL(self.root, @"Disk.img").fileSystemRepresentation, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
-      if (fd < 0) fail(@"owned-disk-create", nil);
-      BOOL sized = ftruncate(fd, 48ULL * 1024 * 1024 * 1024) == 0; close(fd); if (!sized) fail(@"owned-disk-size", nil);
+      int fd = openOwnedEmptyDisk(self.root);
+      if (fd < 0) fail(@"owned-disk-lease", nil);
+      BOOL sized = ftruncate(fd, 48ULL * 1024 * 1024 * 1024) == 0 && fsync(fd) == 0; close(fd); if (!sized) fail(@"owned-disk-size", nil);
       VZMacPlatformConfiguration *platform = [[VZMacPlatformConfiguration alloc] init];
       platform.hardwareModel = requirements.hardwareModel; platform.machineIdentifier = [VZMacMachineIdentifier new];
       if (!writePrivate(platform.hardwareModel.dataRepresentation, childURL(self.root, @"HardwareModel"))
@@ -310,7 +333,7 @@ int main(int argc, const char *argv[]) {
     umask(077); if (argc != 3) return 2;
     NSString *mode = [NSString stringWithUTF8String:argv[1]], *root = [NSString stringWithUTF8String:argv[2]];
     struct stat info; char actual[PATH_MAX];
-    if (![root.lastPathComponent hasPrefix:@"pipeliner-54-macos-worker-"] || ![root isAbsolutePath]
+    if (!([root.lastPathComponent isEqual:@"pipeliner-54-macos-worker"] || [root.lastPathComponent hasPrefix:@"pipeliner-54-macos-worker-"]) || ![root isAbsolutePath]
       || !realpath(root.fileSystemRepresentation, actual) || strcmp(root.fileSystemRepresentation, actual) != 0 || lstat(root.fileSystemRepresentation, &info) != 0
       || !S_ISDIR(info.st_mode) || info.st_uid != getuid() || (info.st_mode & 077) != 0) { report(@{@"failed": @"owned-root-validation"}); return 2; }
     MacQualification *probe = [MacQualification new]; probe.root = root; [probe armTermination];
@@ -339,3 +362,25 @@ int main(int argc, const char *argv[]) {
     return 1;
   }
 }
+#else
+int main(int argc, const char *argv[]) {
+  @autoreleasepool {
+    assert(argc == 2); NSString *root = [NSString stringWithUTF8String:argv[1]], *path = [root stringByAppendingPathComponent:@"Disk.img"];
+    struct stat parent, before, after; assert(lstat(root.fileSystemRepresentation, &parent) == 0 && S_ISDIR(parent.st_mode) && parent.st_uid == getuid() && (parent.st_mode & 0777) == 0700);
+    assert(openOwnedEmptyDisk(root) == -1);
+    int fd = open(path.fileSystemRepresentation, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600); assert(fd >= 0); close(fd);
+    assert(lstat(path.fileSystemRepresentation, &before) == 0); fd = openOwnedEmptyDisk(root); assert(fd >= 0); assert(ftruncate(fd, 33) == 0 && fsync(fd) == 0); close(fd);
+    assert(lstat(path.fileSystemRepresentation, &after) == 0 && after.st_ino == before.st_ino && after.st_dev == before.st_dev && after.st_size == 33);
+    assert(openOwnedEmptyDisk(root) == -1); assert(lstat(path.fileSystemRepresentation, &after) == 0 && after.st_size == 33);
+    NSString *alias = [root stringByAppendingPathComponent:@"alias"];
+    assert(rename(path.fileSystemRepresentation, alias.fileSystemRepresentation) == 0 && symlink("alias", path.fileSystemRepresentation) == 0);
+    assert(openOwnedEmptyDisk(root) == -1 && unlink(path.fileSystemRepresentation) == 0 && rename(alias.fileSystemRepresentation, path.fileSystemRepresentation) == 0);
+    struct stat linked = before; linked.st_nlink = 2; assert(!emptyPrivateDisk(linked)); // Injected metadata; a hardlink is refused by the outer storage scanner.
+    assert(truncate(path.fileSystemRepresentation, 0) == 0);
+    assert(chmod(path.fileSystemRepresentation, 0644) == 0 && openOwnedEmptyDisk(root) == -1 && chmod(path.fileSystemRepresentation, 0600) == 0);
+    assert(chmod(root.fileSystemRepresentation, 0755) == 0 && openOwnedEmptyDisk(root) == -1 && chmod(root.fileSystemRepresentation, 0700) == 0);
+    assert(lstat(path.fileSystemRepresentation, &after) == 0 && after.st_dev == before.st_dev && after.st_ino == before.st_ino && emptyPrivateDisk(after));
+    assert(unlink(path.fileSystemRepresentation) == 0); printf("Owned empty disk boundary OK: 6 native cases, 1 injected link-count case.\n"); return 0;
+  }
+}
+#endif

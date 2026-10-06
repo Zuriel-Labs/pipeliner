@@ -24,8 +24,8 @@ static BOOL guestConfigurationValid(id value) {
     || [[run substringToIndex:8] rangeOfCharacterFromSet:digits.invertedSet].location != NSNotFound
     || [[run substringWithRange:NSMakeRange(9, 6)] rangeOfCharacterFromSet:digits.invertedSet].location != NSNotFound
     || [[run substringFromIndex:17] rangeOfCharacterFromSet:hex.invertedSet].location != NSNotFound
-    || ![worker hasPrefix:prefix] || worker.length != prefix.length + 6
-    || [[worker substringFromIndex:prefix.length] rangeOfCharacterFromSet:letters.invertedSet].location != NSNotFound) return NO;
+    || (![worker isEqual:@"pipeliner-54-macos-worker"] && (![worker hasPrefix:prefix] || worker.length != prefix.length + 6
+      || [[worker substringFromIndex:prefix.length] rangeOfCharacterFromSet:letters.invertedSet].location != NSNotFound))) return NO;
   return [value[@"targetIdentifier"] isEqual:[NSString stringWithFormat:@"com.pipeliner.qualification.%@.target", value[@"nonce"]]];
 }
 
@@ -175,7 +175,8 @@ int main(void) {
   @autoreleasepool {
     NSString *nonce = @"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", *root = @"/Volumes/TESTING/TestArtifacts/projects/pipeliner/issues/54/runs/20261006T192509Z-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/tmp/pipeliner-54-macos-worker-Ab12Cd/neighbor";
     NSDictionary *valid = @{@"nonce": nonce, @"neighbor": root, @"targetSHA256": @"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", @"targetIdentifier": [NSString stringWithFormat:@"com.pipeliner.qualification.%@.target", nonce]};
-    assert(guestConfigurationValid(valid)); NSUInteger passed = 1;
+    assert(guestConfigurationValid(valid)); NSMutableDictionary *fixed = [valid mutableCopy]; fixed[@"neighbor"] = [root stringByReplacingOccurrencesOfString:@"-Ab12Cd" withString:@""];
+    assert(guestConfigurationValid(fixed)); NSUInteger passed = 2;
     for (NSArray *change in @[@[@"nonce", @"bad"], @[@"targetSHA256", @"gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg"],
       @[@"targetIdentifier", @"com.pipeliner.qualification.other.target"], @[@"neighbor", @"/private/var/folders/legacy/neighbor"],
       @[@"neighbor", [root stringByReplacingOccurrencesOfString:@"issues/54" withString:@"issues/55"]], @[@"neighbor", [root stringByReplacingOccurrencesOfString:@"projects/pipeliner" withString:@"projects/other"]],

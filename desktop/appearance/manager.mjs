@@ -59,6 +59,7 @@ export function createAppearanceManager({ policy, workspace = () => null, initia
     }
     if (payload.operation === 'view') { if (payload.scope) select(payload.scope); publish(); return { snapshot: status() }; }
     if (payload.operation === 'cancel') { invalidate(); message = 'Appearance change cancelled. Display and work are preserved.'; revision++; publish(); return { snapshot: status() }; }
+    if (payload.operation === 'reset-layout') return prepare({}, ['appearance.layout'], select('host'));
     if (['reset', 'prepare'].includes(payload.operation)) {
       const selected = select(payload.scope ?? 'host'), keys = selected.scope === 'host' ? appearanceKeys : [notificationKey];
       return prepare(payload.operation === 'reset' ? {} : payload.changes, payload.operation === 'reset' ? keys : [], selected);

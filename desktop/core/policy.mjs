@@ -7,7 +7,7 @@ import { protectedFile } from './storage.mjs';
 const digest = value => createHash('sha256').update(canonicalJSON(value)).digest('hex');
 const id = value => typeof value === 'string' && /^[A-Za-z][A-Za-z0-9_-]{0,95}$/.test(value) && !['constructor', 'prototype'].includes(value);
 const checkedId = value => { if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(value)) throw new Error('Invalid command identity'); };
-const empty = () => ({ schemaVersion: 3, defaults, host: {}, global: {}, repositories: {} });
+const empty = () => ({ schemaVersion: 4, defaults, host: {}, global: {}, repositories: {} });
 function catalogData(value) {
   canonicalJSON(value);
   record(value, ['repositories', 'capabilities', 'maxConcurrency', 'background', 'connections', 'developers', 'extensions'], ['resources', 'checks', 'updateSources', 'notifications', 'tools']);
@@ -97,7 +97,7 @@ export function openPolicyStore(directory, { catalog, clock = Date.now, inspecto
       if (!['host', 'global', 'repository'].includes(scope) || (scope === 'repository') !== (target !== null)) throw new Error('Invalid policy scope or target');
       if (!request.changes || Array.isArray(request.changes) || !Array.isArray(request.reset) || new Set(request.reset).size !== request.reset.length) throw new Error('Invalid policy changes');
       const document = JSON.parse(canonicalJSON(currentVersion.document));
-      document.schemaVersion = 3; document.defaults = defaults;
+      document.schemaVersion = 4; document.defaults = defaults;
       if (scope === 'repository') document.repositories[target] ??= {};
       const values = scope === 'repository' ? document.repositories[target] : document[scope];
       let changes = request.changes, reset = request.reset;

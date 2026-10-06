@@ -177,6 +177,7 @@ const entries = [
   ['appearance.textScale', 'S-13', 'Text scale', 'host', 1, v => Number.isFinite(v) && v >= 1 && v <= 2, 'immediate'],
   ['appearance.motion', 'S-13', 'Motion preference', 'host', 'system', choice(['system', 'reduced']), 'immediate'],
   ['appearance.technicalDetails', 'S-13', 'Technical details', 'host', false, boolean, 'immediate'],
+  ['appearance.layout', 'S-13', 'Current work placement', 'host', 'above', choice(['above', 'beside']), 'immediate'],
   ['appearance.osNotifications', 'S-13', 'OS notifications', 'host', false, boolean, 'verified-host-action'],
   ['appearance.repositoryNotifications', 'S-13', 'Repository in-app notifications', 'repository', true, boolean, 'immediate'],
   ['updates.channel', 'S-14', 'Desktop update channel', 'host', 'stable', choice(['stable', 'beta', 'alpha']), 'next-check'],
@@ -194,17 +195,19 @@ export function validateValue(id, value) {
   if (!f.validate(value)) throw new Error(`Invalid ${f.label}`);
 }
 // Exact old defaults stay part of their immutable policy hashes. Safe additions apply only in the resolved view.
-export const versionTwoDefaults = immutable(Object.fromEntries(Object.entries(defaults).filter(([id]) => !id.startsWith('tools.'))));
+export const versionThreeDefaults = immutable(Object.fromEntries(Object.entries(defaults).filter(([id]) => id !== 'appearance.layout')));
+export const versionTwoDefaults = immutable(Object.fromEntries(Object.entries(versionThreeDefaults).filter(([id]) => !id.startsWith('tools.'))));
 export const legacyDefaults = immutable(Object.fromEntries(Object.entries(versionTwoDefaults).filter(([id]) => !['scheduling.mode', 'scheduling.calendar'].includes(id))));
 export function rawValues(state, target) { return { ...defaults, ...state.defaults, ...state.host, ...state.global, ...(target ? state.repositories[target] : {}) }; }
 export function validateState(state) {
   canonicalJSON(state); record(state, ['schemaVersion', 'defaults', 'host', 'global', 'repositories']);
-  if (![1, 2, 3].includes(state.schemaVersion) || canonicalJSON(state.defaults) !== canonicalJSON(state.schemaVersion === 1 ? legacyDefaults : state.schemaVersion === 2 ? versionTwoDefaults : defaults)) throw new Error('Unsupported policy schema or defaults');
+  if (![1, 2, 3, 4].includes(state.schemaVersion) || canonicalJSON(state.defaults) !== canonicalJSON(state.schemaVersion === 1 ? legacyDefaults : state.schemaVersion === 2 ? versionTwoDefaults : state.schemaVersion === 3 ? versionThreeDefaults : defaults)) throw new Error('Unsupported policy schema or defaults');
   for (const [scope, values] of [['host', state.host], ['global', state.global], ...Object.entries(state.repositories).map(([id, v]) => {
     if (!identifier(id)) throw new Error('Invalid repository identity'); return ['repository', v];
   })]) {
     if (!values || ![Object.prototype, null].includes(Object.getPrototypeOf(values))) throw new Error('Invalid policy scope');
     for (const [id, value] of Object.entries(values)) {
+      if (state.schemaVersion < 4 && id === 'appearance.layout') throw new Error('Layout preferences require the current policy schema');
       if (state.schemaVersion < 3 && (id.startsWith('tools.') || ['permissions.ceiling', 'permissions.grants'].includes(id) && value.includes('extension.invoke'))) throw new Error('Tool permissions require the current policy schema');
       validateValue(id, value); const f = fields.get(id);
       if (f.scope === 'read-only' || (f.scope === 'host') !== (scope === 'host')) throw new Error('Invalid host or repository field scope');

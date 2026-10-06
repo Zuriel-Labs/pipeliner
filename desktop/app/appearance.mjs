@@ -1,13 +1,13 @@
 import { appearanceCommand } from './appearance-commands.mjs';
 
-export async function initAppearance({ el, message, show, onPreferences = () => {} }) {
+export async function initAppearance({ el, message, show, preserveReadingPosition, onPreferences = () => {} }) {
   const $ = id => document.getElementById(id);
   let state, pending = false, lastMessage;
   const category = el('button', 'Appearance and Accessibility', 'category-button'); category.id = 'settings-appearance'; category.setAttribute('aria-pressed', 'false');
   document.querySelector('.settings-categories').append(category);
   const section = el('section'); section.id = 'appearance-settings'; section.hidden = true; section.setAttribute('aria-label', 'Appearance and accessibility settings'); $('settings-view').append(section);
   const chatPreview = el('section'); chatPreview.id = 'appearance-chat-preview'; chatPreview.setAttribute('aria-label', 'Current appearance preview'); $('composer').before(chatPreview);
-  const labels = { system: 'Follow this Mac', light: 'Light', dark: 'Dark', comfortable: 'Comfortable', compact: 'Compact', reduced: 'Reduced motion' };
+  const labels = { system: 'Follow this Mac', light: 'Light', dark: 'Dark', comfortable: 'Comfortable', compact: 'Compact', reduced: 'Reduced motion', above: 'Above chat', beside: 'Beside chat when space allows' };
   const percentage = value => Number((value * 100).toPrecision(15));
   const readable = (key, value) => typeof value === 'boolean' ? value ? 'On' : 'Off' : key === 'appearance.textScale' ? percentage(value) + '%' : labels[value] ?? String(value);
   function button(text, operation, extra = {}, id) {
@@ -23,6 +23,7 @@ export async function initAppearance({ el, message, show, onPreferences = () => 
   }
   function render(snapshot) {
     if (state && snapshot.revision < state.revision) return;
+    const restoreReading = preserveReadingPosition();
     const focused = document.activeElement?.id, form = $('appearance-form'), unchanged = state && JSON.stringify(state.values) === JSON.stringify(snapshot.values),
       draft = unchanged && form ? Object.fromEntries([...form.querySelectorAll('[data-key]')].map(input => [input.dataset.key, input.value])) : null,
       notificationDraft = state && JSON.stringify(state.notification) === JSON.stringify(snapshot.notification) ? $('appearance-notification-value')?.value : undefined;
@@ -32,6 +33,7 @@ export async function initAppearance({ el, message, show, onPreferences = () => 
       root.style.fontSize = 16 * state.values['appearance.textScale'].value + 'px';
       root.style.setProperty('--text-scale', state.values['appearance.textScale'].value);
       root.dataset.density = state.values['appearance.density'].value; root.dataset.motion = state.values['appearance.motion'].value;
+      root.dataset.layout = state.values['appearance.layout'].value;
     }
     const head = el('article', undefined, 'connection-card'); head.append(el('p', 'Your display, your pace', 'kicker'), el('h2', 'Appearance and accessibility'),
       el('p', 'These preferences apply to this Pipeliner installation. System accessibility preferences remain in effect. Display changes leave projects, conversation drafts and active work intact.', 'small'));
@@ -39,7 +41,7 @@ export async function initAppearance({ el, message, show, onPreferences = () => 
     if (!state.storageAvailable) nodes.push(el('p', 'Protected configuration is loading or unavailable. Preferences stay blocked until it opens safely.', 'availability'));
     else {
       const form = el('form', undefined, 'connection-card'); form.id = 'appearance-form';
-      for (const [key, options] of [['appearance.theme', ['system', 'light', 'dark']], ['appearance.density', ['comfortable', 'compact']], ['appearance.textScale', null], ['appearance.motion', ['system', 'reduced']], ['appearance.technicalDetails', [false, true]]]) {
+      for (const [key, options] of [['appearance.theme', ['system', 'light', 'dark']], ['appearance.density', ['comfortable', 'compact']], ['appearance.textScale', null], ['appearance.motion', ['system', 'reduced']], ['appearance.technicalDetails', [false, true]], ['appearance.layout', ['above', 'beside']]]) {
         const value = state.values[key], row = el('div', undefined, 'setup-field'), label = el('label', value.label + (options ? '' : ' (%)')), input = el(options ? 'select' : 'input');
         input.id = key.replaceAll('.', '-'); label.htmlFor = input.id; input.dataset.key = key;
         if (options) for (const value of options) { const option = el('option', typeof value === 'boolean' ? value ? 'Show by default' : 'Collapsed by default' : labels[value]); option.value = value; input.append(option); }
@@ -50,7 +52,8 @@ export async function initAppearance({ el, message, show, onPreferences = () => 
       }
       const submit = el('button', 'Review display change', 'primary'); submit.type = 'submit'; submit.disabled = pending; form.append(submit);
       form.addEventListener('submit', event => { event.preventDefault(); request({ operation: 'prepare', changes: Object.fromEntries([...form.querySelectorAll('[data-key]')].filter(input => input.value !== input.dataset.current).map(input => [input.dataset.key, input.dataset.boolean === 'true' ? input.value === 'true' : input.dataset.key === 'appearance.textScale' ? Number(input.value) / 100 : input.value])) }); });
-      form.append(button('Review default appearance', 'reset', {}, 'appearance-reset')); nodes.push(form);
+      form.append(button('Review default appearance', 'reset', {}, 'appearance-reset'), button('Review Restore Layout', 'reset-layout', {}, 'appearance-layout-reset'));
+      form.append(el('p', 'Beside chat uses two panes only when the window and text size allow. Restore Layout changes placement only; other preferences and work stay intact.', 'small')); nodes.push(form);
       const notification = el('article', undefined, 'connection-card'), selected = state.notification;
       notification.append(el('h3', 'In-app notifications'), el('p', 'Optional notices highlight required PM action, meaningful failure and candidate readiness. Ordinary replies, controls and error guidance remain available.', 'small'));
       const scopes = el('div', undefined, 'connection-actions');
@@ -73,6 +76,7 @@ export async function initAppearance({ el, message, show, onPreferences = () => 
     section.replaceChildren(...nodes); if (focused && $(focused) && !$(focused).disabled) $(focused).focus({ preventScroll: true });
     onPreferences(state);
     if (state.message && state.message !== lastMessage) { message(state.message, false); $('announcement').textContent = state.message; lastMessage = state.message; }
+    restoreReading();
   }
   async function request(payload, text) {
     if (!state || pending) return; pending = true;

@@ -95,6 +95,49 @@ exports.run = async ({ window, directory, appearance, channel, policy, developme
     await chat('Reset global in-app notifications'); await wait(() => Boolean(appearance.status().preview)); await chat('Apply this appearance change'); await wait(() => !appearance.status().preview);
     assert.equal(appearance.status().notificationsEnabled, true);
   });
+  await check('appearance-layout-panes-reading-draft-keyboard-reload-and-restore', async () => {
+    await change('Set text size to 100%'); window.setSize(1480, 900);
+    const snapshot = development.status(), display = { ...snapshot, revision: snapshot.revision + 200, run: { id: 'synthetic-layout-display', issue: 54, control: 'paused', limits: {} },
+      development: { state: 'executing', turns: 1, stepTurns: 1, usage: { input: 2, output: 1, unavailable: true } }, qa: null, publication: null, pending: [] };
+    window.webContents.send('development:status', display); await wait(() => js("Boolean(document.getElementById('chat-development-pause'))"));
+    await chat('Show work beside chat'); await wait(() => Boolean(appearance.status().preview));
+    await js(`const log=document.getElementById('transcript');for(let i=0;i<40;i++){const article=document.createElement('article');article.className='message assistant';article.textContent='Synthetic reading fixture '+i+' · Earlier conversation content remains available while current work stays visible.';log.append(article)}log.scrollTop=250;document.getElementById('prompt').value='Unsent layout draft';window.layoutAnchor=[...log.children].find(node=>node.getBoundingClientRect().bottom>log.getBoundingClientRect().top);window.layoutOffset=window.layoutAnchor.getBoundingClientRect().top-log.getBoundingClientRect().top;document.getElementById('appearance-apply-chat').click()`);
+    await wait(() => appearance.status().values['appearance.layout'].value === 'beside');
+    await wait(() => js("getComputedStyle(document.getElementById('chat-view')).display==='grid'"));
+    assert.equal(await js("Math.abs(window.layoutAnchor.getBoundingClientRect().top-document.getElementById('transcript').getBoundingClientRect().top-window.layoutOffset)<2"), true);
+    assert.equal(await js("document.getElementById('prompt').value"), 'Unsent layout draft');
+    assert.equal(await js('document.activeElement.id'), 'prompt');
+    assert.equal(await js("(()=>{const chat=document.getElementById('transcript').getBoundingClientRect(),work=document.getElementById('development-status').getBoundingClientRect();return work.left>chat.right&&chat.width>=300&&work.width>=288&&document.documentElement.scrollWidth<=innerWidth})()"), true);
+    assert.equal(await js("!document.getElementById('chat-development-pause').closest('details')&&!document.getElementById('chat-development-stop').closest('details')"), true);
+    writeFileSync(join(directory, 'layout-capture.png'), (await window.webContents.capturePage()).toPNG(), { flag: 'wx', mode: 0o600 });
+    // Display-only fixture. A genuine renderer reply uses the shared append path; no worker is started.
+    await js("window.layoutScroll=document.getElementById('transcript').scrollTop;window.layoutPage=scrollY");
+    appearance.dispatch({ operation: 'cancel' });
+    await wait(() => js("!document.getElementById('chat-new-activity').hidden"));
+    assert.equal(await js("Math.abs(document.getElementById('transcript').scrollTop-window.layoutScroll)<2&&scrollY===window.layoutPage"), true);
+    assert.equal(await js('document.activeElement.id'), 'prompt');
+    window.focus(); await js("document.getElementById('chat-new-activity').focus({preventScroll:true})");
+    await wait(() => window.isFocused());
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+    await wait(() => js("document.getElementById('chat-new-activity').hidden&&document.activeElement.id==='transcript'"));
+    assert.equal(await js("Math.abs(document.getElementById('transcript').scrollHeight-document.getElementById('transcript').clientHeight-document.getElementById('transcript').scrollTop)<=1&&scrollY===window.layoutPage"), true);
+    const revision = policy.worker.read(null).revision;
+    await new Promise((resolve, reject) => { window.webContents.once('did-finish-load', resolve); window.webContents.once('did-fail-load', reject); window.reload(); });
+    await wait(() => js("document.getElementById('appearance-layout')?.value==='beside'")); assert.equal(policy.worker.read(null).revision, revision);
+    window.webContents.send('development:status', { ...display, revision: display.revision + 1 });
+    await wait(() => js("Boolean(document.getElementById('chat-development-pause'))"));
+    await change('Set text size to 200%'); await js("document.getElementById('chat-nav').click()");
+    assert.equal(await js("getComputedStyle(document.getElementById('chat-view')).display!=='grid'&&document.documentElement.scrollWidth<=innerWidth"), true);
+    window.setSize(420, 760); await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal(await js("getComputedStyle(document.getElementById('chat-view')).display!=='grid'&&document.documentElement.scrollWidth<=innerWidth"), true);
+    const others = Object.fromEntries(Object.entries(appearance.status().values).filter(([key]) => key !== 'appearance.layout'));
+    await chat('Restore layout'); await wait(() => Boolean(appearance.status().preview)); assert.deepEqual(Object.keys(appearance.status().preview.after), ['appearance.layout']);
+    await js("document.getElementById('prompt').value='Draft survives Restore Layout';document.getElementById('appearance-apply-chat').click()");
+    await wait(() => appearance.status().values['appearance.layout'].value === 'above');
+    assert.deepEqual(Object.fromEntries(Object.entries(appearance.status().values).filter(([key]) => key !== 'appearance.layout')), others);
+    assert.equal(await js("document.getElementById('prompt').value"), 'Draft survives Restore Layout'); assert.equal(development.status().run, null);
+    window.setSize(1180, 840); await show();
+  });
   await check('appearance-200-percent-reflow-labels-touch-targets-and-motion', async () => {
     await change('Set text size to 200%'); await change('Use dark mode'); await show();
     assert.equal(await js("Array.from(document.querySelectorAll('#appearance-settings input,#appearance-settings select')).every(input=>Array.from(document.querySelectorAll('#appearance-settings label')).some(label=>label.htmlFor===input.id))"), true);

@@ -47,6 +47,29 @@ test('appearance chat and form use one host proposal, exact apply, duplicate rec
     assert.equal(f.manager.status().preview, null); assert.match(f.manager.status().message, /already match/);
   } finally { f.close(); }
 });
+test('layout is host-only, persists, and Restore Layout resets only display placement', () => {
+  const f=fixture();
+  try {
+    assert.equal(f.manager.status().values['appearance.layout']?.value,'above');
+    f.manager.dispatch({operation:'chat',text:'Use dark mode'});f.manager.dispatch({operation:'apply'});
+    const authority=f.policy.worker.authority('repoA',f.policy.worker.read('repoA').revision);
+    f.manager.dispatch({operation:'chat',text:'Show work beside chat'});
+    assert.deepEqual(Object.keys(f.manager.status().preview.after),['appearance.layout']);
+    assert.equal(f.manager.status().values['appearance.layout'].value,'above');
+    f.manager.dispatch({operation:'cancel'});assert.equal(f.manager.status().values['appearance.layout'].value,'above');
+    f.manager.dispatch({operation:'chat',text:'Show work beside chat'});f.manager.dispatch({operation:'apply'});
+    f.reopen();assert.equal(f.manager.status().values['appearance.layout'].value,'beside');
+    f.select('repoA');assert.throws(()=>f.manager.dispatch({operation:'prepare',scope:'repository',changes:{'appearance.layout':'above'}}));
+    f.manager.dispatch({operation:'chat',text:'Restore layout'});
+    assert.deepEqual(Object.keys(f.manager.status().preview.after),['appearance.layout']);f.manager.dispatch({operation:'apply'});
+    assert.equal(f.manager.status().values['appearance.layout'].source,'shipped');
+    assert.equal(f.manager.status().values['appearance.theme'].value,'dark');
+    const after=f.policy.worker.authority('repoA',f.policy.worker.read('repoA').revision);
+    assert.deepEqual(after.capabilities,authority.capabilities);
+    assert.deepEqual(appearanceCommand('Show work above chat'),{operation:'prepare',changes:{'appearance.layout':'above'}});
+    assert.deepEqual(appearanceCommand('Restore layout'),{operation:'reset-layout'});
+  } finally {f.close();}
+});
 test('detail preference stays host-only; notification defaults and exact repository overrides persist and reset', () => {
   const f = fixture();
   try {

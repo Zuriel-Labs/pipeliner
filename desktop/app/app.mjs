@@ -15,10 +15,19 @@ import { initPermissions } from './permissions.mjs';
 let state = null, returnFocus = null; const drafts = new Map(), previousBusy = new Set();
 const $ = id => document.getElementById(id);
 let currentContext = null, privacy, promptRevision = 0; const conversations = new Map();
+const atEnd = node => node.scrollHeight - node.clientHeight - node.scrollTop <= 1;
+function preserveReadingPosition() {
+  const log = $('transcript'), top = log.getBoundingClientRect().top, anchor = [...log.children].find(node => node.getBoundingClientRect().bottom > top),
+    offset = anchor?.getBoundingClientRect().top - top, scroll = log.scrollTop;
+  return () => { log.scrollTop = anchor?.parentElement === log ? log.scrollTop + anchor.getBoundingClientRect().top - log.getBoundingClientRect().top - offset : scroll; };
+}
+$('transcript').addEventListener('scroll', () => { if (atEnd($('transcript')) && document.activeElement !== $('chat-new-activity')) $('chat-new-activity').hidden = true; });
+$('chat-new-activity').addEventListener('click', () => { const log = $('transcript'); log.scrollTop = log.scrollHeight; log.focus({ preventScroll: true }); $('chat-new-activity').hidden = true; });
 function setContext(target, label) {
   if (target === currentContext) return;
-  conversations.set(currentContext, { nodes: [...$('transcript').childNodes], prompt: $('prompt').value }); currentContext = target;
+  conversations.set(currentContext, { nodes: [...$('transcript').childNodes], prompt: $('prompt').value, scroll: $('transcript').scrollTop, activity: !$('chat-new-activity').hidden }); currentContext = target;
   const saved = conversations.get(target); $('transcript').replaceChildren(...(saved?.nodes ?? [])); $('prompt').value = saved?.prompt ?? '';
+  $('transcript').scrollTop = saved?.scroll ?? 0; $('chat-new-activity').hidden = !saved?.activity;
   promptRevision++; privacy?.context();
   $('chat-title').textContent = label ? label : 'Start with a conversation.';
   $('chat-scope').textContent = label ? 'This conversation and Issue controls apply to this repository. Connections remain installation settings.' : 'Connect your accounts here. Keys and sign-in stay in protected surfaces.';
@@ -31,13 +40,16 @@ function showSettings(show = true) {
   $('chat-view').hidden = show; $('settings-view').hidden = !show; $('workspace-view').hidden = true; $('issues-view').hidden = true;
   for (const [id, active] of [['chat-nav', !show], ['settings-nav', show], ['repositories-nav', false], ['issues-nav', false]]) { $(id).classList.toggle('current', active); if (active) $(id).setAttribute('aria-current', 'page'); else $(id).removeAttribute('aria-current'); }
 }
-function message(text, pm = false, target = currentContext, persist = true, receipt = crypto.randomUUID()) {
+function message(text, pm = false, target = currentContext, persist = true, receipt = crypto.randomUUID(), display = true) {
   const article = document.createElement('article'); article.className = `message ${pm ? 'pm' : 'assistant'}`;
   article.dataset.receipt = receipt;
   const label = document.createElement('span'); label.className = 'message-label'; label.textContent = pm ? 'You' : 'Pipeliner';
   const content = document.createElement('p'); content.textContent = text; article.append(label, content);
-  if (target === currentContext) { $('transcript').append(article); article.scrollIntoView({ block: 'nearest' }); }
-  else { const saved = conversations.get(target) ?? { nodes: [], prompt: '' }; saved.nodes.push(article); conversations.set(target, saved); }
+  if (display && target === currentContext) {
+    const log = $('transcript'), follow = !$('chat-view').hidden && atEnd(log); log.append(article);
+    if (follow) log.scrollTop = log.scrollHeight;
+    else { if ($('chat-new-activity').hidden) $('announcement').textContent = 'New conversation activity. Use Jump to new activity when ready.'; $('chat-new-activity').hidden = false; }
+  } else if (display) { const saved = conversations.get(target) ?? { nodes: [], prompt: '' }; saved.nodes.push(article); saved.activity = true; conversations.set(target, saved); }
   if (persist) privacy?.record(text, pm, target, receipt, content);
   return article;
 }
@@ -111,13 +123,15 @@ async function request(payload, text) {
 privacy = await initPrivacy({ el, message, context: () => currentContext, composer: () => ({ value: $('prompt').value, revision: promptRevision }),
   show: () => { showSettings(); $('settings-privacy').click(); }, history: page => {
     if (page.repository !== currentContext) return;
+    const restoreReading = preserveReadingPosition();
     const before = page.replace ? [] : [...$('transcript').childNodes], known = new Set(before.map(node => node.dataset?.receipt));
     const nodes = [];
     for (const row of page.messages) {
       if (known.has(row.id) || !['pm', 'app'].includes(row.value?.role) || typeof row.value.text !== 'string') continue;
-      nodes.push(message(row.value.text, row.value.role === 'pm', currentContext, false, row.id));
+      nodes.push(message(row.value.text, row.value.role === 'pm', currentContext, false, row.id, false));
     }
     $('transcript').replaceChildren(...nodes, ...before);
+    restoreReading();
     if (!page.older && promptRevision === page.edit && (page.replace || !$('prompt').value)) $('prompt').value = page.draft;
   } });
 const workspaces = await initWorkspaces({ el, message, show: () => {
@@ -134,7 +148,7 @@ const scheduling = await initScheduling({ el, message });
 const background = await initBackground({ el, message });
 const skills = await initSkills({ el, message });
 const tools = await initTools({ el, message });
-const appearance = await initAppearance({ el, message, onPreferences: snapshot => development.preferences(snapshot), show: () => { showSettings(); $('settings-appearance').click(); } });
+const appearance = await initAppearance({ el, message, preserveReadingPosition, onPreferences: snapshot => development.preferences(snapshot), show: () => { showSettings(); $('settings-appearance').click(); } });
 const permissions = await initPermissions({ el, message, show: () => { showSettings(); $('settings-permissions').click(); } });
 const delivery = await initDelivery({ el, message, show: () => { showSettings(); $('settings-delivery').click(); },
   editRelease: scope => { showSettings(); $('settings-pipelines').click(); pipelines.chat('Edit ' + scope + ' Release pipeline'); } });

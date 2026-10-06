@@ -1,12 +1,14 @@
 import { containsSecret } from '../connections/commands.mjs';
 
-export const appearanceKeys = Object.freeze(['appearance.theme', 'appearance.density', 'appearance.textScale', 'appearance.motion', 'appearance.technicalDetails']);
+export const appearanceKeys = Object.freeze(['appearance.theme', 'appearance.density', 'appearance.textScale', 'appearance.motion', 'appearance.technicalDetails', 'appearance.layout']);
 export const notificationKey = 'appearance.repositoryNotifications';
-export const appearanceShapes = Object.freeze({ view: [[], ['scope']], chat: [['text'], []], prepare: [['changes'], ['scope']], reset: [[], ['scope']], apply: [[], ['hash']], cancel: [[], []] });
+export const appearanceShapes = Object.freeze({ view: [[], ['scope']], chat: [['text'], []], prepare: [['changes'], ['scope']], reset: [[], ['scope']], 'reset-layout': [[], []], apply: [[], ['hash']], cancel: [[], []] });
 export function appearanceCommand(text) {
   if (typeof text !== 'string' || text.length > 2000 || containsSecret(text) || /["`<>\n\r]/.test(text)) return null;
   const input = text.trim().replace(/[.!?]$/, ''); let match;
   if (/^(?:show|manage|open) (?:appearance|accessibility|appearance and accessibility)(?: settings)?$/i.test(input)) return { operation: 'view' };
+  if ((match = /^show (?:current )?work (above|beside) chat$/i.exec(input))) return { operation: 'prepare', changes: { 'appearance.layout': match[1].toLowerCase() } };
+  if (/^(?:restore|reset) layout$/i.test(input)) return { operation: 'reset-layout' };
   if ((match = /^(show|hide) technical details$/i.exec(input))) return { operation: 'prepare', changes: { 'appearance.technicalDetails': match[1].toLowerCase() === 'show' } };
   if ((match = /^(?:turn|switch) (on|off) in-app notifications (globally|for this repository)$/i.exec(input))) return { operation: 'prepare', scope: match[2].toLowerCase() === 'globally' ? 'global' : 'repository', changes: { [notificationKey]: match[1].toLowerCase() === 'on' } };
   if (/^(?:show|manage|open) (?:in-app )?notification(?:s| settings)$/i.test(input)) return { operation: 'view' };

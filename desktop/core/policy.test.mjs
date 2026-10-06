@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import { openPolicyStore } from './policy.mjs';
-import { settingsSchema, developmentTemplate, releaseTemplate, legacyDefaults, canonicalJSON } from './settings.mjs';
+import { settingsSchema, developmentTemplate, releaseTemplate, legacyDefaults, canonicalJSON, validateState } from './settings.mjs';
 import { createControlChannel } from './control.mjs';
 import { createConfigurationExport, configurationChanges } from '../privacy/model.mjs';
 
@@ -43,10 +43,27 @@ test('additive scheduling schema reads immutable legacy policy hashes and upgrad
   const input = old.control.capture({ commandId: 'legacy-edit', conversationId: 'legacy-chat', target: repository, text: 'Use a 45 minute interval.' });
   const p = old.control.prepare({ inputId: input.id, requestId: 'legacy-preview', target: repository, scope: 'repository', changes: { 'scheduling.intervalMinutes': 45 }, reset: [] });
   old.control.apply({ commandId: 'legacy-apply', proposalId: p.id, inputId: p.inputId, hash: p.hash, conversationId: 'legacy-chat', target: repository });
-  assert.equal(old.worker.read(repository).schemaVersion, 3); assert.equal(old.worker.read(repository, 0).hash, hash); assert.equal(old.worker.read(repository, 0).values['scheduling.enabled'].value, false);
+  assert.equal(old.worker.read(repository).schemaVersion, 4); assert.equal(old.worker.read(repository, 0).hash, hash); assert.equal(old.worker.read(repository, 0).values['scheduling.enabled'].value, false);
   assert.equal(old.worker.read(repository).values['scheduling.intervalMinutes'].value, 45);
 });
 
+test('layout preserves exact schema-three defaults and hashes until an explicit host edit', t => {
+  const f=fixture(t);f.store.close();
+  const oldDefaults=Object.fromEntries(settingsSchema().filter(field=>field.id!=='appearance.layout').map(field=>[field.id,field.defaultValue]));
+  assert.equal(createHash('sha256').update(canonicalJSON(oldDefaults)).digest('hex'),'2c6c3390fae4b7b7b0ed5a274ee424b2145bc71f1964f5a3376ebca960b20393');
+  const document={schemaVersion:3,defaults:oldDefaults,host:{'appearance.theme':'dark'},global:{},repositories:{}}, hash=createHash('sha256').update(canonicalJSON({document,catalog:facts()})).digest('hex');
+  assert.throws(()=>validateState({...document,host:{...document.host,'appearance.layout':'beside'}}),/current policy schema/);
+  assert.throws(()=>validateState({...document,defaults:{...oldDefaults,'appearance.layout':'above'}}),/schema or defaults/);
+  const db=new DatabaseSync(join(f.directory,'policy.sqlite'));db.exec('DROP TRIGGER immutable_policy_update');db.prepare('UPDATE policy_versions SET document=?,hash=? WHERE revision=0').run(canonicalJSON(document),hash);db.close();
+  const old=f.open();assert.equal(old.worker.read(null).hash,hash);assert.equal(old.worker.read(null).schemaVersion,3);
+  assert.equal(old.worker.read(null).values['appearance.layout'].value,'above');
+  const input=old.control.capture({commandId:'layout-input',conversationId:'layout-chat',target:null,text:'Show work beside chat'});
+  const p=old.control.prepare({inputId:input.id,requestId:'layout-proposal',scope:'host',target:null,changes:{'appearance.layout':'beside'},reset:[]});
+  old.control.apply({commandId:'layout-apply',proposalId:p.id,inputId:p.inputId,hash:p.hash,conversationId:'layout-chat',target:null});
+  assert.equal(old.worker.read(null).schemaVersion,4);assert.equal(old.worker.read(null,0).hash,hash);
+  assert.equal(old.worker.read(null).values['appearance.theme'].value,'dark');
+  assert.equal(old.worker.read(null).values['appearance.layout'].value,'beside');
+});
 test('calendar policy requires explicit complete named-zone configuration before enabling', t => {
   const f = fixture(t);
   assert.throws(() => f.proposal({ 'scheduling.enabled': true, 'scheduling.mode': 'calendar' }), /Calendar/);
@@ -58,7 +75,7 @@ test('calendar policy requires explicit complete named-zone configuration before
 
 test('tools have empty safe defaults; exact legacy version two survives reopen until PM apply', t => {
   const f = fixture(t); f.store.close();
-  const settings = settingsSchema(), oldDefaults = Object.fromEntries(settings.filter(field => !field.id.startsWith('tools.')).map(field => [field.id, field.defaultValue]));
+  const settings = settingsSchema(), oldDefaults = Object.fromEntries(settings.filter(field => !field.id.startsWith('tools.') && field.id !== 'appearance.layout').map(field => [field.id, field.defaultValue]));
   assert.equal(createHash('sha256').update(canonicalJSON(oldDefaults)).digest('hex'), 'df27c746de7ab30bd9ec014966e681844eb1f4d29dc5bbc57e6a2d4c4a646883', 'defaults match the actual committed schema-two candidate');
   const document = { schemaVersion: 2, defaults: oldDefaults, host: {}, global: {}, repositories: {} }, hash = createHash('sha256').update(canonicalJSON({ document, catalog: facts() })).digest('hex');
   const db = new DatabaseSync(join(f.directory, 'policy.sqlite')); db.exec('DROP TRIGGER immutable_policy_update'); db.prepare('UPDATE policy_versions SET document=?,hash=? WHERE revision=0').run(canonicalJSON(document), hash); db.close();
@@ -67,7 +84,7 @@ test('tools have empty safe defaults; exact legacy version two survives reopen u
   const input = reopened.control.capture({ commandId: 'v2-edit', conversationId: 'v2-chat', target: repository, text: 'Change interval to 35 minutes.' });
   const preview = reopened.control.prepare({ inputId: input.id, requestId: 'v2-preview', scope: 'repository', target: repository, changes: { 'scheduling.intervalMinutes': 35 }, reset: [] });
   reopened.control.apply({ commandId: 'v2-apply', proposalId: preview.id, hash: preview.hash, inputId: input.id, conversationId: 'v2-chat', target: repository });
-  assert.equal(reopened.worker.read(repository).schemaVersion, 3); assert.equal(reopened.worker.read(repository, 0).hash, hash);
+  assert.equal(reopened.worker.read(repository).schemaVersion, 4); assert.equal(reopened.worker.read(repository, 0).hash, hash);
 });
 
 test('tool invocation needs captured pins and both permission scopes; disabling is durable across re-enable/restart', t => {

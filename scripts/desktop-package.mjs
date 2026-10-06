@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { runtimeInputs, readPackageInput } from '../desktop/package/inputs.mjs';
 import { sourceCandidate, committedInput } from '../desktop/package/source.mjs';
 import { embedIntegrityDigest } from '../desktop/package/integrity.mjs';
-import { buildIdentity, buildIdentityName } from '../desktop/package/build.mjs';
+import { buildIdentity, buildIdentityName, readBuildIdentity } from '../desktop/package/build.mjs';
 import { canonicalJSON } from '../desktop/core/settings.mjs';
 import { backgroundPlist, backgroundBundleId } from '../desktop/background/native.mjs';
 import { createPackageWithOptions, getRawHeader, extractFile, listPackage, statFile } from '../desktop/package/node_modules/@electron/asar/lib/asar.js';
@@ -136,6 +136,7 @@ try {
   for(const name of ['secure-entry','calendar','git-credential'])await sign(join(helpers,name));await sign(join(service,'PipelinerBackground'));
   await sign(app,true);await command('/usr/bin/codesign',['--verify','--deep','--strict',app]);
   await command('/usr/bin/codesign',['--verify','--deep','--strict','-R','=anchor apple generic and identifier "'+backgroundBundleId+'"',app]);
+  if(canonicalJSON(await readBuildIdentity(app))!==canonicalJSON(identity))throw new Error('package-build-identity-unverified');
   for(const option of ['--qualify','--data-directory=/synthetic-denied','--key-helper=/synthetic-denied','--calendar-helper=/synthetic-denied']){
     try{await command(join(contents,'MacOS/Pipeliner'),[option],{timeout:10000,maxBuffer:8192});throw new Error('package-startup-guard-failed');}
     catch(error){if(error.code!==2||error.stdout||!error.stderr?.includes('Pipeliner rejected an unsupported packaged startup option.'))throw new Error('package-startup-guard-failed');}

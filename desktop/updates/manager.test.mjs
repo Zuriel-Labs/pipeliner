@@ -3,7 +3,10 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, realpathSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, generateKeyPairSync, sign } from 'node:crypto';
+import { canonicalJSON } from '../core/settings.mjs';
+import { openVault } from '../connections/vault.mjs';
+import { openUpdateHistory } from './history.mjs';
 import { openPolicyStore } from '../core/policy.mjs';
 import { createUpdateManager } from './manager.mjs';
 import { updateCommand } from './commands.mjs';
@@ -16,7 +19,7 @@ function fixture() {
   let clock = 1000, refreshes = 0, failRefresh = false, policy = openPolicyStore(root, { catalog, clock: () => clock }), manager;
   const open = () => manager = createUpdateManager({ policy, version: '0.1.0', onApplied: () => { refreshes++; if (failRefresh) throw Error('private refresh detail'); } });
   open();
-  return { get manager() { return manager; }, get policy() { return policy; }, refreshes: () => refreshes,
+  return { root, get manager() { return manager; }, get policy() { return policy; }, refreshes: () => refreshes,
     time(value) { clock = value; }, failRefresh() { failRefresh = true; },
     edit(changes) {
       const conversationId = randomUUID(), input = policy.control.capture({ commandId: randomUUID(), conversationId, target: null, text: 'Direct synthetic PM edit.' });
@@ -65,6 +68,66 @@ test('Desktop update channel is host-only, exact, persisted and independent of u
     assert.equal(f.manager.status().values['updates.channel'].value, 'stable'); assert.equal(f.manager.status().sourceConfigured, true);
     assert.match(f.manager.status().message, /saved/); assert.doesNotMatch(JSON.stringify(f.manager.status()), /private refresh/);
   } finally { f.close(); }
+});
+
+test('update controls use protected signed history, exact host sources and awaited stale/cancelled completion', async () => {
+  const f = fixture(), { publicKey, privateKey } = generateKeyPairSync('ed25519');
+  const source = { id: 'approved-source', label: 'Synthetic Releases', key: publicKey, origin: 'https://updates.example.com', path: '/desktop/releases/' };
+  const release = { kind: 'pipeliner-desktop-update', schemaVersion: 1, source: source.id, channel: 'stable', platform: 'darwin', architecture: 'arm64',
+    version: '0.2.0', sequence: 1, issuedAt: 900, expiresAt: 100000000, url: source.origin + source.path + 'Pipeliner.dmg', bytes: 1000,
+    sha256: 'a'.repeat(64), sourceCommit: 'b'.repeat(40), gitTree: 'c'.repeat(40) };
+  const envelope = canonicalJSON({ release, signature: sign(null, Buffer.from(canonicalJSON(release)), privateKey).toString('base64') });
+  let now = 1000, trusted = true, foreground = true, mode = 'normal', calls = 0, settled = 0, releaseRead, update, vault, history;
+  try {
+    vault = await openVault(f.root, { available: async () => true, encrypt: async text => Buffer.from(text),
+      decrypt: async bytes => ({ result: bytes.toString(), shouldReEncrypt: false }) });
+    history = openUpdateHistory(f.root, { vault, clock: () => now });
+    const reader = async options => {
+      calls++; assert.equal(options.trust.id, source.id); assert.equal(options.current.channel, 'stable');
+      try {
+        if (mode === 'invalid') return { envelope: '{}', release, available: true };
+        if (mode === 'hold' || mode === 'late') {
+          const abortable = mode === 'hold';
+          return await new Promise((resolve, reject) => {
+            releaseRead = () => resolve({ envelope });
+            if (abortable) options.signal.addEventListener('abort', () => reject(Error('private synthetic transport detail')), { once: true });
+          });
+        }
+        if (options.current.sequence) assert.equal(options.retained, envelope);
+        return { envelope };
+      } finally { settled++; }
+    };
+    const open = () => createUpdateManager({ policy: f.policy, history, version: '0.1.0', sources: () => trusted ? [source] : [], reader,
+      foreground: () => foreground, host: { platform: 'darwin', architecture: 'arm64' } });
+    update = open(); await assert.rejects(update.dispatch({ operation: 'source', name: 'Unknown publisher' })); assert.equal(calls, 0);
+    await update.dispatch({ operation: 'chat', text: 'Use Desktop update source Synthetic Releases' });
+    assert.equal(update.status().preview.after['updates.source'].value, source.label);
+    assert.doesNotMatch(JSON.stringify(update.status()), /approved-source|updates\.example|BEGIN PUBLIC/);
+    await update.dispatch({ operation: 'apply' }); assert.equal(update.status().sourceQualified, true);
+    await update.dispatch({ operation: 'chat', text: 'Check for Desktop updates' });
+    assert.equal(update.status().lastCheck, now); assert.equal(update.status().release.version, '0.2.0'); assert.equal(update.status().installQualified, false);
+    await update.poll(); assert.equal(calls, 1);
+    await update.close(); update = open(); await update.poll(); assert.equal(calls, 1);
+    now += 86400000; foreground = false; await update.poll(); assert.equal(calls, 1);
+    foreground = true; await update.poll(); assert.equal(calls, 2); const checked = update.status().lastCheck;
+    mode = 'invalid'; await update.dispatch({ operation: 'check' }); assert.equal(update.status().lastCheck, checked);
+    assert.equal(update.status().release.version, '0.2.0'); assert.match(update.status().message, /could not be verified/);
+    mode = 'hold'; const changing = update.dispatch({ operation: 'check' }); assert.equal(update.status().busy, true);
+    const dispatched = calls; await update.dispatch({ operation: 'check' }); assert.equal(calls, dispatched);
+    f.edit({ 'appearance.theme': 'dark' }); update.sync(); await changing;
+    assert.equal(update.status().lastCheck, checked); assert.equal(settled, calls);
+    mode = 'late'; const stale = update.dispatch({ operation: 'check' }); f.edit({ 'appearance.density': 'compact' }); update.sync(); releaseRead(); await stale;
+    assert.equal(update.status().lastCheck, checked); assert.equal(settled, calls);
+    mode = 'hold'; const revoked = update.dispatch({ operation: 'check' }); trusted = false; update.sync(); await revoked;
+    assert.equal(update.status().sourceQualified, false); assert.equal(update.status().release, null); trusted = true; update.sync();
+    const cancelled = update.dispatch({ operation: 'check' }); await update.dispatch({ operation: 'chat', text: 'Cancel Desktop update check' }); await cancelled;
+    assert.equal(settled, calls); assert.equal(update.status().busy, false); assert.equal(update.status().lastCheck, checked);
+    const closing = update.dispatch({ operation: 'check' }), firstClose = update.close(); await update.close();
+    assert.equal(update.status().busy, false); await firstClose; await closing; assert.equal(settled, calls);
+    assert.equal(update.status().storageAvailable, false); await assert.rejects(update.dispatch({ operation: 'check' }));
+    assert.equal(history.read({ id: source.id, key: source.key, origin: source.origin, path: source.path },
+      { channel: 'stable', platform: 'darwin', architecture: 'arm64', version: '0.1.0' }).sequence, 1);
+  } finally { releaseRead?.(); await update?.close(); history?.close(); vault?.close(); f.close(); }
 });
 
 test('Desktop update controls reject stale, expired and untrusted input without broadening policy', async () => {

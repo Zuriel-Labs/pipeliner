@@ -1,39 +1,104 @@
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { canonicalJSON, record } from '../core/settings.mjs';
 import { updateShapes, updateCommand } from './commands.mjs';
+import { checkUpdateContext } from './manifest.mjs';
+import { readUpdateSource } from './source.mjs';
+import { endpointURL } from '../tools/transport.mjs';
 
-export function createUpdateManager({ policy, version = null, initialRevision = 1, onChange = () => {}, onApplied = () => {} }) {
-  if (!Number.isSafeInteger(initialRevision) || initialRevision < 1 || [onChange, onApplied].some(fn => typeof fn !== 'function')
+export function createUpdateManager({ policy, version = null, history = null, sources = () => [], reader = readUpdateSource,
+  host = { platform: process.platform, architecture: process.arch }, foreground = () => true, initialRevision = 1, onChange = () => {}, onApplied = () => {} }) {
+  record(host, ['platform', 'architecture']);
+  if (!Number.isSafeInteger(initialRevision) || initialRevision < 1 || [onChange, onApplied, sources, reader, foreground].some(fn => typeof fn !== 'function')
+    || history !== null && ['read', 'begin', 'complete', 'fail'].some(name => typeof history[name] !== 'function')
+    || Object.values(host).some(value => typeof value !== 'string' || !/^[a-z0-9_-]{1,16}$/.test(value))
     || version !== null && (typeof version !== 'string' || version.length > 128 || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?$/.test(version))) throw Error('Desktop update controls unavailable');
-  const conversationId = randomUUID(); let revision = initialRevision, observed, preview = null, applied = null, message = null, closed = false;
+  host = { ...host };
+  const conversationId = randomUUID(); let revision = initialRevision, observed, preview = null, applied = null, message = null, closed = false, pending = null;
+  function catalog() {
+    const input = sources(), ids = new Set(), labels = new Set(); if (!Array.isArray(input) || input.length > 64) throw Error();
+    const items = input.map(value => {
+      record(value, ['id', 'label', 'key', 'origin', 'path']);
+      const { label, ...trust } = value;
+      if (typeof label !== 'string' || !/^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,119}$/u.test(label) || ids.has(trust.id) || labels.has(label.toLowerCase())) throw Error();
+      checkUpdateContext(trust, { channel: 'stable', platform: 'darwin', architecture: 'arm64', version: '0.0.0', sequence: 0 }, Date.now());
+      endpointURL(trust.origin + trust.path + 'stable.json'); ids.add(trust.id); labels.add(label.toLowerCase());
+      return { label, trust, keyHash: createHash('sha256').update(trust.key.export({ type: 'spki', format: 'der' })).digest('hex') };
+    }).sort((a, b) => a.trust.id.localeCompare(b.trust.id));
+    const fingerprint = canonicalJSON(items.map(({ label, trust: { key: _key, ...trust }, keyHash }) => ({ label, ...trust, keyHash })));
+    return { items, fingerprint };
+  }
+  function inspect() {
+    const view = !closed && policy ? policy.worker.read(null) : null;
+    let approved; try { approved = catalog(); } catch { approved = { items: [], fingerprint: 'unavailable' }; }
+    const selected = approved.items.find(item => item.trust.id === view?.values['updates.source'].value) ?? null;
+    return { view, approved, selected, current: view ? { ...host, channel: view.values['updates.channel'].value, version } : null };
+  }
+  const signature = value => canonicalJSON({ revision: value.view?.revision ?? null, catalog: value.approved.fingerprint });
   function invalidate() { if (preview) policy.control.invalidate(preview.inputId); preview = null; applied = null; }
   function sync() {
-    if (closed) return;
-    const current = policy?.worker.read(null).revision ?? null;
-    if (observed !== undefined && current !== observed) { invalidate(); revision++; }
-    observed = current;
+    const value = inspect(), current = signature(value);
+    if (observed !== undefined && current !== observed) { invalidate(); pending?.controller.abort(); revision++; }
+    observed = current; return value;
   }
+  const capable = value => value.view && value.selected && history && version && host.platform === 'darwin' && host.architecture === 'arm64';
   function status() {
-    sync(); const view = !closed && policy ? policy.worker.read(null) : null;
+    const context = sync(), { view, selected, approved } = context; let saved = null;
+    try { if (capable(context)) saved = history.read(selected.trust, context.current); } catch { /* Preserve history and fail closed. */ }
+    const display = values => Object.fromEntries(Object.entries(values).filter(([id]) => ['updates.channel', 'updates.source'].includes(id)).map(([id, value]) =>
+      [id, id === 'updates.source' ? { ...value, value: value.value === null ? null : approved.items.find(item => item.trust.id === value.value)?.label ?? 'Unavailable saved source' } : value]));
     return { revision, storageAvailable: Boolean(view), scope: 'host', policyRevision: view?.revision ?? null, installedVersion: version,
       values: view ? { 'updates.channel': view.values['updates.channel'] } : null,
-      sourceConfigured: Boolean(view?.values['updates.source'].value), sourceQualified: false, installQualified: false, lastCheck: null, release: null,
+      sources: approved.items.map(item => ({ name: item.label })), sourceName: selected?.label ?? null,
+      sourceConfigured: Boolean(view?.values['updates.source'].value), sourceQualified: Boolean(saved), installQualified: false, busy: Boolean(pending),
+      lastCheck: saved?.lastCheck ?? null, upToDate: Boolean(saved?.availability && !saved.availability.available),
+      release: saved?.availability?.available ? Object.fromEntries(['version', 'channel', 'platform', 'architecture', 'sequence', 'bytes', 'sha256', 'sourceCommit', 'gitTree', 'expiresAt']
+        .map(key => [key, saved.availability.release[key]])) : null,
       preview: preview ? { hash: preview.hash, scope: preview.scope, target: preview.target, baseRevision: preview.baseRevision, expiresAt: preview.expiresAt,
-        before: { 'updates.channel': preview.before['updates.channel'] }, after: { 'updates.channel': preview.after['updates.channel'] } } : null, message };
+        before: display(preview.before), after: display(preview.after) } : null, message };
   }
-  function publish() { try { onChange(status()); } catch { message = 'Update view needs refresh. Reopen Settings to inspect the saved channel.'; } }
+  function publish() { try { onChange(status()); } catch { message = 'Update view needs refresh. Reopen Settings to inspect saved settings.'; } }
   function prepare(changes, reset = []) {
-    record(changes, [], ['updates.channel']); invalidate();
-    const input = policy.control.capture({ commandId: randomUUID(), conversationId, target: null, text: 'Review this Mac’s Desktop update channel.' });
+    record(changes, [], ['updates.channel', 'updates.source']); invalidate();
+    const input = policy.control.capture({ commandId: randomUUID(), conversationId, target: null, text: 'Review this Mac’s Desktop update settings.' });
     try {
       preview = policy.control.prepare({ inputId: input.id, requestId: randomUUID(), conversationId, scope: 'host', target: null, changes, reset });
-      message = 'Review this Mac’s update channel. Applying saves the channel only; no update is checked, downloaded or installed.';
+      message = 'Review this Mac’s update settings. Applying saves settings only; no update is checked, downloaded or installed.';
     } catch (error) {
       policy.control.invalidate(input.id);
       if (error.message !== 'Policy proposal has no change') throw error;
-      message = 'The update channel already matches. No configuration version was created.';
+      message = 'Desktop update settings already match. No configuration version was created.';
     }
     revision++; publish(); return { snapshot: status() };
+  }
+  async function check(manual) {
+    const context = sync(); if (pending) return { snapshot: status() };
+    if (!capable(context) || !status().sourceQualified) {
+      if (!manual) return { snapshot: status() };
+      revision++; message = 'Updates cannot be checked yet. A trusted source and protected update history need qualification. No check or download ran.';
+      publish(); return { snapshot: status() };
+    }
+    let attempt;
+    try { attempt = history.begin(context.selected.trust, context.current, { manual }); }
+    catch { revision++; message = 'Protected update history needs repair. No check or download ran.'; publish(); return { snapshot: status() }; }
+    if (!attempt) return { snapshot: status() };
+    const operation = { controller: new AbortController(), signature: signature(context) }; pending = operation;
+    revision++; message = 'Checking signed update availability. No installer is downloaded.';
+    operation.done = (async () => {
+      try {
+        operation.controller.signal.throwIfAborted(); if (signature(sync()) !== operation.signature || closed) throw Error();
+        const result = await reader({ trust: context.selected.trust, current: attempt.current, retained: attempt.retained, signal: operation.controller.signal });
+        operation.controller.signal.throwIfAborted(); if (signature(sync()) !== operation.signature || closed
+          || typeof result?.envelope !== 'string' || Buffer.byteLength(result.envelope) > 16384) throw Error();
+        const verified = history.complete(attempt.token, Buffer.from(result.envelope));
+        message = verified.available ? 'Version ' + verified.release.version + ' is available. Installation needs a verified installer and recovery plan.'
+          : 'No newer signed release was provided. No installer was downloaded.';
+      } catch {
+        message = operation.controller.signal.aborted || closed ? 'Update check cancelled or changed. Previous verified history is preserved.'
+          : 'Update availability could not be verified. Previous verified history is preserved; retry Check Now when ready.';
+        try { history.fail(attempt.token); } catch { message = 'Protected update history needs repair. Existing data is preserved.'; }
+      } finally { pending = null; revision++; publish(); }
+    })();
+    publish(); await operation.done; return { snapshot: status() };
   }
   async function dispatch(payload) {
     sync(); if (closed || !policy) throw Error('Desktop update protected configuration unavailable'); canonicalJSON(payload);
@@ -41,22 +106,32 @@ export function createUpdateManager({ policy, version = null, initialRevision = 
     if (payload.operation === 'chat') {
       const action = updateCommand(payload.text); if (!action) throw Error('Desktop update command unavailable'); return dispatch(action);
     }
-    if (payload.operation === 'prepare') return prepare(payload.changes);
+    if (payload.operation === 'prepare') { record(payload.changes, [], ['updates.channel']); return prepare(payload.changes); }
+    if (payload.operation === 'source') {
+      if (payload.name === null) return prepare({ 'updates.source': null });
+      if (typeof payload.name !== 'string' || payload.name.length > 120) throw Error('Desktop update source unavailable');
+      const source = catalog().items.find(item => item.label.toLowerCase() === payload.name.trim().toLowerCase());
+      if (!source) throw Error('Desktop update source unavailable'); return prepare({ 'updates.source': source.trust.id });
+    }
+    if (payload.operation === 'check') return check(true);
+    if (payload.operation === 'stop') { const operation = pending; operation?.controller.abort(); await operation?.done; return { snapshot: status() }; }
     if (payload.operation === 'reset') return prepare({}, ['updates.channel']);
-    if (payload.operation === 'cancel') { invalidate(); revision++; message = 'Update channel change cancelled. Saved settings and app files are preserved.'; }
+    if (payload.operation === 'cancel') { invalidate(); revision++; message = 'Update settings change cancelled. Saved settings and app files are preserved.'; }
     else if (payload.operation === 'apply') {
       if (payload.hash !== undefined && (typeof payload.hash !== 'string' || !/^[a-f0-9]{64}$/.test(payload.hash))) throw Error('Desktop update preview changed');
       if (!preview) { if (applied && (payload.hash === undefined || applied === payload.hash)) return { snapshot: status(), applied: false }; throw Error('Desktop update preview unavailable'); }
       const p = preview; if (payload.hash !== undefined && payload.hash !== p.hash) throw Error('Desktop update preview changed');
       const result = policy.control.apply({ commandId: randomUUID(), proposalId: p.id, inputId: p.inputId, hash: p.hash, conversationId, target: null });
-      preview = null; applied = p.hash; observed = policy.worker.read(null).revision; revision++; message = 'Update channel saved for this Mac. No check, download, installation or restart ran.';
-      try { onApplied(); } catch { message = 'Update channel saved. Refresh did not finish; reopen Settings to inspect it.'; }
+      preview = null; applied = p.hash; observed = signature(inspect()); pending?.controller.abort(); revision++; message = 'Update settings saved for this Mac. No check, download, installation or restart ran.';
+      try { onApplied(); } catch { message = 'Update settings saved. Refresh did not finish; reopen Settings to inspect them.'; }
       publish(); return { snapshot: status(), applied: result.applied };
-    } else if (['check', 'install'].includes(payload.operation)) {
-      revision++; message = payload.operation === 'check' ? 'Updates cannot be checked yet. A trusted source reader needs qualification. No check or download ran.'
-        : 'Update installation is unavailable. A verified release, qualified installer and migration/recovery preview are required. No app files changed.';
+    } else if (payload.operation === 'install') {
+      revision++; message = 'Update installation is unavailable. A verified release, qualified installer and migration/recovery preview are required. No app files changed.';
     } else if (payload.operation !== 'view') throw Error('Desktop update operation unavailable');
     publish(); return { snapshot: status() };
   }
-  return Object.freeze({ status, dispatch, sync() { sync(); publish(); }, close() { if (!closed) { invalidate(); closed = true; } } });
+  return Object.freeze({ status, dispatch, sync() { sync(); publish(); },
+    async poll() { if (closed || foreground() !== true) return { snapshot: status() }; return check(false); },
+    async stop() { const operation = pending; operation?.controller.abort(); await operation?.done; },
+    async close() { if (!closed) { invalidate(); closed = true; } const operation = pending; operation?.controller.abort(); await operation?.done; } });
 }

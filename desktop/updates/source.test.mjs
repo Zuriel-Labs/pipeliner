@@ -61,7 +61,8 @@ test('update availability reads only pinned metadata and awaits cleanup for succ
   for (const change of [{ status: 302 }, { status: 204 }, { headers: { 'content-type': 'text/html' } }, { headers: { 'content-encoding': 'gzip' } },
     { body: Buffer.alloc(16385) }, { headers: { 'content-length': '16385' } }, { headers: { 'content-length': '0' } },
     { headers: { 'content-length': String(bytes.length + 1) } }, { chunks: [bytes, Buffer.from('x')] }, { body: Buffer.from('{}') },
-    { body: Buffer.from(bytes.toString().replace('0.2.0', '0.3.0')) }, { body: Buffer.from([255]) }, { interrupt: true },
+    { body: Buffer.from(bytes.toString().replace('0.2.0', '0.3.0')) }, { body: Buffer.from([255]) },
+    { body: Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), bytes]) }, { interrupt: true },
     { hang: true }, { hang: true, abort: true }, { expire: true }, { closeExpire: true }, { clockBack: true }]) {
     const before = closed; await assert.rejects(invoke(change), /^Error: update-source-unverified$/); assert.equal(closed, before + 1);
   }

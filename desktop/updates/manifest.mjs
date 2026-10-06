@@ -43,7 +43,7 @@ export function verifyUpdateAvailability(bytes, { trust, current, now }) {
   try {
     const origin = checkUpdateContext(trust, current, now);
     if (!Buffer.isBuffer(bytes) || !bytes.length || bytes.length > 16384) throw Error();
-    const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes), envelope = JSON.parse(text);
+    const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes), envelope = JSON.parse(text);
     canonicalJSON(envelope); record(envelope, ['release', 'signature']);
     if (text !== canonicalJSON(envelope) || typeof envelope.signature !== 'string' || envelope.signature.length !== 88) throw Error();
     const signature = Buffer.from(envelope.signature, 'base64'), release = envelope.release;

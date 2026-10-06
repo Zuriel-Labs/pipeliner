@@ -1,7 +1,7 @@
 'use strict';
 const assert = require('node:assert/strict');
-const { writeFileSync, mkdirSync, readFileSync, existsSync, lstatSync, readdirSync } = require('node:fs');
-const { createHash, randomUUID } = require('node:crypto');
+const { writeFileSync, mkdirSync, readFileSync, existsSync, lstatSync, readdirSync, mkdtempSync, realpathSync, unlinkSync, rmdirSync } = require('node:fs');
+const { createHash, randomUUID, generateKeyPairSync, sign } = require('node:crypto');
 const { join } = require('node:path');
 const { pathToFileURL } = require('node:url');
 
@@ -226,6 +226,85 @@ exports.run = async ({ window, directory, vault, privacy, delivery, updates, upd
     assert.deepEqual(Object.keys(updates.status().preview.after), ['updates.channel']);
     await chat('Apply this update change'); await wait(() => !updates.status().preview);
     assert.equal(policy.worker.read(null).values['updates.channel'].value, 'stable');
+  });
+  await check('updates-native-source-preview-signed-availability-cancellation-and-reflow', async () => {
+    const moduleAt = name => import(pathToFileURL(join(__dirname, name)).href), { ipcMain } = require('electron');
+    const { openPolicyStore } = await moduleAt('../core/policy.mjs'), { canonicalJSON } = await moduleAt('../core/settings.mjs');
+    const { openUpdateHistory } = await moduleAt('../updates/history.mjs'), { createUpdateManager } = await moduleAt('../updates/manager.mjs');
+    const { createUpdateControlChannel } = await moduleAt('../core/control.mjs');
+    const root = realpathSync(mkdtempSync(join(directory, 'update-controls-'))), owner = lstatSync(root), files = new Map();
+    const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+    const source = { id: 'synthetic-publisher', label: 'Synthetic Releases', key: publicKey, origin: 'https://updates.example.com', path: '/desktop/releases/' };
+    const now = Date.now(), release = { kind: 'pipeliner-desktop-update', schemaVersion: 1, source: source.id, channel: 'stable', platform: 'darwin', architecture: 'arm64',
+      version: '0.2.0', sequence: 1, issuedAt: now, expiresAt: now + 86400000, url: source.origin + source.path + 'Pipeliner.dmg', bytes: 1000,
+      sha256: 'a'.repeat(64), sourceCommit: 'b'.repeat(40), gitTree: 'c'.repeat(40) };
+    const envelope = canonicalJSON({ release, signature: sign(null, Buffer.from(canonicalJSON(release)), privateKey).toString('base64') });
+    let fixturePolicy, history, fixture, routed = false, trusted = true, held = false, calls = 0, settled = 0;
+    const reload = async () => {
+      await new Promise((resolve, reject) => { window.webContents.once('did-finish-load', resolve); window.webContents.once('did-fail-load', reject); window.reload(); });
+      await wait(() => js("Boolean(document.getElementById('update-source'))"));
+    };
+    try {
+      fixturePolicy = openPolicyStore(root, { catalog: () => ({ repositories: [], capabilities: [], maxConcurrency: 1,
+        background: false, connections: [], developers: [], extensions: [], updateSources: [source.id] }) });
+      history = openUpdateHistory(root, { vault });
+      for (const name of ['policy.sqlite', 'updates.sqlite']) files.set(name, lstatSync(join(root, name)));
+      fixture = createUpdateManager({ policy: fixturePolicy, history, version: '0.1.0', sources: () => trusted ? [source] : [],
+        host: { platform: 'darwin', architecture: 'arm64' }, initialRevision: updates.status().revision + 100,
+        onChange: snapshot => window.webContents.send('updates:status', snapshot), reader: async ({ signal }) => {
+          calls++;
+          try {
+            if (held) await new Promise((resolve, reject) => { signal.addEventListener('abort', () => reject(Error('synthetic-held-reader')), { once: true }); if (signal.aborted) reject(Error()); });
+            return { envelope };
+          } finally { settled++; }
+        } });
+      const strict = createUpdateControlChannel(fixture, { contents: window.webContents, url: window.webContents.mainFrame.url,
+        context: () => ({ revision: fixture.status().revision }) });
+      ipcMain.removeHandler('updates:control'); ipcMain.handle('updates:control', (event, payload) => strict.dispatch(event, payload)); routed = true;
+      await reload(); await js("document.getElementById('settings-nav').click();document.getElementById('settings-updates').click()");
+      await js("document.getElementById('update-source').value='Synthetic Releases';document.getElementById('update-source-form').requestSubmit()");
+      await wait(() => Boolean(fixture.status().preview));
+      assert.deepEqual(Object.keys(fixture.status().preview.after), ['updates.source']);
+      assert.equal(fixturePolicy.worker.read(null).values['updates.source'].value, null);
+      await js("document.getElementById('update-apply').scrollIntoView({block:'center'});document.getElementById('update-apply').focus()");
+      window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+      await wait(() => fixture.status().sourceQualified && !fixture.status().preview);
+      await wait(() => js("!document.getElementById('update-check').disabled"));
+      await js("document.getElementById('update-check').click()"); await wait(() => fixture.status().lastCheck !== null && !fixture.status().busy);
+      await wait(() => js("document.getElementById('update-availability').textContent.includes('0.2.0')"));
+      assert.equal(fixture.status().release.sha256, release.sha256); assert.equal(fixture.status().installQualified, false);
+      assert.equal(readFileSync(join(root, 'updates.sqlite')).includes(Buffer.from(envelope)), false);
+      assert.equal(await js("/updates\\.example|synthetic-publisher/.test(document.getElementById('update-settings').textContent)"), false);
+      const checked = fixture.status().lastCheck; held = true;
+      await chat('Check for Desktop updates'); await wait(() => fixture.status().busy && js("Boolean(document.getElementById('update-stop'))"));
+      await js("document.getElementById('settings-nav').click();document.getElementById('settings-updates').click();document.getElementById('update-stop').scrollIntoView({block:'center'});document.getElementById('update-stop').focus()");
+      window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+      await wait(() => !fixture.status().busy && settled === calls); assert.equal(fixture.status().lastCheck, checked);
+      await wait(() => js("!document.getElementById('update-stop') && document.activeElement.id==='update-channel'"));
+      trusted = false; fixture.sync(); await wait(() => js("document.getElementById('update-check').disabled && document.getElementById('update-source').value==='__unavailable__'"));
+      assert.equal(fixture.status().release, null);
+      appearance.dispatch({ operation: 'prepare', changes: { 'appearance.textScale': 2 } }); appearance.dispatch({ operation: 'apply' });
+      window.setSize(420, 760); await js('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+      assert.equal(await js('document.documentElement.scrollWidth<=innerWidth'), true);
+      assert.equal(await js("Array.from(document.querySelectorAll('#update-settings select')).every(input=>Array.from(document.querySelectorAll('#update-settings label')).some(label=>label.htmlFor===input.id))"), true);
+      assert.equal(await js("Array.from(document.querySelectorAll('#update-settings button,#update-settings select')).every(node=>node.getBoundingClientRect().height>=44)"), true);
+      measurements.push({ inspection: 'native-update-window-with-synthetic-reader', signedMetadata: true, publicTLSQualified: false,
+        sourcePreviewApplied: true, cancelledReaderSettled: settled === calls, dispatches: calls, installed: false });
+    } finally {
+      await fixture?.close(); history?.close(); fixturePolicy?.close();
+      if (routed) { ipcMain.removeHandler('updates:control'); ipcMain.handle('updates:control', (event, payload) => updateChannel.dispatch(event, payload)); }
+      window.setSize(1180, 840);
+      if (appearance.status().values?.['appearance.textScale'].value !== 1) { appearance.dispatch({ operation: 'prepare', changes: { 'appearance.textScale': 1 } }); appearance.dispatch({ operation: 'apply' }); }
+      const current = lstatSync(root); assert.equal(current.dev, owner.dev); assert.equal(current.ino, owner.ino);
+      assert.equal(current.uid, process.getuid()); assert.equal(current.mode & 0o777, 0o700); assert.equal(realpathSync(root), root);
+      assert.deepEqual(readdirSync(root).sort(), [...files.keys()].sort());
+      for (const [name, before] of files) {
+        const path = join(root, name), after = lstatSync(path); assert.equal(after.dev, before.dev); assert.equal(after.ino, before.ino);
+        assert.equal(after.isFile(), true); assert.equal(after.nlink, 1); assert.equal(after.uid, process.getuid()); assert.equal(after.mode & 0o777, 0o600);
+        unlinkSync(path);
+      }
+      rmdirSync(root); assert.equal(existsSync(root), false); if (routed) await reload();
+    }
   });
   await check('recovery-native-read-only-chat-settings-keyboard-and-scoped-navigation', async () => {
     const revision = policy.worker.read(null).revision;

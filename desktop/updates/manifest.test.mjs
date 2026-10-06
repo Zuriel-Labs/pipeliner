@@ -20,6 +20,7 @@ test('update metadata needs pinned signatures, fresh host-bound newer releases a
     assert.throws(() => verify(Buffer.from(canonicalJSON({ release, signature }))));
   }
   assert.throws(() => verify(Buffer.from(signed().toString() + '\n')));
+  assert.throws(() => verify(Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), signed()])));
   assert.throws(() => verify(signed(), { trust: { ...trust, key: privateKey } }));
   for (const changes of [{ channel: 'beta' }, { platform: 'win32' }, { architecture: 'x64' }, { source: 'foreign' }, { sequence: 3 }, { sequence: Infinity },
     { version: '0.1.0' }, { version: '0.0.99' }, { version: '0.1.0-alpha.1' }, { version: '00.2.0' }, { version: '0.2.0-alpha.01' },

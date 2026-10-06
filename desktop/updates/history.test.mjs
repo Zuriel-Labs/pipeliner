@@ -28,6 +28,7 @@ test('protected update history persists exact signed releases, fences completion
     const first = history.begin(trust, current); assert.equal(first.current.sequence, 0); assert.equal(first.retained, null); assert(Object.isFrozen(first.current));
     assert.throws(() => history.begin(trust, current), /update-history/);
     assert.throws(() => history.complete({}, bytes), /update-history/);
+    assert.throws(() => history.complete(first.token, Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), bytes])), /update-history/);
     const result = history.complete(first.token, bytes); assert.deepEqual(result, { release, available: true });
     assert.throws(() => history.complete(first.token, bytes), /update-history/);
     assert.equal(history.read(trust, current).sequence, 1);

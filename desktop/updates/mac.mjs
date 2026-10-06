@@ -12,6 +12,13 @@ function command(file, args, signal) {
     (error, stdout, stderr) => error ? reject(Error('update-native-trust-unverified')) : resolve({ stdout, stderr })));
 }
 const stable = (a, b) => ['dev', 'ino', 'mode', 'uid', 'nlink', 'size', 'mtimeMs', 'ctimeMs'].every(key => a[key] === b[key]);
+export function macUpdateRequirement(team) {
+  if (typeof team !== 'string' || !/^[A-Z0-9]{10}$/.test(team)) throw Error('update-native-trust-unverified');
+  return '=anchor apple generic and identifier "' + backgroundBundleId + '" and certificate 1[field.1.2.840.113635.100.6.2.6] exists' +
+    ' and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "' + team + '"' +
+    ['get-task-allow', 'cs.disable-library-validation', 'cs.allow-unsigned-executable-memory', 'cs.allow-dyld-environment-variables']
+      .map(key => ' and !(entitlement["com.apple.security.' + key + '"] exists)').join('');
+}
 
 // Host-only trust check. Its caller must obtain identity from authenticated history and reverify before installation.
 export async function verifyMacUpdateBundle(options, { run = command } = {}) {
@@ -20,7 +27,7 @@ export async function verifyMacUpdateBundle(options, { run = command } = {}) {
     if (process.platform !== 'darwin' || process.arch !== 'arm64' || typeof run !== 'function'
       || typeof bundle !== 'string' || resolve(bundle) !== bundle || !bundle.endsWith('.app') || /[\x00-\x1f\x7f]/.test(bundle)
       || typeof team !== 'string' || !/^[A-Z0-9]{10}$/.test(team) || options.signal !== undefined && !(options.signal instanceof AbortSignal)) throw Error();
-    const signal = options.signal ?? new AbortController().signal;
+    const signal = options.signal ?? new AbortController().signal, requirement = macUpdateRequirement(team);
     const executable = join(bundle, 'Contents/MacOS/Pipeliner'), plist = join(bundle, 'Contents/Info.plist'), resource = join(bundle, 'Contents/Resources', buildIdentityName);
     const paths = [bundle, plist, resource, executable], original = [];
     async function inspect() {
@@ -33,10 +40,6 @@ export async function verifyMacUpdateBundle(options, { run = command } = {}) {
       signal.throwIfAborted();
     }
     await inspect(); if (canonicalJSON(await readBuildIdentity(bundle, { signal })) !== canonicalJSON(identity)) throw Error();
-    const requirement = '=anchor apple generic and identifier "' + backgroundBundleId + '" and certificate 1[field.1.2.840.113635.100.6.2.6] exists' +
-      ' and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "' + team + '"' +
-      ['get-task-allow', 'cs.disable-library-validation', 'cs.allow-unsigned-executable-memory', 'cs.allow-dyld-environment-variables']
-        .map(key => ' and not (entitlement["com.apple.security.' + key + '"] = true)').join('');
     const verify = () => run('/usr/bin/codesign', ['--verify', '--deep', '--strict', '-R', requirement, bundle], signal);
     await verify();
     const details = (await run('/usr/bin/codesign', ['--display', '--verbose=4', bundle], signal)).stderr;

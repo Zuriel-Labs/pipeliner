@@ -29,7 +29,7 @@ test('Mac update trust binds signed build identity, pinned Developer ID and dist
       assert(requirement.includes('certificate leaf[field.1.2.840.113635.100.6.1.13] exists'));
       assert(requirement.includes('certificate leaf[subject.OU] = "' + team + '"'));
       for (const key of ['get-task-allow', 'cs.disable-library-validation', 'cs.allow-unsigned-executable-memory', 'cs.allow-dyld-environment-variables'])
-        assert(requirement.includes('not (entitlement["com.apple.security.' + key + '"] = true)'));
+        assert(requirement.includes('!(entitlement["com.apple.security.' + key + '"] exists)'));
       if (mode === 'signature' || mode === 'development') throw Error('Synthetic native refusal');
     }
     if (command === '/usr/bin/codesign' && args.includes('--display')) return { stdout: '', stderr:

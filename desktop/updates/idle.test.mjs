@@ -1,0 +1,52 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createMaintenanceGate } from './idle.mjs';
+import { createUpdateControlChannel } from '../core/control.mjs';
+
+test('host maintenance fences competing controls, stale continuations, late work and cancellation without stopping work', async () => {
+  let idle = true, inspecting = false, finishInspection, consumed = 0, detached, inspectionCalls = 0;
+  const gate = createMaintenanceGate({ ready: () => idle, verify: async () => {
+    inspectionCalls++; assert.equal(gate.active(), true); inspecting = true;
+    await new Promise(resolve => { finishInspection = resolve; }); inspecting = false; return true;
+  } });
+  const frame = { parent: null, url: 'pipeliner://app/index.html' }, contents = { mainFrame: frame, isDestroyed: () => false }, event = { sender: contents, senderFrame: frame };
+  const channel = createUpdateControlChannel({ status: () => ({ revision: 1 }), dispatch: () => gate.exclusive(async checkpoint => {
+    checkpoint(); consumed++; return { snapshot: { revision: 1 } };
+  }) }, { contents, url: frame.url, context: () => ({ revision: 1 }) });
+  const request = (event, payload) => gate.control(() => channel.dispatch(event, payload), { readOnly: payload?.operation === 'status' });
+  const payload = { operation: 'install', contextRevision: 1 };
+  idle = false;
+  await assert.rejects(request(event, payload), /maintenance-deferred/); assert.equal(inspectionCalls, 0); assert.equal(gate.active(), false);
+  idle = true;
+  let finishControl;
+  const competing = gate.control(() => new Promise(resolve => { finishControl = resolve; }));
+  await assert.rejects(request(event, payload), /maintenance-deferred/); assert.equal(inspectionCalls, 0);
+  finishControl(); await competing;
+  const install = request(event, payload); assert.equal(inspecting, true);
+  await assert.rejects(gate.control(() => { throw Error('Must not dispatch'); }), /maintenance-active/);
+  assert.deepEqual(await request(event, { operation: 'status' }), { revision: 1 });
+  await assert.rejects(request({ ...event, sender: {} }, { operation: 'status' }), /Untrusted/);
+  await assert.rejects(request(event, { operation: 'status', approved: true }));
+  await assert.rejects(request(event, { operation: 'install', contextRevision: 1, approved: true }), /maintenance-active/);
+  idle = false; finishInspection(); await assert.rejects(install, /maintenance-deferred/);
+  assert.equal(consumed, 0); assert.equal(gate.active(), false); assert.equal(inspecting, false);
+  idle = true;
+  const cancelled = new AbortController();
+  const operation = gate.control(() => gate.exclusive(() => { consumed++; }, { signal: cancelled.signal }));
+  cancelled.abort(); finishInspection(); await assert.rejects(operation, /abort/i); assert.equal(consumed, 0); assert.equal(gate.active(), false);
+  let checkpoint;
+  const success = gate.control(() => gate.exclusive(check => { checkpoint = check; check(); consumed++; return 'prepared'; }));
+  finishInspection(); assert.equal(await success, 'prepared'); assert.equal(consumed, 1); assert.equal(gate.active(), false);
+  assert.throws(checkpoint, /maintenance-inactive/);
+  let releaseDetached;
+  const detachedReady = new Promise(resolve => { releaseDetached = resolve; });
+  await gate.control(() => { detached = detachedReady.then(() => gate.exclusive(() => { consumed++; })); });
+  const other = gate.control(() => new Promise(resolve => { finishControl = resolve; }));
+  releaseDetached(); await assert.rejects(detached, /maintenance-deferred/); finishControl(); await other;
+  assert.equal(consumed, 1); assert.equal(gate.active(), false);
+  await assert.rejects(gate.exclusive(() => {}, { signal: cancelled.signal }), /abort/i);
+  const refusal = createMaintenanceGate({ ready: () => true, verify: async () => false });
+  await assert.rejects(refusal.exclusive(() => { consumed++; }), /maintenance-unverified/); assert.equal(refusal.active(), false);
+  const failed = createMaintenanceGate({ ready: () => { throw Error('private storage detail'); }, verify: async () => true });
+  await assert.rejects(failed.exclusive(() => {}), /maintenance-deferred/); assert.equal(failed.active(), false);
+});

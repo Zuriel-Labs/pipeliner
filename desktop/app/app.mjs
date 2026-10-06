@@ -134,7 +134,7 @@ const scheduling = await initScheduling({ el, message });
 const background = await initBackground({ el, message });
 const skills = await initSkills({ el, message });
 const tools = await initTools({ el, message });
-const appearance = await initAppearance({ el, message, show: () => { showSettings(); $('settings-appearance').click(); } });
+const appearance = await initAppearance({ el, message, onPreferences: snapshot => development.preferences(snapshot), show: () => { showSettings(); $('settings-appearance').click(); } });
 const permissions = await initPermissions({ el, message, show: () => { showSettings(); $('settings-permissions').click(); } });
 const delivery = await initDelivery({ el, message, show: () => { showSettings(); $('settings-delivery').click(); },
   editRelease: scope => { showSettings(); $('settings-pipelines').click(); pipelines.chat('Edit ' + scope + ' Release pipeline'); } });

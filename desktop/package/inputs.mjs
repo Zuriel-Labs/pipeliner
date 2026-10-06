@@ -6,7 +6,7 @@ export { packagedCodexPath } from '../codex/executable.mjs';
 // Fixed reviewed runtime inputs. Repository docs, tests, launchers and home skills are never selected.
 const paths = [
   'LICENSE', ...['project','config','qa','showcase','release-cycle','cleanup'].map(n=>'scripts/lib/'+n+'.mjs'), 'desktop/authority/Dockerfile', 'desktop/prototype/style.css',
-  ...['main.cjs','preload.cjs','index.html','app.css','app.mjs','appearance.mjs','delivery.mjs','permissions.mjs','background.mjs','development.mjs','issues.mjs','pipelines.mjs','scheduling.mjs','skills.mjs','tools.mjs','privacy.mjs','workspaces.mjs'].map(n=>'desktop/app/'+n),
+  ...['main.cjs','preload.cjs','index.html','app.css','app.mjs','appearance.mjs','delivery.mjs','permissions.mjs','background.mjs','development.mjs','notices.mjs','issues.mjs','pipelines.mjs','scheduling.mjs','skills.mjs','tools.mjs','privacy.mjs','workspaces.mjs'].map(n=>'desktop/app/'+n),
   ...['commands.mjs','manager.mjs'].map(n=>'desktop/appearance/'+n),
   ...['commands.mjs','manager.mjs','mac.mjs','artifacts.mjs'].map(n=>'desktop/delivery/'+n),
   ...['commands.mjs','manager.mjs'].map(n=>'desktop/permissions/'+n),

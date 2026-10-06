@@ -5,7 +5,7 @@ const { join } = require('node:path');
 const { nativeTheme } = require('electron');
 
 // Development-only. Actual renderer, native theme, keyboard and protected policy; no Human/VoiceOver acceptance claim.
-exports.run = async ({ window, directory, appearance, channel, policy, js, wait, check }) => {
+exports.run = async ({ window, directory, appearance, channel, policy, development, js, wait, check }) => {
   const chat = text => js(`document.getElementById('chat-nav').click();document.getElementById('prompt').value=${JSON.stringify(text)};document.getElementById('composer').requestSubmit()`);
   const show = () => js("document.getElementById('settings-nav').click();document.getElementById('settings-appearance').click()");
   async function change(text) { await chat(text); await wait(() => Boolean(appearance.status().preview)); await chat('Apply this appearance change'); await wait(() => !appearance.status().preview); }
@@ -55,6 +55,45 @@ exports.run = async ({ window, directory, appearance, channel, policy, js, wait,
     appearance.dispatch({ operation: 'cancel' });
     assert.throws(() => channel.dispatch({ sender: window.webContents, senderFrame: frame }, { operation: 'apply', hash: old.preview.hash, contextRevision: old.revision }));
     assert.equal(policy.worker.read(null).revision, version);
+  });
+  await check('appearance-technical-detail-chat-default-native-keyboard-and-refresh', async () => {
+    await change('Show technical details'); assert.equal(appearance.status().values['appearance.technicalDetails'].value, true);
+    const snapshot = development.status(), display = { ...snapshot, revision: snapshot.revision + 100, run: { id: 'synthetic-display-run', issue: 54, control: 'paused', limits: {} },
+      development: { state: 'executing', turns: 1, stepTurns: 1, usage: { input: 2, output: 1, unavailable: true } }, qa: null, publication: null, pending: [] };
+    window.webContents.send('development:status', display); await wait(() => js("Boolean(document.getElementById('chat-development-technical'))"));
+    assert.equal(await js("document.getElementById('chat-development-technical').open"), true);
+    await js("document.getElementById('chat-nav').click();document.getElementById('chat-development-technical-summary').focus()");
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+    await wait(() => js("!document.getElementById('chat-development-technical').open"));
+    window.webContents.send('development:status', { ...display, revision: display.revision + 1 });
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.equal(await js("document.getElementById('chat-development-technical').open"), false);
+    assert.equal(await js('document.activeElement.id'), 'chat-development-technical-summary');
+    assert.equal(await js("!document.getElementById('chat-development-pause').closest('details') && !document.getElementById('chat-development-stop').closest('details')"), true);
+    await change('Hide technical details');
+    await new Promise((resolve, reject) => { window.webContents.once('did-finish-load', resolve); window.webContents.once('did-fail-load', reject); window.reload(); });
+    await wait(() => js("Boolean(document.getElementById('appearance-form'))"));
+    assert.equal(await js("document.getElementById('appearance-technicalDetails').value"), 'false');
+    assert.equal(development.status().run, null); // Display fixture grants no execution authority.
+  });
+  await check('appearance-in-app-notifications-scope-native-apply-cancel-inheritance', async () => {
+    const selected = appearance.status().repository; assert(selected);
+    await change('Turn off in-app notifications globally');
+    assert.equal(appearance.status().notificationsEnabled, false);
+    await chat('Turn on in-app notifications for this repository'); await wait(() => Boolean(appearance.status().preview));
+    assert.equal(appearance.status().preview.target, selected.id);
+    await chat('Cancel this appearance change'); await wait(() => !appearance.status().preview);
+    assert.equal(appearance.status().notificationsEnabled, false);
+    await chat('Turn on in-app notifications for this repository'); await wait(() => Boolean(appearance.status().preview)); await show();
+    await js("document.getElementById('appearance-apply').focus()"); window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+    await wait(() => appearance.status().notificationsEnabled);
+    assert.equal(policy.worker.read(selected.id).values['appearance.repositoryNotifications'].source, 'repository');
+    await chat('Reset repository in-app notifications'); await wait(() => Boolean(appearance.status().preview)); await chat('Apply this appearance change'); await wait(() => !appearance.status().preview);
+    assert.equal(appearance.status().notificationsEnabled, false);
+    assert.equal(policy.worker.read(selected.id).values['appearance.repositoryNotifications'].source, 'global');
+    assert.equal(policy.worker.read(null).values['appearance.osNotifications'].value, false);
+    await chat('Reset global in-app notifications'); await wait(() => Boolean(appearance.status().preview)); await chat('Apply this appearance change'); await wait(() => !appearance.status().preview);
+    assert.equal(appearance.status().notificationsEnabled, true);
   });
   await check('appearance-200-percent-reflow-labels-touch-targets-and-motion', async () => {
     await change('Set text size to 200%'); await change('Use dark mode'); await show();

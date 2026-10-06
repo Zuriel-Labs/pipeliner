@@ -1,6 +1,6 @@
 import { appearanceCommand } from './appearance-commands.mjs';
 
-export async function initAppearance({ el, message, show }) {
+export async function initAppearance({ el, message, show, onPreferences = () => {} }) {
   const $ = id => document.getElementById(id);
   let state, pending = false, lastMessage;
   const category = el('button', 'Appearance and Accessibility', 'category-button'); category.id = 'settings-appearance'; category.setAttribute('aria-pressed', 'false');
@@ -9,21 +9,23 @@ export async function initAppearance({ el, message, show }) {
   const chatPreview = el('section'); chatPreview.id = 'appearance-chat-preview'; chatPreview.setAttribute('aria-label', 'Current appearance preview'); $('composer').before(chatPreview);
   const labels = { system: 'Follow this Mac', light: 'Light', dark: 'Dark', comfortable: 'Comfortable', compact: 'Compact', reduced: 'Reduced motion' };
   const percentage = value => Number((value * 100).toPrecision(15));
-  const readable = (key, value) => key === 'appearance.textScale' ? percentage(value) + '%' : labels[value] ?? String(value);
+  const readable = (key, value) => typeof value === 'boolean' ? value ? 'On' : 'Off' : key === 'appearance.textScale' ? percentage(value) + '%' : labels[value] ?? String(value);
   function button(text, operation, extra = {}, id) {
     const node = el('button', text, operation === 'apply' ? 'primary' : 'secondary'); node.type = 'button'; node.id = id;
     node.disabled = !state.storageAvailable || pending; node.addEventListener('click', () => request({ operation, ...extra })); return node;
   }
   function preview(p, suffix = '') {
-    const card = el('article', undefined, 'setup-preview'); card.id = 'appearance-preview' + suffix; card.append(el('h3', 'Review this Mac’s display'),
-      el('p', 'From configuration version ' + p.baseRevision + '. Display changes immediately when applied. Active work keeps its captured configuration.', 'small'));
+    const host = p.scope === 'host', name = host ? 'This Mac' : p.scope === 'global' ? 'Global defaults' : p.targetName;
+    const card = el('article', undefined, 'setup-preview'); card.id = 'appearance-preview' + suffix; card.append(el('h3', host ? 'Review this Mac’s display' : 'Review in-app notifications'),
+      el('p', name + ' · configuration version ' + p.baseRevision + '. ' + (host ? 'Display changes immediately when applied. Active work keeps its captured configuration.' : 'Ordinary replies, controls and error guidance remain available. OS notifications are unchanged.'), 'small'));
     for (const [key, row] of Object.entries(p.after)) card.append(el('p', row.label + ': ' + readable(key, p.before[key].value) + ' becomes ' + readable(key, row.value) + '. Source: ' + row.source + '.'));
     card.append(button('Apply appearance change', 'apply', { hash: p.hash }, 'appearance-apply' + suffix), button('Cancel change', 'cancel', {}, 'appearance-cancel' + suffix)); return card;
   }
   function render(snapshot) {
     if (state && snapshot.revision < state.revision) return;
     const focused = document.activeElement?.id, form = $('appearance-form'), unchanged = state && JSON.stringify(state.values) === JSON.stringify(snapshot.values),
-      draft = unchanged && form ? Object.fromEntries([...form.querySelectorAll('[data-key]')].map(input => [input.dataset.key, input.value])) : null;
+      draft = unchanged && form ? Object.fromEntries([...form.querySelectorAll('[data-key]')].map(input => [input.dataset.key, input.value])) : null,
+      notificationDraft = state && JSON.stringify(state.notification) === JSON.stringify(snapshot.notification) ? $('appearance-notification-value')?.value : undefined;
     state = snapshot;
     if (state.values) {
       const root = document.documentElement;
@@ -37,22 +39,39 @@ export async function initAppearance({ el, message, show }) {
     if (!state.storageAvailable) nodes.push(el('p', 'Protected configuration is loading or unavailable. Preferences stay blocked until it opens safely.', 'availability'));
     else {
       const form = el('form', undefined, 'connection-card'); form.id = 'appearance-form';
-      for (const [key, options] of [['appearance.theme', ['system', 'light', 'dark']], ['appearance.density', ['comfortable', 'compact']], ['appearance.textScale', null], ['appearance.motion', ['system', 'reduced']]]) {
+      for (const [key, options] of [['appearance.theme', ['system', 'light', 'dark']], ['appearance.density', ['comfortable', 'compact']], ['appearance.textScale', null], ['appearance.motion', ['system', 'reduced']], ['appearance.technicalDetails', [false, true]]]) {
         const value = state.values[key], row = el('div', undefined, 'setup-field'), label = el('label', value.label + (options ? '' : ' (%)')), input = el(options ? 'select' : 'input');
         input.id = key.replaceAll('.', '-'); label.htmlFor = input.id; input.dataset.key = key;
-        if (options) for (const value of options) { const option = el('option', labels[value]); option.value = value; input.append(option); }
+        if (options) for (const value of options) { const option = el('option', typeof value === 'boolean' ? value ? 'Show by default' : 'Collapsed by default' : labels[value]); option.value = value; input.append(option); }
         else { input.type = 'number'; input.min = 100; input.max = 200; input.step = 'any'; input.required = true; }
-        input.dataset.current = options ? value.value : percentage(value.value);
+        input.dataset.current = options ? value.value : percentage(value.value); input.dataset.boolean = String(typeof value.value === 'boolean');
         input.value = draft?.[key] ?? input.dataset.current; input.disabled = pending;
         row.append(label, input, el('p', 'Source: ' + value.source + '. Applies immediately after your change.', 'small')); form.append(row);
       }
       const submit = el('button', 'Review display change', 'primary'); submit.type = 'submit'; submit.disabled = pending; form.append(submit);
-      form.addEventListener('submit', event => { event.preventDefault(); request({ operation: 'prepare', changes: Object.fromEntries([...form.querySelectorAll('[data-key]')].filter(input => input.value !== input.dataset.current).map(input => [input.dataset.key, input.dataset.key === 'appearance.textScale' ? Number(input.value) / 100 : input.value])) }); });
+      form.addEventListener('submit', event => { event.preventDefault(); request({ operation: 'prepare', changes: Object.fromEntries([...form.querySelectorAll('[data-key]')].filter(input => input.value !== input.dataset.current).map(input => [input.dataset.key, input.dataset.boolean === 'true' ? input.value === 'true' : input.dataset.key === 'appearance.textScale' ? Number(input.value) / 100 : input.value])) }); });
       form.append(button('Review default appearance', 'reset', {}, 'appearance-reset')); nodes.push(form);
+      const notification = el('article', undefined, 'connection-card'), selected = state.notification;
+      notification.append(el('h3', 'In-app notifications'), el('p', 'Optional notices highlight required PM action, meaningful failure and candidate readiness. Ordinary replies, controls and error guidance remain available.', 'small'));
+      const scopes = el('div', undefined, 'connection-actions');
+      for (const [scope, label] of [['global', 'Global defaults'], ['repository', state.repository?.name ?? 'Choose a repository']]) {
+        const node = button(label, 'view', { scope }, 'appearance-notification-' + scope); node.setAttribute('aria-pressed', String(selected.scope === scope));
+        if (scope === 'repository' && !state.repository) node.disabled = true; scopes.append(node);
+      }
+      notification.append(scopes, el('p', (selected.scope === 'repository' ? state.repository.name : 'Global defaults') + ' · Saved: ' + readable('', selected.field.value) + ' · Source: ' + selected.field.source, 'protected-state'));
+      const notificationForm = el('form'), field = el('div', undefined, 'setup-field'), label = el('label', 'In-app notices for this scope'), input = el('select');
+      input.id = 'appearance-notification-value'; label.htmlFor = input.id;
+      for (const [value, text] of [['true', 'On'], ['false', 'Off']]) { const option = el('option', text); option.value = value; input.append(option); }
+      input.value = notificationDraft ?? String(selected.field.value); input.disabled = pending; field.append(label, input); notificationForm.append(field);
+      const submitNotification = el('button', 'Review notification change', 'primary'); submitNotification.type = 'submit'; submitNotification.disabled = pending;
+      notificationForm.append(submitNotification, button('Review inherited notifications', 'reset', { scope: selected.scope }, 'appearance-notification-reset'));
+      notificationForm.addEventListener('submit', event => { event.preventDefault(); request({ operation: 'prepare', scope: selected.scope, changes: { 'appearance.repositoryNotifications': input.value === 'true' } }); });
+      notification.append(notificationForm, el('p', 'OS notifications: Off. Native delivery is not qualified for this installation.', 'small')); nodes.push(notification);
     }
     if (state.preview) nodes.push(preview(state.preview)); chatPreview.replaceChildren(...(state.preview ? [preview(state.preview, '-chat')] : []));
     if (state.message) nodes.push(el('p', state.message, 'protected-state'));
     section.replaceChildren(...nodes); if (focused && $(focused) && !$(focused).disabled) $(focused).focus({ preventScroll: true });
+    onPreferences(state);
     if (state.message && state.message !== lastMessage) { message(state.message, false); $('announcement').textContent = state.message; lastMessage = state.message; }
   }
   async function request(payload, text) {

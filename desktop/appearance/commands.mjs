@@ -1,11 +1,16 @@
 import { containsSecret } from '../connections/commands.mjs';
 
-export const appearanceKeys = Object.freeze(['appearance.theme', 'appearance.density', 'appearance.textScale', 'appearance.motion']);
-export const appearanceShapes = Object.freeze({ view: [[], []], chat: [['text'], []], prepare: [['changes'], []], reset: [[], []], apply: [[], ['hash']], cancel: [[], []] });
+export const appearanceKeys = Object.freeze(['appearance.theme', 'appearance.density', 'appearance.textScale', 'appearance.motion', 'appearance.technicalDetails']);
+export const notificationKey = 'appearance.repositoryNotifications';
+export const appearanceShapes = Object.freeze({ view: [[], ['scope']], chat: [['text'], []], prepare: [['changes'], ['scope']], reset: [[], ['scope']], apply: [[], ['hash']], cancel: [[], []] });
 export function appearanceCommand(text) {
   if (typeof text !== 'string' || text.length > 2000 || containsSecret(text) || /["`<>\n\r]/.test(text)) return null;
   const input = text.trim().replace(/[.!?]$/, ''); let match;
   if (/^(?:show|manage|open) (?:appearance|accessibility|appearance and accessibility)(?: settings)?$/i.test(input)) return { operation: 'view' };
+  if ((match = /^(show|hide) technical details$/i.exec(input))) return { operation: 'prepare', changes: { 'appearance.technicalDetails': match[1].toLowerCase() === 'show' } };
+  if ((match = /^(?:turn|switch) (on|off) in-app notifications (globally|for this repository)$/i.exec(input))) return { operation: 'prepare', scope: match[2].toLowerCase() === 'globally' ? 'global' : 'repository', changes: { [notificationKey]: match[1].toLowerCase() === 'on' } };
+  if (/^(?:show|manage|open) (?:in-app )?notification(?:s| settings)$/i.test(input)) return { operation: 'view' };
+  if ((match = /^reset (global|repository) (?:in-app )?notifications(?: settings)?$/i.exec(input))) return { operation: 'reset', scope: match[1].toLowerCase() };
   if ((match = /^(?:use|switch to|set theme to) (system|light|dark)(?: mode| theme)?$/i.exec(input))) return { operation: 'prepare', changes: { 'appearance.theme': match[1].toLowerCase() } };
   if (/^follow (?:the )?system theme$/i.test(input)) return { operation: 'prepare', changes: { 'appearance.theme': 'system' } };
   if ((match = /^(?:use|set density to) (comfortable|compact)(?: density| spacing)?$/i.exec(input))) return { operation: 'prepare', changes: { 'appearance.density': match[1].toLowerCase() } };

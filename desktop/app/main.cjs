@@ -32,7 +32,7 @@ if (!app.requestSingleInstanceLock()) app.exit(0);
 let window, manager, vault, workspaces, workspaceStore, issues, pipelines, policy, development, developmentStore, supervisor, scheduling, scheduler, background, backgroundHost, backgroundNative, skills, skillStore, tools, toolStore, toolConnections, privacy, privacyRecords, appearance, delivery, permissions, artifacts, retentionMonitor, attachWindow, attachment, requestShutdown, authorizationMonitor, shutdownPaused = false, closing = false, verifiedClose = false;
 const hostCapabilities = Object.freeze(['workspace.read', 'workspace.write', 'worker.exec', 'provider.turn', 'git.push', 'github.read', 'github.issue.write', 'github.pr.write', 'github.project.write', 'extension.install', 'extension.invoke']);
 const moduleAt = file => import(pathToFileURL(path.join(__dirname, file)).href);
-const assets = new Map(['index.html', 'app.css', 'app.mjs', 'workspaces.mjs', 'issues.mjs', 'pipelines.mjs', 'development.mjs', 'scheduling.mjs', 'background.mjs', 'skills.mjs', 'tools.mjs', 'privacy.mjs', 'appearance.mjs', 'delivery.mjs', 'permissions.mjs'].map(file => [file, path.join(__dirname, file)]));
+const assets = new Map(['index.html', 'app.css', 'app.mjs', 'workspaces.mjs', 'issues.mjs', 'pipelines.mjs', 'development.mjs', 'notices.mjs', 'scheduling.mjs', 'background.mjs', 'skills.mjs', 'tools.mjs', 'privacy.mjs', 'appearance.mjs', 'delivery.mjs', 'permissions.mjs'].map(file => [file, path.join(__dirname, file)]));
 assets.set('commands.mjs', path.join(__dirname, '../connections/commands.mjs')); assets.set('tokens.css', path.join(__dirname, '../prototype/style.css'));
 assets.set('issue-commands.mjs', path.join(__dirname, '../issues/commands.mjs')); assets.set('connections/commands.mjs', path.join(__dirname, '../connections/commands.mjs'));
 assets.set('pipeline-commands.mjs', path.join(__dirname, '../pipelines/commands.mjs'));
@@ -122,7 +122,7 @@ app.whenReady().then(async () => {
   manager = createConnectionManager({ vault: null, adapters, onChange: publish });
   const workspaceOptions = qualifying ? await require('./qualify.cjs').workspaceOptions({ directory, helper, nativeFolderEntry }) : {};
   let workspaceBusy = false;
-  const publishWorkspaces = snapshot => { permissions?.sync(); delivery?.sync(); issues?.sync(); pipelines?.sync(); development?.sync(); scheduling?.sync(); skills?.sync(); tools?.sync(); privacy?.sync(); void scheduler?.sync().catch(() => {}); if (window && !window.isDestroyed()) { window.webContents.send('workspaces:status', snapshot); if (workspaceBusy && !snapshot.busy && !closing) { window.show(); window.focus(); window.webContents.focus(); } } workspaceBusy = snapshot.busy; };
+  const publishWorkspaces = snapshot => { permissions?.sync(); delivery?.sync(); appearance?.sync(); issues?.sync(); pipelines?.sync(); development?.sync(); scheduling?.sync(); skills?.sync(); tools?.sync(); privacy?.sync(); void scheduler?.sync().catch(() => {}); if (window && !window.isDestroyed()) { window.webContents.send('workspaces:status', snapshot); if (workspaceBusy && !snapshot.busy && !closing) { window.show(); window.focus(); window.webContents.focus(); } } workspaceBusy = snapshot.busy; };
   const makeWorkspaces = initialRevision => createWorkspaceManager({ store: workspaceStore, initialRevision, onChange: publishWorkspaces,
     connections: { status: () => manager.status(), acquire: (...args) => manager.acquire(...args), epoch: id => manager.epoch(id) },
     folder: (signal, existing) => nativeFolderEntry(helper, directory, signal, existing),
@@ -214,6 +214,7 @@ app.whenReady().then(async () => {
     if (window && !window.isDestroyed()) window.webContents.send('appearance:status', snapshot);
   };
   const makeAppearance = initialRevision => createAppearanceManager({ policy, initialRevision, onChange: publishAppearance,
+    workspace: () => workspaceStore?.workspaces().find(item => item.id === workspaceStore.selected()) ?? null,
     onApplied: () => { issues?.sync(); pipelines?.sync(); development?.sync(); scheduling?.sync(); background?.sync(); skills?.sync(); tools?.sync(); privacy?.sync(); } });
   appearance = makeAppearance(1);
   const publishDelivery = snapshot => { if (window && !window.isDestroyed()) window.webContents.send('delivery:status', snapshot); };

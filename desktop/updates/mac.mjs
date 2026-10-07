@@ -5,11 +5,16 @@ import { canonicalJSON, immutable, record } from '../core/settings.mjs';
 import { backgroundBundleId } from '../background/native.mjs';
 import { buildIdentity, buildIdentityName, readBuildIdentity } from '../package/build.mjs';
 
-function command(file, args, signal) {
+export function runMacUpdateCommand(file, args, signal, input) {
   signal.throwIfAborted();
+  if (input !== undefined && (typeof input !== 'string' || Buffer.byteLength(input) > 32768)) throw Error('update-native-trust-unverified');
   const env = { PATH: '/usr/bin:/bin', LC_ALL: 'C', ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}) };
-  return new Promise((resolve, reject) => execFile(file, args, { env, signal, killSignal: 'SIGKILL', timeout: 15000, maxBuffer: 32768 },
-    (error, stdout, stderr) => error ? reject(Error('update-native-trust-unverified')) : resolve({ stdout, stderr })));
+  return new Promise((resolve, reject) => {
+    let inputFailed = false;
+    const child = execFile(file, args, { env, signal, killSignal: 'SIGKILL', timeout: 15000, maxBuffer: 32768 },
+      (error, stdout, stderr) => error || inputFailed ? reject(Error('update-native-trust-unverified')) : resolve({ stdout, stderr }));
+    child.stdin.on('error', () => { inputFailed = true; child.kill('SIGKILL'); }); child.stdin.end(input);
+  });
 }
 const stable = (a, b) => ['dev', 'ino', 'mode', 'uid', 'nlink', 'size', 'mtimeMs', 'ctimeMs'].every(key => a[key] === b[key]);
 export function macUpdateRequirement(team) {
@@ -21,7 +26,7 @@ export function macUpdateRequirement(team) {
 }
 
 // Host-only trust check. Its caller must obtain identity from authenticated history and reverify before installation.
-export async function verifyMacUpdateBundle(options, { run = command } = {}) {
+export async function verifyMacUpdateBundle(options, { run = runMacUpdateCommand } = {}) {
   try {
     record(options, ['bundle', 'team', 'identity'], ['signal']); const { bundle, team } = options, identity = buildIdentity(options.identity);
     if (process.platform !== 'darwin' || process.arch !== 'arm64' || typeof run !== 'function'

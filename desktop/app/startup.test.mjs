@@ -6,6 +6,27 @@ import { runInNewContext } from 'node:vm';
 
 const require = createRequire(import.meta.url), source = readFileSync(new URL('./main.cjs',import.meta.url),'utf8');
 const testStorage = require('../test-storage.cjs');
+test('pending startup recovery stops before normal stores can create missing data; only verified packaged foreground proceeds', async () => {
+  const start = source.indexOf('    if (app.isPackaged && !backgroundLaunch && maintenanceStore'), end = source.indexOf('    const initialRevision = manager.status().revision + 1;', start);
+  assert.ok(start >= 0 && end > start);
+  const block = source.slice(start, end);
+  for (const mode of ['source', 'background', 'unavailable', 'refused', 'cancelled', 'verified', 'clear']) {
+    let pending = mode !== 'clear', finished = 0, continued = 0, published = 0;
+    const store = mode === 'unavailable' ? null : { clear: () => !pending, async finishRelaunch(options) {
+      finished++; assert.equal(options.running.bundle, '/private/Pipeliner.app'); options.checkpoint();
+      if (mode !== 'verified') throw Error('Synthetic native refusal'); pending = false;
+    } };
+    const context = { app: { isPackaged: mode !== 'source' }, backgroundLaunch: mode === 'background', maintenanceStore: store,
+      maintenanceRecovery: () => pending, moduleAt: async () => ({ readBuildIdentity: async () => ({ synthetic: true }) }),
+      path: require('node:path'), process: { execPath: '/private/Pipeliner.app/Contents/MacOS/Pipeliner' }, closing: mode === 'cancelled', AbortController,
+      updates: { sync() {}, status: () => ({ recoveryRequired: pending }) }, publishUpdates(status) { assert.equal(status.recoveryRequired, true); published++; },
+      console: { error() {} }, continueStartup() { continued++; } };
+    await runInNewContext(`(async function(){${block}\ncontinueStartup();})();`, context, { timeout: 1000 });
+    assert.equal(continued, ['verified', 'clear'].includes(mode) ? 1 : 0);
+    assert.equal(published, continued ? 0 : 1);
+    assert.equal(finished, ['refused', 'cancelled', 'verified'].includes(mode) ? 1 : 0);
+  }
+});
 function entry(packaged, args, storageAvailable = true) {
   const calls = [];
   const app = { isPackaged:packaged, getPath(name) { calls.push(['getPath',name]); return '/private/synthetic-app-data'; },

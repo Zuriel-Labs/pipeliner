@@ -1,4 +1,4 @@
-import { lstatSync, realpathSync, openSync, closeSync, fsyncSync, constants } from 'node:fs';
+import { lstatSync, realpathSync, openSync, fstatSync, closeSync, fsyncSync, constants } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { protectedFile } from '../core/storage.mjs';
@@ -10,6 +10,9 @@ import { updateBackups, verifyUpdateBackups } from './backup.mjs';
 import { verifyStagedInstaller } from './stage.mjs';
 import { stageMacUpdateBundle } from './copy.mjs';
 import { runMacUpdateCommand, verifyMacUpdateBundle } from './mac.mjs';
+import { openWorkspaceStore } from '../repositories/store.mjs';
+import { openDevelopmentStore } from '../development/state.mjs';
+import { openArtifactStore } from '../delivery/artifacts.mjs';
 import { resolve, dirname, join } from 'node:path';
 
 const phases = ['preparing', 'staged', 'verified', 'replacing', 'relaunching', 'repair-required'];
@@ -76,7 +79,7 @@ export function openUpdateMaintenance(directory, { vault, clock = Date.now }) {
       try { fsyncSync(parent); } finally { closeSync(parent); }
     }
     if (db.prepare('PRAGMA quick_check').get().quick_check !== 'ok') throw Error();
-    let closed = false, active;
+    let closed = false, active, recovering = false;
     function readState() {
       if (closed) throw Error();
       const current = lstatSync(path), parent = lstatSync(directory), now = clock();
@@ -303,6 +306,100 @@ export function openUpdateMaintenance(directory, { vault, clock = Date.now }) {
               });
           } catch { /* The persisted replacing intent remains a recovery fence when repair recording fails. */ }
           throw Error(attempted ? 'maintenance-replacement-recovery-required' : 'maintenance-state-unavailable');
+        }
+      },
+      // Foreground packaged startup only. The host captures running identity before any installer can run.
+      async finishRelaunch(options, { run = runMacUpdateCommand } = {}) {
+        const held = []; let acquired = false;
+        try {
+          record(options, ['running', 'checkpoint', 'signal']);
+          if (Object.values(Object.getOwnPropertyDescriptors(options)).some(value => value.get || value.set)
+            || recovering || active || typeof run !== 'function' || typeof options.checkpoint !== 'function' || !(options.signal instanceof AbortSignal)) throw Error();
+          canonicalJSON(options.running);
+          record(options.running, ['bundle', 'identity']);
+          const running = immutable(structuredClone(options.running)), { checkpoint, signal } = options, initial = readState(), intent = initial.value;
+          if (!intent || !['replacing', 'relaunching', 'repair-required'].includes(intent.phase) || !intent.copy?.receipt || !intent.replacement || !intent.backups
+            || running.bundle !== intent.copy.installed.bundle || canonicalJSON(buildIdentity(running.identity)) !== canonicalJSON(intent.to)) throw Error();
+          recovering = true; acquired = true;
+          function check() {
+            signal.throwIfAborted(); checkpoint(); signal.throwIfAborted(); const state = readState();
+            if (active || state.row.revision !== initial.row.revision || canonicalJSON(state.value) !== canonicalJSON(intent)) throw Error();
+          }
+          const inspect = path => lstatSync(path, { bigint: true }), { installed, receipt } = intent.copy;
+          const parents = [dirname(installed.bundle), receipt.directory], roots = parents.map(inspect);
+          const helper = join(installed.bundle, 'Contents/Resources/helpers/update-exchange'), executable = inspect(helper);
+          const stable = (a, b) => ['dev', 'ino', 'uid', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs'].every(key => a[key] === b[key]);
+          if (!executable.isFile() || executable.nlink !== 1n || ![0n, BigInt(process.getuid())].includes(executable.uid)
+            || executable.mode & 0o022n || !(executable.mode & 0o111n) || realpathSync(helper) !== helper) throw Error();
+          function bindings() {
+            check();
+            for (let index = 0; index < parents.length; index++) {
+              const parent = inspect(parents[index]), path = index ? receipt.bundle : installed.bundle, app = inspect(path);
+              const expected = index ? intent.replacement : { device: receipt.device, inode: receipt.inode };
+              if (!parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== BigInt(process.getuid()) || parent.mode & 0o022n
+                || realpathSync(parents[index]) !== parents[index] || !['dev', 'ino', 'uid', 'mode'].every(key => parent[key] === roots[index][key])
+                || !app.isDirectory() || app.isSymbolicLink() || app.mode & 0o022n || ![0n, BigInt(process.getuid())].includes(app.uid)
+                || realpathSync(path) !== path || app.dev !== parent.dev || app.dev.toString() !== expected.device || app.ino.toString() !== expected.inode) throw Error();
+            }
+            if (realpathSync(helper) !== helper || !stable(executable, inspect(helper))) throw Error();
+          }
+          async function native() {
+            bindings();
+            await verifyMacUpdateBundle({ bundle: installed.bundle, team: installed.team, identity: intent.to, signal }, { run }); bindings();
+            await verifyMacUpdateBundle({ bundle: receipt.bundle, team: installed.team, identity: intent.from, signal }, { run }); bindings();
+            for (let index = 0; index < parents.length; index++) {
+              const result = await run(helper, ['--verify-parent', parents[index], roots[index].dev.toString(), roots[index].ino.toString()], signal);
+              if (result.stdout !== 'pipeliner-update-parent-verified\n' || result.stderr !== '') throw Error(); bindings();
+            }
+            verifyUpdateBackups({ capture: intent.backups, directory, build: intent.from, vault, checkpoint: bindings }); bindings();
+          }
+          await native();
+          function dataBindings() {
+            bindings();
+            for (const item of held) {
+              const current = inspect(item.path);
+              if (!current.isFile() || current.isSymbolicLink() || current.nlink !== 1n || current.uid !== BigInt(process.getuid())
+                || (current.mode & 0o777n) !== 0o600n || current.dev !== BigInt(root.dev) || realpathSync(item.path) !== item.path
+                || !['dev', 'ino', 'uid', 'mode', 'nlink'].every(key => current[key] === item.original[key])
+                || item.fd !== undefined && !['dev', 'ino', 'uid', 'mode', 'nlink'].every(key => fstatSync(item.fd, { bigint: true })[key] === current[key])
+                || item.verified && !stable(item.verified, current)
+                || ['-wal', '-shm', '-journal'].some(suffix => lstatSync(item.path + suffix, { throwIfNoEntry: false }))) throw Error();
+            }
+          }
+          // Existing schemas only; a future update must provide its reviewed compatibility/migration contract.
+          for (const [store, version] of [['workspaces', 5], ['development', 2], ['artifacts', 2]]) {
+            const path = join(directory, store + '.sqlite'), item = { path }; held.push(item);
+            item.fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); item.original = fstatSync(item.fd, { bigint: true });
+            if (item.original.size < 100n || item.original.size > BigInt(512 * 1024 ** 2)) throw Error(); dataBindings();
+            const database = new DatabaseSync(path, { readOnly: true, allowExtension: false, timeout: 1000 });
+            try {
+              database.exec('PRAGMA trusted_schema=OFF; PRAGMA temp_store=MEMORY;');
+              if (database.prepare('PRAGMA user_version').get().user_version !== version
+                || database.prepare('PRAGMA journal_mode').get().journal_mode !== 'delete'
+                || database.prepare('PRAGMA quick_check').get().quick_check !== 'ok') throw Error();
+            } finally { database.close(); }
+          }
+          const artifactRoot = join(directory, 'artifacts'), artifactInfo = inspect(artifactRoot);
+          if (!artifactInfo.isDirectory() || artifactInfo.isSymbolicLink() || artifactInfo.uid !== BigInt(process.getuid())
+            || (artifactInfo.mode & 0o777n) !== 0o700n || artifactInfo.dev !== BigInt(root.dev) || realpathSync(artifactRoot) !== artifactRoot) throw Error();
+          dataBindings(); openWorkspaceStore(directory, { vault }).close(); dataBindings();
+          openDevelopmentStore(directory, { vault }).close(); dataBindings();
+          const artifacts = await openArtifactStore(directory, { vault, limits() { throw Error('Recovery cannot change artifact limits'); } });
+          try { dataBindings(); } finally { await artifacts.close(); }
+          dataBindings();
+          for (const item of held) { item.verified = fstatSync(item.fd, { bigint: true }); closeSync(item.fd); item.fd = undefined; }
+          dataBindings(); await native(); dataBindings();
+          if (!stable(artifactInfo, inspect(artifactRoot)) || realpathSync(artifactRoot) !== artifactRoot) throw Error();
+          transaction(state => {
+            if (active || state.row.revision !== initial.row.revision || canonicalJSON(state.value) !== canonicalJSON(intent)) throw Error();
+            save(state, null);
+          });
+        } catch { throw Error('maintenance-relaunch-recovery-required'); }
+        finally {
+          if (acquired) recovering = false;
+          let failed = false;
+          for (const item of held) if (item.fd !== undefined) try { closeSync(item.fd); } catch { failed = true; }
+          if (failed) throw Error('maintenance-relaunch-recovery-required');
         }
       },
       // The installer must verify owned cleanup before cancelling a pre-replacement intent.

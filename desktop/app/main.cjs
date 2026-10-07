@@ -387,6 +387,15 @@ app.whenReady().then(async () => {
     if (closing) { vault.close(); return; }
     try { maintenanceStore = openUpdateMaintenance(directory, { vault }); }
     catch { maintenanceUnavailable = true; console.error('Desktop maintenance needs protected recovery. Existing data preserved.'); }
+    if (app.isPackaged && !backgroundLaunch && maintenanceStore && !maintenanceStore.clear()) {
+      try {
+        const { readBuildIdentity } = await moduleAt('../package/build.mjs');
+        const bundle = path.dirname(path.dirname(path.dirname(process.execPath)));
+        const running = { bundle, identity: await readBuildIdentity(bundle) };
+        await maintenanceStore.finishRelaunch({ running, checkpoint() { if (closing) throw Error(); }, signal: new AbortController().signal });
+      } catch { console.error('Desktop update needs verified startup recovery. Existing data and bundles preserved.'); }
+    }
+    if (maintenanceRecovery()) { updates.sync(); publishUpdates(updates.status()); return; }
     const initialRevision = manager.status().revision + 1;
     manager = createConnectionManager({ vault, adapters, onChange: publish, initialRevision }); publish(manager.status());
     const { openWorkspaceStore } = await moduleAt('../repositories/store.mjs');

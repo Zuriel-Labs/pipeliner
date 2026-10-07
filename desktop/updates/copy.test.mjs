@@ -16,7 +16,7 @@ import { openDevelopmentStore } from '../development/state.mjs';
 import { openArtifactStore } from '../delivery/artifacts.mjs';
 import { DatabaseSync } from 'node:sqlite';
 
-async function checkCopy(unsafe, journaled = false, replacement = null) {
+async function checkCopy(unsafe, journaled = false, replacement = null, recovery = null) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'pipeliner-54-update-copy-'))), directory = join(root, 'updates');
   await mkdir(directory, { mode: 0o700 });
   const installed = join(root, 'Pipeliner.app'), team = 'ABCDEF1234', helper = join(installed, 'Contents/Resources/helpers/update-exchange');
@@ -28,9 +28,10 @@ async function checkCopy(unsafe, journaled = false, replacement = null) {
     await writeFile(join(bundle, 'Contents/Resources/pipeliner-build.json'), canonicalJSON(identity) + '\n', { mode: 0o600 });
     await writeFile(join(bundle, 'Contents/Info.plist'), 'Synthetic plist; never native verified.', { mode: 0o600 });
     await writeFile(join(bundle, 'Contents/MacOS/Pipeliner'), 'Synthetic executable; never launched.', { mode: 0o700 });
+    await mkdir(join(bundle, 'Contents/Resources/helpers'), { mode: 0o700 });
+    await writeFile(join(bundle, 'Contents/Resources/helpers/update-exchange'), 'Synthetic helper; never executed.', { mode: 0o700 });
   }
-  await fixture(installed, from); await mkdir(join(installed, 'Contents/Resources/helpers'), { mode: 0o700 });
-  await writeFile(helper, 'Synthetic helper; never executed.', { mode: 0o700 });
+  await fixture(installed, from);
   const bytes = Buffer.from('Synthetic image; never attached.'), file = join(directory, 'update-' + randomUUID() + '.dmg');
   await writeFile(file, bytes, { mode: 0o600 });
   const { publicKey, privateKey } = generateKeyPairSync('ed25519');
@@ -113,7 +114,7 @@ async function checkCopy(unsafe, journaled = false, replacement = null) {
         assert.throws(() => journal.cancel(journalToken));
       }
       const bundle = args.at(-1);
-      if (args.includes('--verify') && (mode === 'installed-signature' && bundle === installed || mode === 'source-signature' && mount && bundle === join(mount, 'Pipeliner.app'))) throw Error('Synthetic signature refusal');
+      if (args.includes('--verify') && (['installed-signature', 'relaunch-signature'].includes(mode) && bundle === installed || mode === 'source-signature' && mount && bundle === join(mount, 'Pipeliner.app'))) throw Error('Synthetic signature refusal');
       return { stdout: '', stderr: 'TeamIdentifier=' + team + '\nCodeDirectory v=20500 size=10 flags=0x10000(runtime)\nTimestamp=synthetic\n' };
     }
     if (command === '/usr/bin/plutil') {
@@ -139,6 +140,8 @@ async function checkCopy(unsafe, journaled = false, replacement = null) {
     history.complete(attempt.token, Buffer.from(canonicalJSON({ release, signature: sign(null, Buffer.from(canonicalJSON(release)), privateKey).toString('base64') })));
     if (journaled) {
       workspaces = openWorkspaceStore(root, { vault }); development = openDevelopmentStore(root, { vault });
+      workspaces.register({ id: 'repo-one', repositoryId: 'repository-one', slug: 'synthetic/one', localKey: '1:2', path: root, project: { id: 'project-one' } });
+      workspaces.select('repo-one'); workspaces.saveIssueContext('repo-one', { selected: '54', source: 'synthetic-pm-selection' });
       artifacts = await openArtifactStore(root, { vault, limits: () => ({ keepLatest: 3, warningBytes: 1024 ** 3, capacityBytes: 2 * 1024 ** 3 }) });
       const backups = captureUpdateBackups({ directory: root, vault, build: from, checkpoint() {} });
       journal = openUpdateMaintenance(root, { vault, clock: () => 1000 });
@@ -174,6 +177,40 @@ async function checkCopy(unsafe, journaled = false, replacement = null) {
         }
         const pending = journal.read(); journal.close(); journal = openUpdateMaintenance(root, { vault, clock: () => 1000 });
         assert.deepEqual(journal.read(), pending); assert.equal(journal.owned(), false); assert.equal(journal.clear(), false);
+        if (recovery) {
+          workspaces.close(); workspaces = undefined; development.close(); development = undefined; await artifacts.close(); artifacts = undefined;
+          if (db) { db.exec('DROP TRIGGER refuse_completion'); db.close(); db = undefined; }
+          const sourceFiles = ['workspaces', 'development', 'artifacts'].map(name => join(root, name + '.sqlite'));
+          const dataDigest = file => {
+            const data = new DatabaseSync(file, { readOnly: true, allowExtension: false });
+            try {
+              const schema = data.prepare("SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name").all();
+              const rows = schema.filter(row => row.type === 'table').map(row => [row.name,
+                data.prepare('SELECT * FROM "' + row.name.replaceAll('"', '""') + '" ORDER BY rowid').all()]);
+              return createHash('sha256').update(JSON.stringify({ version: data.prepare('PRAGMA user_version').get(), schema, rows })).digest('hex');
+            } finally { data.close(); }
+          };
+          const beforeData = sourceFiles.map(dataDigest);
+          const action = () => journal.finishRelaunch({ running: { bundle: installed, identity: recovery === 'wrong-build' ? from : to },
+            checkpoint() { if (recovery === 'lost-checkpoint') throw Error('Synthetic startup cancellation'); }, signal: controller.signal }, { run });
+          let getters = 0;
+          await assert.rejects(journal.finishRelaunch({ get running() { getters++; throw Error(); }, checkpoint() {}, signal: controller.signal }, { run }));
+          assert.equal(getters, 0); assert.deepEqual(journal.read(), pending);
+          mode = recovery;
+          if (recovery === 'cancel') controller.abort();
+          if (recovery === 'changed-bundle') {
+            const moved = join(root, 'synthetic-moved.app'); await rename(installed, moved); await fixture(installed, to);
+          }
+          if (recovery === 'missing-data') await rename(sourceFiles[0], sourceFiles[0] + '.saved');
+          if (recovery === 'future-data') { db = new DatabaseSync(sourceFiles[1]); db.exec('PRAGMA user_version=3'); db.close(); db = undefined; }
+          if (recovery === 'journal-refusal') { db = new DatabaseSync(join(root, 'maintenance.sqlite')); db.exec("CREATE TRIGGER refuse_finish BEFORE UPDATE ON maintenance_state BEGIN SELECT RAISE(ABORT,'synthetic finish refusal'); END;"); }
+          if (['valid-relaunch', 'uncertain-relaunch'].includes(recovery)) {
+            await action(); assert.equal(journal.clear(), true); assert.equal(journal.read(), null); assert.equal(journal.owned(), false);
+            await assert.rejects(action()); assert.throws(() => journal.advance(journalToken, 'staged'));
+            assert.deepEqual(sourceFiles.map(dataDigest), beforeData);
+          } else { await assert.rejects(action()); assert.deepEqual(journal.read(), pending); assert.equal(journal.clear(), false); }
+          assert.equal(exchanges, 1); assert.equal((await lstat(receipt.bundle)).isDirectory(), true);
+        }
         return;
       }
       let token = journal.begin(plan); journalToken = token;
@@ -259,4 +296,10 @@ test('copy tree guards refuse absolute external aliases and hard-linked files be
 test('journal records exact copy ownership before effects, binds detached target and fences retained or interrupted resources', () => checkCopy(false, true));
 test('replacement coordinator persists effect identities, verifies both namespace bindings and retains uncertain outcomes without retry', async () => {
   for (const mode of ['pre-tamper', 'swap-parent', 'swap-cancel', 'valid-swap', 'swap-refusal', 'swap-tamper', 'swap-stale', 'swap-journal-refusal']) await checkCopy(false, true, mode);
+});
+
+test('startup reconciliation requires the exact exchanged target and compatible protected data without replay', async () => {
+  for (const recovery of ['valid-relaunch', 'wrong-build', 'relaunch-signature', 'changed-bundle', 'missing-data', 'future-data', 'cancel', 'lost-checkpoint', 'journal-refusal'])
+    await checkCopy(false, true, 'valid-swap', recovery);
+  await checkCopy(false, true, 'swap-journal-refusal', 'uncertain-relaunch');
 });

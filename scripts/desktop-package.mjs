@@ -104,13 +104,14 @@ try {
   await writeFile(frameworkBinary,afterIntegrity);if(!(await readFile(frameworkBinary)).equals(afterIntegrity))throw new Error('package-integrity-readback-failed');
   const nativeRoot=join(temporary,'native');await mkdir(nativeRoot,{mode:0o700});
   const nativeInputs={};
-  for(const file of ['desktop/connections/secure-entry.m','desktop/scheduling/calendar.m','desktop/github/git-credential.c','desktop/background/bootstrap.m']){
+  for(const file of ['desktop/connections/secure-entry.m','desktop/scheduling/calendar.m','desktop/github/git-credential.c','desktop/background/bootstrap.m','desktop/updates/exchange.c']){
     const bytes=await committedInput(source,candidate,file),path=join(nativeRoot,file.split('/').at(-1));await writeFile(path,bytes,{flag:'wx',mode:0o600});nativeInputs[file]=hash(bytes);
   }
   const compile=async(name,file,args)=>command('/usr/bin/clang',['-Wall','-Wextra','-Werror','-mmacosx-version-min=13.0',...args,join(nativeRoot,file),'-o',join(helpers,name)]);
   await compile('secure-entry','secure-entry.m',['-fobjc-arc','-framework','AppKit']);
   await compile('calendar','calendar.m',['-fobjc-arc','-framework','Foundation']);
   await compile('git-credential','git-credential.c',[]);
+  await compile('update-exchange','exchange.c',['-D_DARWIN_C_SOURCE=1','-std=c11']);
   await compile('background','bootstrap.m',['-fobjc-arc','-framework','AppKit','-framework','Security','-framework','ServiceManagement']);
   const service=join(contents,'Library/LaunchServices');await mkdir(service,{recursive:true,mode:0o700});await rename(join(helpers,'background'),join(service,'PipelinerBackground'));
   await mkdir(join(contents,'Library/LaunchAgents'),{recursive:true,mode:0o700});await writeFile(join(contents,'Library/LaunchAgents',backgroundBundleId+'.background.plist'),backgroundPlist(),{flag:'wx',mode:0o600});
@@ -133,7 +134,7 @@ try {
   }
   await nativeBinaries(frameworkRoot);
   for(const name of await readdir(frameworkRoot)){const path=join(frameworkRoot,name);if(name.endsWith('.app')||name.endsWith('.framework'))await sign(path,name.endsWith('.app'));}
-  for(const name of ['secure-entry','calendar','git-credential'])await sign(join(helpers,name));await sign(join(service,'PipelinerBackground'));
+  for(const name of ['secure-entry','calendar','git-credential','update-exchange'])await sign(join(helpers,name));await sign(join(service,'PipelinerBackground'));
   await sign(app,true);await command('/usr/bin/codesign',['--verify','--deep','--strict',app]);
   await command('/usr/bin/codesign',['--verify','--deep','--strict','-R','=anchor apple generic and identifier "'+backgroundBundleId+'"',app]);
   if(canonicalJSON(await readBuildIdentity(app))!==canonicalJSON(identity))throw new Error('package-build-identity-unverified');

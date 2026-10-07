@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, realpath, mkdir, writeFile, readFile, readdir, rm, lstat, symlink, link } from 'node:fs/promises';
+import { mkdtemp, realpath, mkdir, writeFile, readFile, readdir, rm, lstat, symlink, link, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { generateKeyPairSync, sign, createHash, randomUUID } from 'node:crypto';
@@ -16,7 +16,7 @@ import { openDevelopmentStore } from '../development/state.mjs';
 import { openArtifactStore } from '../delivery/artifacts.mjs';
 import { DatabaseSync } from 'node:sqlite';
 
-async function checkCopy(unsafe, journaled = false) {
+async function checkCopy(unsafe, journaled = false, replacement = null) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'pipeliner-54-update-copy-'))), directory = join(root, 'updates');
   await mkdir(directory, { mode: 0o700 });
   const installed = join(root, 'Pipeliner.app'), team = 'ABCDEF1234', helper = join(installed, 'Contents/Resources/helpers/update-exchange');
@@ -39,7 +39,7 @@ async function checkCopy(unsafe, journaled = false) {
   const release = { kind: 'pipeliner-desktop-update', schemaVersion: 1, source: trust.id, ...current, version: to.version, sequence: 1,
     issuedAt: 900, expiresAt: 2000, url: trust.origin + trust.path + 'Pipeliner.dmg', bytes: bytes.length,
     sha256: createHash('sha256').update(bytes).digest('hex'), sourceCommit: to.sourceCommit, gitTree: to.gitTree };
-  let mode, mount, attached, copied, detached, authorized, controller, destination, vault, history, journal, journalToken, workspaces, development, artifacts, db;
+  let mode, mount, attached, copied, detached, authorized, controller, destination, vault, history, journal, journalToken, workspaces, development, artifacts, db, exchanges = 0;
   const quarantine = '0081;00000000;PipelinerSynthetic54;';
   const entities = () => [{ 'dev-entry': '/dev/disk999' }, { 'dev-entry': '/dev/disk999s1', 'mount-point': mount }];
   const run = async (command, args, signal, input) => {
@@ -67,9 +67,26 @@ async function checkCopy(unsafe, journaled = false) {
     if (command === '/usr/sbin/diskutil') return { stdout: JSON.stringify({ DeviceNode: '/dev/disk999s1', MountPoint: mount,
       ReadOnlyMedia: true, ReadOnlyVolume: true, VolumeUUID: '11111111-2222-3333-4444-555555555555' }), stderr: '' };
     if (command === helper) {
+      if (args[0] !== '--verify-parent') {
+        const saved = journal.read(), original = await lstat(installed, { bigint: true });
+        assert.equal(saved.phase, 'replacing'); assert.deepEqual(saved.replacement, { device: original.dev.toString(), inode: original.ino.toString() });
+        assert.deepEqual(args, [root, saved.copy.directory, saved.replacement.device, saved.replacement.inode,
+          saved.copy.receipt.device, saved.copy.receipt.inode]); exchanges++;
+        if (mode === 'swap-refusal') throw Error('Synthetic before-effect helper refusal');
+        // Only a namespace simulation; the product uses one native atomic exchange, never these renames.
+        const temporary = join(saved.copy.directory, 'synthetic-previous.app');
+        await rename(installed, temporary); await rename(saved.copy.receipt.bundle, installed); await rename(temporary, saved.copy.receipt.bundle);
+        if (mode === 'swap-tamper') await writeFile(join(installed, 'Contents/Resources/pipeliner-build.json'), canonicalJSON({ ...to, gitTree: 'd'.repeat(40) }) + '\n');
+        if (mode === 'swap-stale') journal.advance(journalToken, 'repair-required');
+        if (mode === 'swap-journal-refusal') {
+          db = new DatabaseSync(join(root, 'maintenance.sqlite'));
+          db.exec("CREATE TRIGGER refuse_completion BEFORE UPDATE ON maintenance_state BEGIN SELECT RAISE(ABORT,'synthetic completion refusal'); END;");
+        }
+        return { stdout: 'pipeliner-update-exchanged\n', stderr: '' };
+      }
       assert.equal(args[0], '--verify-parent'); const info = await lstat(args[1], { bigint: true });
       assert.deepEqual(args.slice(2), [info.dev.toString(), info.ino.toString()]);
-      if (mode === 'guard') throw Error('Synthetic ownership refusal');
+      if (mode === 'guard' || mode === 'swap-parent') throw Error('Synthetic ownership refusal');
       return { stdout: 'pipeliner-update-parent-verified\n', stderr: '' };
     }
     if (command === '/usr/bin/ditto') {
@@ -132,6 +149,33 @@ async function checkCopy(unsafe, journaled = false) {
         return journal.stageBundle(token, { installed: { bundle: installed, team, identity: mode === 'wrong-current' ? to : from },
           history, trust, current, maxBytes: 1024 ** 2, reserveBytes: 1024 ** 2, checkpoint() {}, ...extra }, { run });
       };
+      if (replacement) {
+        journalToken = journal.begin(plan); await journal.bindInstaller(journalToken, staged, binding); journal.bindBackups(journalToken, backups);
+        const receipt = await copy(journalToken); journal.advance(journalToken, 'verified');
+        assert.throws(() => journal.advance(journalToken, 'replacing'));
+        const before = journal.read(); mode = replacement;
+        const replace = options => journal.replaceBundle(journalToken, { ...binding, signal: controller.signal, ...options }, { run });
+        if (['pre-tamper', 'swap-parent', 'swap-cancel'].includes(replacement)) {
+          if (replacement === 'pre-tamper') await writeFile(join(receipt.bundle, 'Contents/Resources/pipeliner-build.json'), canonicalJSON({ ...to, gitTree: 'd'.repeat(40) }) + '\n');
+          if (replacement === 'swap-cancel') controller.abort();
+          await assert.rejects(replace()); assert.equal(exchanges, 0); assert.deepEqual(journal.read(), before);
+        } else if (replacement === 'valid-swap') {
+          const result = await replace(); assert.deepEqual(result, { installed, rollback: receipt.bundle, identity: to });
+          const saved = journal.read(); assert.equal(saved.phase, 'relaunching'); assert.equal(exchanges, 1);
+          assert.equal((await lstat(installed, { bigint: true })).ino.toString(), receipt.inode);
+          assert.equal((await lstat(receipt.bundle, { bigint: true })).ino.toString(), saved.replacement.inode);
+          assert.deepEqual(JSON.parse(await readFile(join(installed, 'Contents/Resources/pipeliner-build.json'), 'utf8')), to);
+          assert.deepEqual(JSON.parse(await readFile(join(receipt.bundle, 'Contents/Resources/pipeliner-build.json'), 'utf8')), from);
+          assert.throws(() => journal.cancel(journalToken)); await assert.rejects(replace()); assert.equal(exchanges, 1);
+        } else {
+          await assert.rejects(replace()); assert.equal(exchanges, 1); assert.equal(journal.read().phase, replacement === 'swap-journal-refusal' ? 'replacing' : 'repair-required');
+          assert.throws(() => journal.cancel(journalToken)); await assert.rejects(replace()); assert.equal(exchanges, 1);
+          assert.equal((await lstat(installed)).isDirectory(), true); assert.equal((await lstat(receipt.bundle)).isDirectory(), true);
+        }
+        const pending = journal.read(); journal.close(); journal = openUpdateMaintenance(root, { vault, clock: () => 1000 });
+        assert.deepEqual(journal.read(), pending); assert.equal(journal.owned(), false); assert.equal(journal.clear(), false);
+        return;
+      }
       let token = journal.begin(plan); journalToken = token;
       await assert.rejects(copy(token)); assert.equal(journal.read().copy, undefined); assert.equal(copied, 0);
       await journal.bindInstaller(token, staged, binding);
@@ -213,3 +257,6 @@ async function checkCopy(unsafe, journaled = false) {
 test('verified image copying preserves native metadata and links, rejects stale trust and returns only after detach', () => checkCopy(false));
 test('copy tree guards refuse absolute external aliases and hard-linked files before native copying', () => checkCopy(true));
 test('journal records exact copy ownership before effects, binds detached target and fences retained or interrupted resources', () => checkCopy(false, true));
+test('replacement coordinator persists effect identities, verifies both namespace bindings and retains uncertain outcomes without retry', async () => {
+  for (const mode of ['pre-tamper', 'swap-parent', 'swap-cancel', 'valid-swap', 'swap-refusal', 'swap-tamper', 'swap-stale', 'swap-journal-refusal']) await checkCopy(false, true, mode);
+});

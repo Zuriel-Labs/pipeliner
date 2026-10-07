@@ -58,7 +58,7 @@ exports.activate = function activate({ run = process.env.TEST_ARTIFACT_RUN, node
   const initialKnownClosure = initial.diagnostic_context?.route === 'quality-explicit-closed-groups-inventory-stable-context-rpc-native-failure-operands-typed-negatives-v3-initial-known-closure';
   const typedNegatives = initialKnownClosure || initial.diagnostic_context?.route === 'quality-explicit-closed-groups-inventory-stable-context-rpc-native-failure-operands-typed-negatives-v3';
   const negativeHome = "/Users/chris/.local/share/eaglepro-test-storage-candidates/pipeliner-54-typed-negatives-d35dfab36c87d67f";
-  const negativeRecipeHash = "0527b96423bc6d60b5329d16f28884d73362f751a81bd2cfbebbeed145997455";
+  const negativeRecipeHash = "046a6644444ae1da00acc168bf393699fd9d10a874872555f1ddb19a22540998";
   const negativeRecord = initial.negative_fixture_rpc;
   const negativePins = typedNegatives ? {
     [negativeHome + '/entry.py']: "d35dfab36c87d67f7f03f0c2450c479876b016c25de64ab1b13c1444a446692a",

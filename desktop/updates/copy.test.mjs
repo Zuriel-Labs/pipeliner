@@ -17,8 +17,10 @@ import { openArtifactStore } from '../delivery/artifacts.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { dataCompatibilityForBuild } from '../package/build.mjs';
 import testStorage from '../test-storage.cjs';
+import { EventEmitter } from 'node:events';
+import { Readable } from 'node:stream';
 
-async function checkCopy(unsafe, journaled = false, replacement = null, recovery = null) {
+async function checkCopy(unsafe, journaled = false, replacement = null, recovery = null, preparation = null) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'pipeliner-54-update-copy-'))), directory = join(root, 'updates');
   await mkdir(directory, { mode: 0o700 });
   const installed = join(root, 'Pipeliner.app'), team = 'ABCDEF1234', helper = join(installed, 'Contents/Resources/helpers/update-exchange');
@@ -35,7 +37,7 @@ async function checkCopy(unsafe, journaled = false, replacement = null, recovery
     await writeFile(join(bundle, 'Contents/Resources/helpers/update-exchange'), 'Synthetic helper; never executed.', { mode: 0o700 });
   }
   await fixture(installed, from);
-  const bytes = Buffer.from('Synthetic image; never attached.'), file = join(directory, 'update-' + randomUUID() + '.dmg');
+  const bytes = Buffer.from('Synthetic image; never attached.'); let file = join(directory, 'update-' + randomUUID() + '.dmg');
   await writeFile(file, bytes, { mode: 0o600 });
   const { publicKey, privateKey } = generateKeyPairSync('ed25519');
   const trust = { id: 'synthetic-publisher', key: publicKey, origin: 'https://updates.example.com', path: '/desktop/releases/' };
@@ -43,7 +45,7 @@ async function checkCopy(unsafe, journaled = false, replacement = null, recovery
   const release = { kind: 'pipeliner-desktop-update', schemaVersion: 1, source: trust.id, ...current, version: to.version, sequence: 1,
     issuedAt: 900, expiresAt: 2000, url: trust.origin + trust.path + 'Pipeliner.dmg', bytes: bytes.length,
     sha256: createHash('sha256').update(bytes).digest('hex'), sourceCommit: to.sourceCommit, gitTree: to.gitTree };
-  let mode, mount, attached, copied, detached, authorized, controller, destination, vault, history, journal, journalToken, workspaces, development, artifacts, db, custodyFailure, lease, exchanges = 0;
+  let mode, mount, attached, copied, detached, authorized, controller, destination, vault, history, journal, journalToken, workspaces, development, artifacts, db, custodyFailure, lease, preparationOptions, exchanges = 0;
   const quarantine = '0081;00000000;PipelinerSynthetic54;';
   const entities = () => [{ 'dev-entry': '/dev/disk999' }, { 'dev-entry': '/dev/disk999s1', 'mount-point': mount }];
   const run = async (command, args, signal, input) => {
@@ -54,6 +56,10 @@ async function checkCopy(unsafe, journaled = false, replacement = null, recovery
       if (args[0] === 'attach') {
         mount = args[args.indexOf('-mountpoint') + 1]; attached = true;
         const bundle = join(mount, 'Pipeliner.app'); await fixture(bundle, mode === 'wrong-target' ? { ...to, gitTree: 'd'.repeat(40) } : to);
+        if (mode === 'candidate-support') {
+          const path = join(bundle, 'Contents/Resources/pipeliner-data.json'), support = JSON.parse(await readFile(path, 'utf8'));
+          support.codexCLI = '0.161.0'; await writeFile(path, canonicalJSON(support) + '\n');
+        }
         const framework = join(bundle, 'Contents/Frameworks/Synthetic.framework/Versions/A'); await mkdir(framework, { recursive: true, mode: 0o700 });
         await writeFile(join(framework, 'Synthetic'), 'Synthetic framework bytes', { mode: 0o600 });
         await symlink('A', join(framework, '../Current'));
@@ -118,7 +124,8 @@ async function checkCopy(unsafe, journaled = false, replacement = null, recovery
       return { stdout: '', stderr: '' };
     }
     if (command === '/usr/bin/codesign') {
-      if (journaled) {
+      if (preparation) await assert.rejects(journal.prepare(preparationOptions, { run }));
+      if (journaled && (!preparation || journal.read()?.copy)) {
         await assert.rejects(journal.stageBundle(journalToken, { installed: { bundle: installed, team, identity: from }, history, trust, current,
           maxBytes: 1024 ** 2, reserveBytes: 1024 ** 2 }, { run }));
         assert.throws(() => journal.cancel(journalToken));
@@ -153,8 +160,70 @@ async function checkCopy(unsafe, journaled = false, replacement = null, recovery
       workspaces.register({ id: 'repo-one', repositoryId: 'repository-one', slug: 'synthetic/one', localKey: '1:2', path: root, project: { id: 'project-one' } });
       workspaces.select('repo-one'); workspaces.saveIssueContext('repo-one', { selected: '54', source: 'synthetic-pm-selection' });
       artifacts = await openArtifactStore(root, { vault, limits: () => ({ keepLatest: 3, warningBytes: 1024 ** 3, capacityBytes: 2 * 1024 ** 3 }) });
-      const backups = captureUpdateBackups({ directory: root, vault, build: from, checkpoint() {} });
       journal = openUpdateMaintenance(root, { vault, clock: () => 1000 });
+      if (preparation) {
+        await rm(file); reset(preparation); let requests = 0, closed = 0;
+        if (preparation === 'valid-preparation') await rm(directory, { recursive: true });
+        preparationOptions = { installed: { bundle: installed, team, identity: from }, history, trust, current,
+          maxBytes: 1024 ** 2, reserveBytes: 1024 ** 2, timeoutMs: 30000, signal: controller.signal, checkpoint() { if (!authorized) throw Error('Synthetic lost admission'); } };
+        const native = { run, resolve: async () => {
+          if (mode === 'filename-collision') { file = journal.read().installer.file; await writeFile(file, 'Preserve unrelated collision', { mode: 0o600 }); }
+          return { address: '8.8.8.8', family: 4 };
+        },
+          request(url, options, callback) {
+            requests++; const intent = journal.read(); file = intent.installer.file;
+            assert.equal(intent.phase, 'preparing'); assert.deepEqual(intent.from, from); assert.deepEqual(intent.to, to);
+            assert.deepEqual(intent.installer, { file: join(directory, 'update-' + intent.id + '.dmg'), bytes: release.bytes, sha256: release.sha256 });
+            const persisted = openUpdateMaintenance(root, { vault, clock: () => 1000 });
+            try { assert.deepEqual(persisted.read(), intent); assert.equal(persisted.owned(), false); } finally { persisted.close(); }
+            assert.equal(url.href, release.url); assert.equal(options.rejectUnauthorized, true); assert.equal(options.agent, false);
+            options.lookup(url.hostname, {}, (error, address, family) => { assert.equal(error, null); assert.equal(address, '8.8.8.8'); assert.equal(family, 4); });
+            const req = new EventEmitter(), socket = new EventEmitter(); socket.closed = false; req.socket = socket;
+            req.destroy = () => { if (!socket.closed) { socket.closed = true; setImmediate(() => { closed++; socket.emit('close'); req.emit('close'); }); } };
+            req.end = () => {
+              if (mode === 'request-refusal') { setImmediate(() => req.emit('error', Error('Synthetic request refusal'))); return; }
+              const response = Readable.from((async function* () { yield bytes; if (mode === 'stale-download') authorized = false; })(), { objectMode: false });
+              response.statusCode = 200; response.headers = { 'content-type': 'application/octet-stream', 'content-length': String(bytes.length) }; callback(response);
+            }; return req;
+          } };
+        if (preparation === 'pre-abort') controller.abort();
+        if (preparation === 'backup-refusal') { db = new DatabaseSync(join(root, 'development.sqlite')); db.exec('PRAGMA user_version=3'); db.close(); db = undefined; }
+        if (preparation === 'valid-preparation') {
+          let getters = 0;
+          await assert.rejects(journal.prepare({ ...preparationOptions, get installed() { getters++; return preparationOptions.installed; } }, native));
+          assert.equal(getters, 0); assert.equal(journal.clear(), true); assert.equal(requests, 0);
+          journalToken = await journal.prepare(preparationOptions, native);
+          const intent = journal.read(); assert.equal(intent.phase, 'verified'); assert.equal(intent.backups.databases.length, 3);
+          assert.deepEqual(intent.copy.receipt.identity, to); assert.equal(intent.installer.file, file); assert(Object.isFrozen(journalToken));
+          assert.equal(detached, 1); assert.equal(attached, false); assert.equal(copied, 1);
+          await assert.rejects(journal.prepare(preparationOptions, native)); assert.equal(requests, 1);
+          assert.throws(() => journal.cancel(journalToken)); await rm(intent.copy.directory, { recursive: true });
+          assert.throws(() => journal.cancel(journalToken)); await rm(file); journal.cancel(journalToken); assert.equal(journal.clear(), true);
+        } else {
+          await assert.rejects(journal.prepare(preparationOptions, native));
+          if (['pre-abort', 'installed-signature'].includes(preparation)) {
+            assert.equal(requests, 0); assert.equal(journal.clear(), true); assert.deepEqual(await readdir(directory), []);
+          } else {
+            const pending = journal.read(); assert.equal(pending.phase, 'repair-required'); assert.equal(journal.clear(), false);
+            assert.deepEqual(pending.installer, { file, bytes: release.bytes, sha256: release.sha256 });
+            if (['request-refusal', 'stale-download'].includes(preparation)) {
+              assert.equal(pending.backups, undefined); assert.deepEqual(await readdir(directory), []);
+            } else if (preparation === 'filename-collision') {
+              assert.equal(await readFile(file, 'utf8'), 'Preserve unrelated collision'); assert.equal(requests, 0);
+              assert.equal(pending.backups, undefined); assert.equal(pending.copy, undefined);
+            } else assert.deepEqual(await readFile(file), bytes);
+            if (preparation === 'backup-refusal') { assert.equal(pending.backups, undefined); assert.equal(pending.copy, undefined); assert.equal(copied, 0); }
+            if (['copy', 'cancel', 'candidate-support'].includes(preparation)) assert.equal(pending.backups.databases.length, 3);
+            journal.close(); journal = openUpdateMaintenance(root, { vault, clock: () => 1000 });
+            assert.deepEqual(journal.read(), pending); assert.equal(journal.owned(), false); assert.equal(journal.clear(), false);
+            await assert.rejects(journal.prepare(preparationOptions, native)); assert.equal(requests, preparation === 'filename-collision' ? 0 : 1);
+          }
+        }
+        assert.equal(closed, requests); assert.equal(exchanges, 0);
+        assert.deepEqual(JSON.parse(await readFile(join(installed, 'Contents/Resources/pipeliner-build.json'), 'utf8')), from);
+        return;
+      }
+      const backups = captureUpdateBackups({ directory: root, vault, build: from, checkpoint() {} });
       const plan = { from, to, bytes: release.bytes, sha256: release.sha256 }, staged = { file, bytes: release.bytes, sha256: release.sha256, release };
       const binding = { history, trust, current, checkpoint() {} };
       const copy = (token, selected = 'valid', extra = {}) => {
@@ -354,4 +423,8 @@ test('startup reconciliation requires the exact exchanged target and compatible 
   for (const recovery of ['valid-relaunch', 'wrong-build', 'relaunch-signature', 'changed-bundle', 'missing-data', 'future-data', 'missing-support', 'changed-support', 'changed-provider', 'cancel', 'lost-checkpoint', 'journal-refusal', 'custody-refusal'])
     await checkCopy(false, true, 'valid-swap', recovery);
   await checkCopy(false, true, 'swap-journal-refusal', 'uncertain-relaunch');
+});
+test('host preparation records download custody before effects and preserves verified or failed recovery without replacement', async () => {
+  for (const mode of ['valid-preparation', 'pre-abort', 'installed-signature', 'filename-collision', 'request-refusal', 'stale-download', 'backup-refusal', 'copy', 'cancel', 'candidate-support'])
+    await checkCopy(false, true, null, null, mode);
 });

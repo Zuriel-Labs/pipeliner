@@ -100,7 +100,7 @@ export async function stageUpdateInstaller(options, { request = httpsRequest, re
     await Promise.all([reqClosed, socketClosed, responseClosed]); if (repair) throw Error();
   }
   try {
-    record(options, ['directory', 'history', 'trust', 'current', 'maxBytes', 'reserveBytes', 'timeoutMs', 'isCurrent'], ['signal']);
+    record(options, ['directory', 'history', 'trust', 'current', 'maxBytes', 'reserveBytes', 'timeoutMs', 'isCurrent'], ['signal', 'id']);
     record(options.trust, ['id', 'key', 'origin', 'path']); record(options.current, ['channel', 'platform', 'architecture', 'version']);
     options = { ...options, trust: { ...options.trust }, current: { ...options.current } };
     if (![request, resolve, clock, options.isCurrent, options.history?.read].every(value => typeof value === 'function')
@@ -108,6 +108,7 @@ export async function stageUpdateInstaller(options, { request = httpsRequest, re
       || !Number.isSafeInteger(options.maxBytes) || options.maxBytes < 1 || options.maxBytes > 8 * 1024 ** 3
       || !Number.isSafeInteger(options.reserveBytes) || options.reserveBytes < 0
       || !Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 100 || options.timeoutMs > 1800000
+      || options.id !== undefined && (typeof options.id !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(options.id))
       || options.signal !== undefined && !(options.signal instanceof AbortSignal)) throw Error();
     const trust = { ...options.trust }, current = { ...options.current }, began = clock(), controller = new AbortController();
     checkUpdateContext(trust, { ...current, sequence: 0 }, began);
@@ -134,7 +135,7 @@ export async function stageUpdateInstaller(options, { request = httpsRequest, re
     const target = await resolve(url, undefined, signal); record(target, ['address', 'family']);
     if (url.href !== endpoint || !publicAddress(target.address) || isIP(target.address) !== target.family) throw Error();
     const pinned = { ...target }; await ready();
-    path = join(options.directory, 'update-' + randomUUID() + '.dmg');
+    path = join(options.directory, 'update-' + (options.id ?? randomUUID()) + '.dmg');
     file = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW, 0o600); owner = await file.stat();
     await owned(); await parent.sync();
     try {

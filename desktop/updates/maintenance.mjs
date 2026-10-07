@@ -1,13 +1,13 @@
-import { lstatSync, realpathSync, openSync, fstatSync, closeSync, fsyncSync, constants } from 'node:fs';
+import { lstatSync, realpathSync, openSync, fstatSync, closeSync, fsyncSync, mkdirSync, constants } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { protectedFile } from '../core/storage.mjs';
 import { canonicalJSON, immutable, record } from '../core/settings.mjs';
 import { createRecordCodec } from '../privacy/records.mjs';
 import { buildIdentity, readDataCompatibility, requireSameDataSupport } from '../package/build.mjs';
-import { isNewerUpdateVersion } from './manifest.mjs';
-import { updateBackups, verifyUpdateBackups } from './backup.mjs';
-import { verifyStagedInstaller } from './stage.mjs';
+import { isNewerUpdateVersion, checkUpdateContext } from './manifest.mjs';
+import { updateBackups, verifyUpdateBackups, captureUpdateBackups } from './backup.mjs';
+import { verifyStagedInstaller, stageUpdateInstaller } from './stage.mjs';
 import { stageMacUpdateBundle } from './copy.mjs';
 import { runMacUpdateCommand, verifyMacUpdateBundle } from './mac.mjs';
 import { openWorkspaceStore } from '../repositories/store.mjs';
@@ -95,7 +95,7 @@ export function openUpdateMaintenance(directory, { vault, clock = Date.now }) {
       try { fsyncSync(parent); } finally { closeSync(parent); }
     }
     if (db.prepare('PRAGMA quick_check').get().quick_check !== 'ok') throw Error();
-    let closed = false, active, recovering = false;
+    let closed = false, active, recovering = false, preparing = false;
     function readState() {
       if (closed) throw Error();
       const current = lstatSync(path), parent = lstatSync(directory), now = clock();
@@ -152,11 +152,73 @@ export function openUpdateMaintenance(directory, { vault, clock = Date.now }) {
       });
     }
     readCompleted();
-    return Object.freeze({
+    const journal = Object.freeze({
       read() { return guarded(() => immutable(readState().value)); },
       completed() { return guarded(() => immutable(readCompleted())); },
       clear() { try { return readState().value === null; } catch { return false; } },
       owned() { try { return owned(readState()); } catch { return false; } },
+      // Host-only composition under the caller's exclusive maintenance checkpoint; no replacement or restoration.
+      async prepare(options, { run = runMacUpdateCommand, request, resolve: resolver } = {}) {
+        let token, acquired = false;
+        try {
+          record(options, ['installed', 'history', 'trust', 'current', 'maxBytes', 'reserveBytes', 'timeoutMs', 'checkpoint', 'signal']);
+          if (Object.values(Object.getOwnPropertyDescriptors(options)).some(value => value.get || value.set)
+            || preparing || recovering || typeof run !== 'function' || typeof options.checkpoint !== 'function'
+            || typeof options.history?.read !== 'function' || !(options.signal instanceof AbortSignal)
+            || request !== undefined && typeof request !== 'function' || resolver !== undefined && typeof resolver !== 'function'
+            || !Number.isSafeInteger(options.maxBytes) || options.maxBytes < 1 || options.maxBytes > 8 * 1024 ** 3
+            || !Number.isSafeInteger(options.reserveBytes) || options.reserveBytes < 1024 ** 2 || options.reserveBytes > 1024 ** 4
+            || !Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 100 || options.timeoutMs > 1800000) throw Error();
+          canonicalJSON(options.installed); canonicalJSON(options.current); record(options.installed, ['bundle', 'team', 'identity']);
+          record(options.current, ['channel', 'version', 'platform', 'architecture']); record(options.trust, ['id', 'key', 'origin', 'path']);
+          const installed = immutable(structuredClone(options.installed)), trust = { ...options.trust }, current = { ...options.current };
+          const { history, checkpoint, signal, maxBytes, reserveBytes, timeoutMs } = options, from = buildIdentity(installed.identity);
+          if (['version', 'platform', 'architecture'].some(key => current[key] !== from[key])) throw Error();
+          preparing = true; acquired = true; let release;
+          function check() {
+            signal.throwIfAborted(); checkpoint(); signal.throwIfAborted(); const state = readState(), now = clock();
+            if (token ? !owned(state) || token !== active.token : state.value !== null) throw Error();
+            checkUpdateContext(trust, { ...current, sequence: 0 }, now);
+            const saved = history.read(trust, current), next = saved.availability?.release;
+            if (!saved.availability?.available || !next || saved.sequence !== next.sequence || next.bytes > maxBytes
+              || now < next.issuedAt || now >= next.expiresAt || release && canonicalJSON(next) !== canonicalJSON(release)) throw Error();
+            return immutable(structuredClone(next));
+          }
+          release = check();
+          const to = buildIdentity({ ...from, version: release.version, sourceCommit: release.sourceCommit, gitTree: release.gitTree });
+          await verifyMacUpdateBundle({ ...installed, signal }, { run }); check();
+          const sourceSupport = await readDataCompatibility(installed.bundle, from, { signal }); check();
+          requireSameDataSupport(sourceSupport, sourceSupport);
+          if (lstatSync(installed.bundle).dev !== root.dev) throw Error();
+          token = journal.begin({ from, to, bytes: release.bytes, sha256: release.sha256 }); active.preparing = true;
+          active.revision = transaction(state => {
+            if (!owned(state) || token !== active.token || state.value.phase !== 'preparing') throw Error();
+            // In preparing this is custody metadata, not verified bytes. bindInstaller must freshly authenticate it before staged.
+            return save(state, { ...state.value, installer: { file: directory + '/updates/update-' + state.value.id + '.dmg', bytes: release.bytes, sha256: release.sha256 } });
+          });
+          active.download = true;
+          check(); const folder = directory + '/updates';
+          try { mkdirSync(folder, { mode: 0o700 }); } catch (error) { if (error.code !== 'EEXIST') throw error; }
+          const parent = lstatSync(folder);
+          if (!parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== process.getuid() || (parent.mode & 0o777) !== 0o700
+            || parent.dev !== root.dev || realpathSync(folder) !== folder) throw Error();
+          const fd = openSync(directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+          try { fsyncSync(fd); } finally { closeSync(fd); }
+          const staged = await stageUpdateInstaller({ directory: folder, id: journal.read().id, history, trust, current,
+            maxBytes, reserveBytes, timeoutMs, signal, isCurrent: () => { try { check(); return true; } catch { return false; } } }, { request, resolve: resolver, clock });
+          check(); const binding = { history, trust, current, checkpoint: check, signal };
+          await journal.bindInstaller(token, staged, binding); check();
+          const backups = captureUpdateBackups({ directory, vault, build: from, checkpoint: check, signal }); check();
+          journal.bindBackups(token, backups); check();
+          const receipt = await journal.stageBundle(token, { ...binding, installed, maxBytes, reserveBytes }, { run }); check();
+          const source = await readDataCompatibility(installed.bundle, from, { signal }); check();
+          const candidate = await readDataCompatibility(receipt.bundle, to, { signal }); check(); requireSameDataSupport(source, candidate);
+          journal.advance(token, 'verified'); check(); return token;
+        } catch {
+          if (token) try { journal.advance(token, 'repair-required'); } catch { /* Preserve the last durable intent if repair recording is unavailable. */ }
+          throw Error(token ? 'maintenance-preparation-recovery-required' : 'maintenance-state-unavailable');
+        } finally { if (acquired) preparing = false; if (token && active?.token === token) active.preparing = false; }
+      },
       begin(input) {
         const token = Object.freeze({}), value = guarded(() => { plan(input); return structuredClone(input); });
         const id = randomUUID(), revision = transaction(state => {
@@ -183,7 +245,9 @@ export function openUpdateMaintenance(directory, { vault, clock = Date.now }) {
           record(options, ['history', 'trust', 'current'], ['checkpoint', 'signal']); canonicalJSON(receipt); record(receipt, ['file', 'bytes', 'sha256', 'release']);
           const candidate = immutable(structuredClone(receipt)), checkpoint = options.checkpoint ?? (() => {}), signal = options.signal;
           const trust = { ...options.trust }, current = { ...options.current };
-          const initial = readState(), eligible = state => owned(state) && token === active.token && !state.value.installer
+          const initial = readState(), eligible = state => owned(state) && token === active.token
+            && (!state.value.installer || active.preparing && state.value.phase === 'preparing'
+              && canonicalJSON(state.value.installer) === canonicalJSON({ file: candidate.file, bytes: candidate.bytes, sha256: candidate.sha256 }))
             && ['preparing', 'staged'].includes(state.value.phase) && state.row.revision === initial.row.revision;
           if (typeof checkpoint !== 'function' || signal !== undefined && !(signal instanceof AbortSignal) || !eligible(initial)
             || ['version', 'platform', 'architecture'].some(key => current[key] !== initial.value.from[key])) throw Error();
@@ -456,7 +520,12 @@ export function openUpdateMaintenance(directory, { vault, clock = Date.now }) {
       // The installer must verify owned cleanup before cancelling a pre-replacement intent.
       cancel(token) {
         transaction(state => {
-          if (!owned(state) || token !== active.token || active.copying || !['preparing', 'staged', 'verified'].includes(state.value.phase)) throw Error();
+          if (!owned(state) || token !== active.token || active.copying || active.preparing || !['preparing', 'staged', 'verified'].includes(state.value.phase)) throw Error();
+          if (active.download) {
+            const folder = directory + '/updates', parent = lstatSync(folder, { throwIfNoEntry: false });
+            if (parent && (!parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== process.getuid() || (parent.mode & 0o777) !== 0o700
+              || realpathSync(folder) !== folder || parent.dev !== root.dev) || lstatSync(state.value.installer.file, { throwIfNoEntry: false })) throw Error();
+          }
           if (state.value.copy) {
             const folder = directory + '/updates', parent = lstatSync(folder);
             if (!parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== process.getuid() || (parent.mode & 0o777) !== 0o700
@@ -469,5 +538,6 @@ export function openUpdateMaintenance(directory, { vault, clock = Date.now }) {
       },
       close() { if (!closed) { closed = true; active = undefined; db.close(); } },
     });
+    return journal;
   } catch { db?.close(); throw Error('maintenance-state-unavailable'); }
 }

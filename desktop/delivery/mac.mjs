@@ -4,8 +4,17 @@ import { lstat, realpath } from 'node:fs/promises';
 const environment = { PATH: '/usr/bin:/bin', LC_ALL: 'C', HOME: process.env.HOME };
 function command(file, args, signal) {
   signal.throwIfAborted();
-  return new Promise((resolve, reject) => execFile(file, args, { env: environment, signal, timeout: 5000, maxBuffer: 32768 },
-    (error, stdout) => error ? reject(Error('Mac prerequisite check unavailable')) : resolve(stdout)));
+  return new Promise((resolve, reject) => {
+    let closed = false, output;
+    function finish() {
+      if (!closed || !output) return;
+      if (output.error || signal.aborted) reject(Error('Mac prerequisite check unavailable'));
+      else resolve(output.stdout);
+    }
+    const child = execFile(file, args, { env: environment, signal, timeout: 5000, maxBuffer: 32768 },
+      (error, stdout) => { output = { error, stdout }; finish(); });
+    child.once('close', () => { closed = true; finish(); });
+  });
 }
 export function signingPrerequisites(text) {
   const lines = text.trim().split('\n'), summary = /^\s*(\d+) valid identities found\s*$/.exec(lines.at(-1));

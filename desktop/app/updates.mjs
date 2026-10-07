@@ -5,10 +5,10 @@ export async function initUpdates({ el, message, show }) {
   let state, requests = 0, lastMessage;
   const category = el('button', 'Desktop Updates', 'category-button'); category.id = 'settings-updates'; category.setAttribute('aria-pressed', 'false'); document.querySelector('.settings-categories').append(category);
   const section = el('section'); section.id = 'update-settings'; section.hidden = true; section.setAttribute('aria-label', 'Desktop update settings'); $('settings-view').append(section);
-  const chatPreview = el('section'); chatPreview.id = 'update-chat-preview'; chatPreview.setAttribute('aria-label', 'Current Desktop update preview'); $('composer').before(chatPreview);
+  const chatPreview = el('section'); chatPreview.id = 'update-chat-preview'; chatPreview.setAttribute('aria-label', 'Current Desktop maintenance preview'); $('composer').before(chatPreview);
   function button(text, operation, extra = {}, id) {
     const node = el('button', text, operation === 'apply' ? 'primary' : 'secondary'); node.type = 'button'; if (id) node.id = id;
-    node.disabled = operation === 'status' ? requests > 0 : !state.storageAvailable || operation !== 'stop' && (requests > 0 || state.busy || state.recoveryRequired); node.addEventListener('click', () => request({ operation, ...extra })); return node;
+    node.disabled = operation === 'status' ? requests > 0 : !state.storageAvailable || !['stop', 'removal-cancel'].includes(operation) && (requests > 0 || state.busy || state.recoveryRequired); node.addEventListener('click', () => request({ operation, ...extra })); return node;
   }
   function preview(p, suffix = '') {
     const card = el('article', undefined, 'setup-preview'); card.id = 'update-preview' + suffix;
@@ -19,6 +19,17 @@ export async function initUpdates({ el, message, show }) {
     }
     card.append(el('p', 'Saves settings for a future check. No download, installation, restart or background service change.', 'small'),
       button('Apply update change', 'apply', { hash: p.hash }, 'update-apply' + suffix), button('Cancel change', 'cancel', {}, 'update-cancel' + suffix)); return card;
+  }
+  function removalPreview(p, suffix = '') {
+    const card = el('article', undefined, 'setup-preview'); card.id = 'update-removal-preview' + suffix;
+    card.append(el('h3', 'Review app removal'), el('p', 'This Mac · Pipeliner ' + p.version + '.', 'small'));
+    const data = el('dl', undefined, 'connection-data');
+    for (const [name, value] of [['Local credential records', p.credentialCount + ' records'], ['Background registration', p.backgroundStatus.replaceAll('-', ' ')],
+      ['App source', p.sourceCommit], ['App tree', p.gitTree], ['Inspection expires', new Date(p.expiresAt).toLocaleString()]]) data.append(el('dt', name), el('dd', value));
+    card.append(data, el('p', 'App removal would remove this app, its background registration and local credentials. Repository files, GitHub work and nonsecret local records stay preserved.'),
+      el('p', 'Deleting saved records is a separate choice. Local removal does not revoke access at providers.', 'small'),
+      el('p', 'Removal is unavailable in this installation. This inspection changes nothing.', 'availability'),
+      button('Discard inspection', 'removal-cancel', {}, 'update-removal-cancel' + suffix)); return card;
   }
   function render(snapshot) {
     if (state && snapshot.revision < state.revision) return;
@@ -31,7 +42,15 @@ export async function initUpdates({ el, message, show }) {
     const nodes = [head];
     if (state.recoveryRequired) {
       const card = el('article', undefined, 'connection-card'); card.id = 'update-recovery'; card.append(el('h3', 'Desktop maintenance needs recovery'));
-      const saved = state.maintenance;
+      const saved = state.maintenance, removal = state.removal;
+      if (removal) {
+        const phase = { 'logout-pending': 'Account logout needs verification', 'service-pending': 'Background removal needs verification',
+          'credentials-pending': 'Local credential cleanup needs verification', 'trash-pending': 'App removal needs verification', removed: 'Removal receipt recorded' }[removal.phase];
+        const data = el('dl', undefined, 'connection-data');
+        for (const [name, value] of [['Removal record', phase], ['App version', removal.version], ['Captured credential records', removal.credentialCount + ' records'],
+          ['Captured background state', removal.backgroundStatus.replaceAll('-', ' ')]]) data.append(el('dt', name), el('dd', value));
+        card.append(data, el('p', 'Recorded removal state does not freshly verify logout, credential cleanup or a successful native removal.', 'small'));
+      }
       if (saved) {
         const phase = { preparing: 'Preparation recorded', staged: 'Installer preparation recorded', verified: 'App verification recorded',
           replacing: 'Replacement outcome needs inspection', relaunching: 'Updated startup needs verification', 'repair-required': 'Repair required' }[saved.phase];
@@ -40,8 +59,8 @@ export async function initUpdates({ el, message, show }) {
           ['Installer record', saved.installerRecorded ? 'Recorded' : 'Not recorded'], ['Backup records', saved.backupsRecorded + ' records'],
           ['Prepared app record', saved.candidateRecorded ? 'Recorded' : 'Not recorded'], ['Replacement record', saved.replacementRecorded ? 'Recorded' : 'Not recorded']]) data.append(el('dt', name), el('dd', value));
         card.append(data, el('p', 'These protected records do not freshly verify the files or a successful recovery.', 'small'));
-      } else card.append(el('p', 'Protected maintenance details could not be read. Existing app files and data stay preserved.', 'availability'));
-      card.append(el('p', 'Keep the installed app and saved data. Work and changing settings stay blocked until recovery is verified. Restart does not replay the interrupted update.', 'availability'),
+      } else if (!removal) card.append(el('p', 'Protected maintenance details could not be read. Existing app files and data stay preserved.', 'availability'));
+      card.append(el('p', 'Keep the installed app and saved data. Work and changing settings stay blocked until recovery is verified. Restart does not replay interrupted maintenance.', 'availability'),
         el('p', 'Repair, rollback and removal are unavailable in this installation. This view only reads saved records.', 'small'), button('Refresh recovery', 'status', {}, 'update-recovery-refresh'));
       nodes.push(card);
     }
@@ -80,25 +99,36 @@ export async function initUpdates({ el, message, show }) {
         ['Last check', state.lastCheck === null ? 'Not checked' : new Date(state.lastCheck).toLocaleString()], ['Available release', state.release ? state.release.version + ' · ' + channelName(state.release.channel) : state.upToDate ? 'No newer signed release provided' : 'No verified release'],
         ['Migration and recovery', state.recoveryRequired ? 'Unresolved Desktop maintenance; work stays blocked' : 'No installation preview or verified rollback target']]) data.append(el('dt', name), el('dd', value));
       if (state.release) data.append(el('dt', 'Release checksum'), el('dd', state.release.sha256), el('dt', 'Release source'), el('dd', state.release.sourceCommit));
-      availability.append(data, el('p', state.busy ? 'Checking signed availability. Cancel safely before any installer download.' : 'Availability checks read signed metadata. Installation requires a verified installer, idle work and a recovery plan.', 'availability'),
+      availability.append(data, el('p', state.busy ? state.busyOperation === 'removal-inspect' ? 'Inspecting app removal. Cancel inspection; no removal runs.'
+        : state.busyOperation === 'install' ? 'Preparing the verified update and recovery copies.' : 'Checking signed availability. Cancel safely before any installer download.'
+        : 'Availability checks read signed metadata. Installation requires a verified installer, idle work and a recovery plan.', 'availability'),
         el('p', 'No automatic download, installation or restart. Updates cannot enable background operation or change permissions.', 'small'));
       const check = button('Check Now', 'check', {}, 'update-check'), install = button('Install when idle', 'install', {}, 'update-install'); check.disabled ||= !state.sourceQualified; install.disabled = true;
-      availability.append(check, install); if (state.busy) availability.append(button('Cancel check', 'stop', {}, 'update-stop')); nodes.push(availability);
+      availability.append(check, install); if (state.busy) availability.append(button('Cancel operation', 'stop', {}, 'update-stop')); nodes.push(availability);
+      const removal = el('article', undefined, 'connection-card'); removal.id = 'update-removal'; removal.append(el('h3', 'App removal'),
+        el('p', 'Review this app, local credentials and background registration. Repository files, GitHub work and nonsecret records stay preserved.', 'small'));
+      const inspect = button('Review app removal', 'removal-inspect', {}, 'update-removal-review'); inspect.disabled ||= !state.removalInspectable;
+      removal.append(inspect); if (state.busyOperation === 'removal-inspect') removal.append(button('Cancel inspection', 'removal-cancel', {}, 'update-removal-stop'));
+      if (!state.removalInspectable) removal.append(el('p', 'Inspection needs the installed app and protected idle state.', 'availability')); nodes.push(removal);
     }
-    if (state.preview) nodes.push(preview(state.preview)); chatPreview.replaceChildren(...(state.preview ? [preview(state.preview, '-chat')] : []));
+    if (state.preview) nodes.push(preview(state.preview)); if (state.removalPreview) nodes.push(removalPreview(state.removalPreview));
+    chatPreview.replaceChildren(...(state.preview ? [preview(state.preview, '-chat')] : state.removalPreview ? [removalPreview(state.removalPreview, '-chat')] : []));
     if (state.message) nodes.push(el('p', state.message, 'protected-state')); section.replaceChildren(...nodes);
     if (focused && $(focused) && !$(focused).disabled) $(focused).focus({ preventScroll: true });
     else if (!section.hidden && focused?.startsWith('update-')) {
-      const channel = $('update-channel'); (channel && !channel.disabled ? channel : $('update-recovery-refresh'))?.focus({ preventScroll: true });
+      const next = focused.startsWith('update-removal-') ? $('update-removal-review') : $('update-channel');
+      (next && !next.disabled ? next : $('update-recovery-refresh'))?.focus({ preventScroll: true });
     }
     if (state.message && state.message !== lastMessage) { message(state.message); $('announcement').textContent = state.message; lastMessage = state.message; }
   }
   async function request(payload, text) {
-    if (!state || requests && payload.operation !== 'stop') return; requests++;
+    const operation = payload.operation === 'chat' ? updateCommand(payload.text)?.operation : payload.operation;
+    if (!state || requests && !['stop', 'removal-cancel'].includes(operation)) return; requests++;
     if (text) message(text, true); if (text && updateCommand(text)?.operation === 'view') show();
     try {
       const result = await window.pipeliner.updateRequest(payload.operation === 'status' ? payload : { ...payload, contextRevision: state.revision }); requests--; render(result.snapshot ?? result);
-      if (payload.operation === 'status' && state.recoveryRequired) $('announcement').textContent = 'Maintenance recovery refreshed. ' + (state.maintenance ? 'Recorded state: ' + state.maintenance.phase.replaceAll('-', ' ') + '.' : 'Protected maintenance details are unavailable.');
+      if (payload.operation === 'status' && state.recoveryRequired) $('announcement').textContent = 'Maintenance recovery refreshed. ' + (state.removal ? 'Recorded removal: ' + state.removal.phase.replaceAll('-', ' ') + '.'
+        : state.maintenance ? 'Recorded state: ' + state.maintenance.phase.replaceAll('-', ' ') + '.' : 'Protected maintenance details are unavailable.');
     }
     catch { requests--; render(await window.pipeliner.updateRequest({ operation: 'status' })); message('Update action could not finish. Inspect saved settings and create a fresh preview.'); }
     if (!$('chat-view').hidden) $('prompt').focus({ preventScroll: true });

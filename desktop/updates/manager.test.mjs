@@ -4,7 +4,7 @@ import { mkdtempSync, realpathSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID, generateKeyPairSync, sign } from 'node:crypto';
-import { canonicalJSON } from '../core/settings.mjs';
+import { canonicalJSON, immutable } from '../core/settings.mjs';
 import { openVault } from '../connections/vault.mjs';
 import { openUpdateHistory } from './history.mjs';
 import { openUpdateMaintenance } from './maintenance.mjs';
@@ -13,6 +13,7 @@ import { createUpdateManager } from './manager.mjs';
 import { updateCommand } from './commands.mjs';
 import { createUpdateControlChannel } from '../core/control.mjs';
 import { createMaintenanceGate } from './idle.mjs';
+import { openUninstallJournal } from './uninstall.mjs';
 
 function fixture() {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-54-updates-')));
@@ -31,6 +32,75 @@ function fixture() {
     reopen() { manager.close(); policy.close(); policy = openPolicyStore(root, { catalog, clock: () => clock }); open(); },
     close() { manager.close(); policy.close(); rmSync(root, { recursive: true }); assert.equal(existsSync(root), false); } };
 }
+
+test('PM removal inspection is read-only, redacted and fenced across idle capture, expiry, cancellation and recovery', async () => {
+  for (const mode of ['normal', 'cancel', 'policy', 'close', 'recovery']) {
+    const f = fixture(); let update, vault, journal, pending, stopping, finish, entered, now = 1000, idle = true, captures = 0, settled = 0;
+    const held = new Promise(resolve => { finish = resolve; }), started = new Promise(resolve => { entered = resolve; });
+    try {
+      vault = await openVault(f.root, { available: async () => true, encrypt: async text => Buffer.from(text), decrypt: async bytes => ({ result: bytes.toString(), shouldReEncrypt: false }) });
+      vault.save('ollama', vault.begin('ollama'), { synthetic: true }); journal = openUninstallJournal(f.root, { vault, clock: () => now });
+      const plan = immutable({ bundle: join(f.root, 'Pipeliner.app'), identity: { kind: 'pipeliner-desktop-build', schemaVersion: 1,
+        sourceCommit: 'a'.repeat(40), gitTree: 'b'.repeat(40), version: '0.1.0', platform: 'darwin', architecture: 'arm64' },
+        team: 'ABCDEFGHIJ', custody: { device: '1', inode: '2' }, credentials: vault.previewCredentialRemoval(),
+        service: { qualified: true, status: 'enabled' }, recordInventorySha256: 'c'.repeat(64) });
+      const before = vault.connectionInventory(), policyBefore = f.policy.worker.read(null);
+      const maintenance = createMaintenanceGate({ ready: () => idle, verify: async () => true, recovery: () => !journal.clear() });
+      update = createUpdateManager({ policy: f.policy, version: '0.1.0', maintenance, clock: () => now, recovery: () => !journal.clear(),
+        removalDetails: () => { const saved = journal.read(); return saved ? { phase: saved.phase, version: saved.plan.identity.version,
+          credentialCount: saved.plan.credentials.before.stored, backgroundStatus: saved.plan.service.status } : null; },
+        async inspectRemoval({ checkpoint, signal }) {
+          captures++; entered();
+          try { checkpoint(); if (mode !== 'normal') await held; signal.throwIfAborted(); checkpoint(); return plan; }
+          finally { settled++; }
+        } });
+      const url = 'pipeliner://app/index.html', frame = { url, parent: null }, contents = { mainFrame: frame, isDestroyed: () => false }, event = { sender: contents, senderFrame: frame };
+      const channel = createUpdateControlChannel(update, { contents, url, context: () => ({ revision: update.status().revision }) });
+      assert.equal(update.status().removalInspectable, true); assert.equal(update.status().removalQualified, false);
+      const request = () => ({ operation: 'chat', text: 'Review Desktop removal', contextRevision: update.status().revision });
+      assert.throws(() => channel.dispatch({ ...event, sender: {} }, request()));
+      assert.throws(() => channel.dispatch({ ...event, senderFrame: { url, parent: frame } }, request()));
+      assert.throws(() => channel.dispatch(event, { operation: 'removal-inspect', contextRevision: update.status().revision, bundle: plan.bundle }));
+      assert.throws(() => channel.dispatch(event, { operation: 'removal-inspect', contextRevision: 0 })); assert.equal(captures, 0);
+      idle = false; await maintenance.control(() => channel.dispatch(event, request())); assert.equal(captures, 0); assert.equal(update.status().removalPreview, null);
+      idle = true; pending = maintenance.control(() => channel.dispatch(event, request())); await started;
+      if (mode !== 'normal') {
+        assert.equal(update.status().busy, true); assert.equal(maintenance.active(), true);
+        await maintenance.control(() => channel.dispatch(event, { operation: 'status' }), { passive: true });
+        await assert.rejects(maintenance.control(() => assert.fail('competing mutation')), /maintenance-active/);
+        if (mode === 'cancel') stopping = maintenance.control(() => channel.dispatch(event, { operation: 'chat', text: 'Cancel Desktop removal', contextRevision: update.status().revision }), { passive: true });
+        if (mode === 'policy') { f.edit({ 'appearance.theme': 'dark' }); update.sync(); }
+        if (mode === 'close') stopping = update.close();
+        if (mode === 'recovery') { journal.begin(plan); update.sync(); }
+        if (stopping) { await new Promise(setImmediate); assert.equal(settled, 0); assert.equal(maintenance.active(), true); }
+        finish(); await stopping;
+      }
+      await pending; assert.equal(captures, 1); assert.equal(settled, 1); assert.equal(maintenance.active(), false);
+      assert.equal(update.status().removalQualified, false); assert.deepEqual(vault.connectionInventory(), before);
+      if (mode === 'normal') {
+        const preview = update.status().removalPreview;
+        assert.deepEqual(Object.keys(preview).sort(), ['backgroundStatus', 'credentialCount', 'expiresAt', 'gitTree', 'hash', 'sourceCommit', 'version']);
+        assert.equal(preview.credentialCount, 1); assert.equal(preview.version, '0.1.0'); assert.equal(preview.expiresAt, now + 900000);
+        assert.doesNotMatch(JSON.stringify(update.status()), new RegExp(f.root + '|ABCDEFGHIJ|' + plan.credentials.before.sha256));
+        assert.deepEqual(f.policy.worker.read(null), policyBefore); assert.equal(journal.read(), null);
+        now = preview.expiresAt + 1; assert.equal(update.status().removalPreview, null);
+        await maintenance.control(() => channel.dispatch(event, request())); await update.dispatch({ operation: 'chat', text: 'Cancel Desktop removal' });
+        assert.equal(update.status().removalPreview, null); assert.equal(journal.read(), null);
+      } else assert.equal(update.status().removalPreview, null);
+      if (mode === 'recovery') {
+        assert.deepEqual(update.status().removal, { phase: 'logout-pending', version: '0.1.0', credentialCount: 1, backgroundStatus: 'enabled' });
+        assert.equal(update.status().recoveryRequired, true); await assert.rejects(update.dispatch({ operation: 'removal-inspect' }), /maintenance-recovery-required/);
+        const unopened = createUpdateManager({ version: '0.1.0', recovery: () => true, removalDetails: () => update.status().removal });
+        assert.deepEqual((await unopened.dispatch({ operation: 'view' })).snapshot.removal, update.status().removal); assert.equal(unopened.status().storageAvailable, false); await unopened.close();
+        for (const details of [{ ...update.status().removal, path: f.root }, { ...update.status().removal, credentialCount: -1 }, { ...update.status().removal, phase: 'complete' }]) {
+          const refused = createUpdateManager({ recovery: () => true, removalDetails: () => details });
+          assert.equal(refused.status().removal, null); assert.equal(refused.status().recoveryRequired, true); await refused.close();
+        }
+        journal.close(); assert.equal(update.status().removal, null); assert.equal(update.status().recoveryRequired, true);
+      }
+    } finally { finish(); await Promise.allSettled([pending, stopping].filter(Boolean)); await update?.close(); journal?.close(); vault?.close(); f.close(); }
+  }
+});
 
 test('maintenance recovery view stays authenticated and read-only when normal policy storage is unopened', async () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-54-update-recovery-')));

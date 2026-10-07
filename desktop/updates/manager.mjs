@@ -4,20 +4,34 @@ import { updateShapes, updateCommand } from './commands.mjs';
 import { checkUpdateContext, parseUpdateVersion } from './manifest.mjs';
 import { readUpdateSource } from './source.mjs';
 import { endpointURL } from '../tools/transport.mjs';
+import { checkUninstallPlan } from './uninstall.mjs';
 
 export function createUpdateManager({ policy, version = null, history = null, sources = () => [], reader = readUpdateSource,
   host = { platform: process.platform, architecture: process.arch }, foreground = () => true, maintenance = null, recovery = () => false,
-  prepareInstaller = null, ownsIntent = () => false, recoveryDetails = () => null, initialRevision = 1, onChange = () => {}, onApplied = () => {} }) {
+  prepareInstaller = null, ownsIntent = () => false, recoveryDetails = () => null, inspectRemoval = null, removalDetails = () => null,
+  clock = Date.now, initialRevision = 1, onChange = () => {}, onApplied = () => {} }) {
   record(host, ['platform', 'architecture']);
-  if (!Number.isSafeInteger(initialRevision) || initialRevision < 1 || [onChange, onApplied, sources, reader, foreground, recovery, ownsIntent, recoveryDetails].some(fn => typeof fn !== 'function')
+  if (!Number.isSafeInteger(initialRevision) || initialRevision < 1 || [onChange, onApplied, sources, reader, foreground, recovery, ownsIntent, recoveryDetails, removalDetails, clock].some(fn => typeof fn !== 'function')
     || prepareInstaller !== null && typeof prepareInstaller !== 'function'
+    || inspectRemoval !== null && typeof inspectRemoval !== 'function'
     || history !== null && ['read', 'begin', 'complete', 'fail'].some(name => typeof history[name] !== 'function')
     || maintenance !== null && typeof maintenance.exclusive !== 'function'
     || Object.values(host).some(value => typeof value !== 'string' || !/^[a-z0-9_-]{1,16}$/.test(value))
     || version !== null && (typeof version !== 'string' || version.length > 128 || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?$/.test(version))) throw Error('Desktop update controls unavailable');
   host = { ...host };
   const recovering = () => { try { return recovery() !== false; } catch { return true; } };
-  const conversationId = randomUUID(); let revision = initialRevision, observed, preview = null, applied = null, message = null, closed = false, pending = null;
+  const conversationId = randomUUID(); let revision = initialRevision, observed, preview = null, removalPreview = null, applied = null, message = null, closed = false, pending = null;
+  function time() { const now = clock(); if (!Number.isSafeInteger(now) || now < 0 || now > Number.MAX_SAFE_INTEGER - 900000) throw Error('Desktop maintenance clock unavailable'); return now; }
+  function removalRecord() {
+    try {
+      const value = removalDetails(); if (value === null) return null;
+      canonicalJSON(value); record(value, ['phase', 'version', 'credentialCount', 'backgroundStatus']); parseUpdateVersion(value.version);
+      if (!['logout-pending', 'service-pending', 'credentials-pending', 'trash-pending', 'removed'].includes(value.phase)
+        || !Number.isSafeInteger(value.credentialCount) || value.credentialCount < 0 || value.credentialCount > 2048
+        || !['not-registered', 'enabled', 'requires-approval', 'not-found'].includes(value.backgroundStatus)) throw Error();
+      return { ...value };
+    } catch { return null; } // Details do not clear the independent physical recovery fence.
+  }
   function catalog() {
     const input = sources(), ids = new Set(), labels = new Set(); if (!Array.isArray(input) || input.length > 64) throw Error();
     const items = input.map(value => {
@@ -41,11 +55,12 @@ export function createUpdateManager({ policy, version = null, history = null, so
     try { return Boolean(operation?.intent && operation === pending && operation.kind === 'install' && ownsIntent(operation.intent) === true); }
     catch { return false; }
   }
-  const signature = value => canonicalJSON({ revision: value.view?.revision ?? null, catalog: value.approved.fingerprint, recovery: recovering() && !ownsPreparation() });
-  function invalidate() { if (preview) policy.control.invalidate(preview.inputId); preview = null; applied = null; }
+  const signature = value => canonicalJSON({ revision: value.view?.revision ?? null, catalog: value.approved.fingerprint, recovery: recovering() && !ownsPreparation(), removal: removalRecord() });
+  function invalidate() { if (preview) policy.control.invalidate(preview.inputId); preview = null; removalPreview = null; applied = null; }
   function sync() {
     const value = inspect(), current = signature(value);
     if (observed !== undefined && current !== observed) { invalidate(); pending?.controller.abort(); revision++; }
+    if (removalPreview && removalPreview.expiresAt < time()) { removalPreview = null; revision++; message = 'Removal inspection expired. Review Desktop removal again; app files and saved data are preserved.'; }
     observed = current; return value;
   }
   const capable = value => value.view && value.selected && history && version && host.platform === 'darwin' && host.architecture === 'arm64';
@@ -55,7 +70,7 @@ export function createUpdateManager({ policy, version = null, history = null, so
     const sourceName = id => id === null ? null : approved.items.find(item => item.trust.id === id)?.label ?? 'Unavailable saved source';
     const display = values => Object.fromEntries(preview.keys.map(id => [id, id === 'updates.source'
       ? { ...values[id], value: sourceName(values[id].value), configuredValue: sourceName(values[id].configuredValue) } : values[id]]));
-    const recoveryRequired = recovering(); let maintenance = null;
+    const recoveryRequired = recovering(); let maintenanceDetails = null;
     if (recoveryRequired) try {
       const value = recoveryDetails();
       if (value !== null) {
@@ -63,21 +78,52 @@ export function createUpdateManager({ policy, version = null, history = null, so
         if (!['preparing', 'staged', 'verified', 'replacing', 'relaunching', 'repair-required'].includes(value.phase)
           || !['installerRecorded', 'candidateRecorded', 'replacementRecorded'].every(key => typeof value[key] === 'boolean')
           || !Number.isSafeInteger(value.backupsRecorded) || value.backupsRecorded < 0 || value.backupsRecorded > 3) throw Error();
-        parseUpdateVersion(value.fromVersion); parseUpdateVersion(value.toVersion); maintenance = { ...value };
+        parseUpdateVersion(value.fromVersion); parseUpdateVersion(value.toVersion); maintenanceDetails = { ...value };
       }
     } catch { /* Unverified details are omitted; the physical recovery fence remains. */ }
     return { revision, storageAvailable: Boolean(view), recoveryRequired, scope: 'host', policyRevision: view?.revision ?? null, installedVersion: version,
       values: view ? { 'updates.channel': view.values['updates.channel'] } : null,
       sources: approved.items.map(item => ({ name: item.label })), sourceName: selected?.label ?? null,
       sourceConfigured: Boolean(view?.values['updates.source'].value), sourceQualified: Boolean(saved), installQualified: false, busy: Boolean(pending),
+      busyOperation: pending?.kind ?? (pending ? 'check' : null),
       lastCheck: saved?.lastCheck ?? null, upToDate: Boolean(saved?.availability && !saved.availability.available),
       release: saved?.availability?.available ? Object.fromEntries(['version', 'channel', 'platform', 'architecture', 'sequence', 'bytes', 'sha256', 'sourceCommit', 'gitTree', 'expiresAt']
         .map(key => [key, saved.availability.release[key]])) : null,
-      maintenance, preview: preview ? { hash: preview.hash, scope: preview.scope, target: preview.target, baseRevision: preview.baseRevision, expiresAt: preview.expiresAt,
+      maintenance: maintenanceDetails, removal: removalRecord(), removalInspectable: Boolean(view && version && inspectRemoval && maintenance && host.platform === 'darwin' && host.architecture === 'arm64' && !recoveryRequired),
+      removalQualified: false, removalPreview: removalPreview ? { ...removalPreview } : null,
+      preview: preview ? { hash: preview.hash, scope: preview.scope, target: preview.target, baseRevision: preview.baseRevision, expiresAt: preview.expiresAt,
         before: display(preview.before), after: display(preview.after) } : null,
       message: recoveryRequired && !ownsPreparation() ? 'Desktop maintenance needs verified recovery before work can resume. Keep the installed app and saved data; settings and repositories are preserved.' : message };
   }
   function publish() { try { onChange(status()); } catch { message = 'Update view needs refresh. Reopen Settings to inspect saved settings.'; } }
+  async function inspectAppRemoval() {
+    if (pending) return { snapshot: status() };
+    if (!status().removalInspectable) {
+      revision++; message = 'App removal inspection needs the packaged foreground Mac and protected idle state. No removal ran.'; publish(); return { snapshot: status() };
+    }
+    invalidate(); const operation = { kind: 'removal-inspect', controller: new AbortController(), signature: signature(inspect()) }; pending = operation;
+    revision++; message = 'Inspecting this app and preserved data while work is idle. No removal ran.';
+    operation.done = (async () => {
+      try {
+        await maintenance.exclusive(async checkpoint => {
+          const check = () => {
+            operation.controller.signal.throwIfAborted();
+            if (closed || pending !== operation || signature(sync()) !== operation.signature) throw Error('maintenance-deferred');
+            checkpoint(); operation.controller.signal.throwIfAborted();
+          };
+          check(); const captured = await inspectRemoval(Object.freeze({ checkpoint: check, signal: operation.controller.signal })); check();
+          checkUninstallPlan(captured); if (!Object.isFrozen(captured) || captured.identity.version !== version) throw Error();
+          const expiresAt = time() + 900000;
+          removalPreview = Object.freeze({ hash: createHash('sha256').update(canonicalJSON({ plan: captured, policyRevision: inspect().view.revision, expiresAt })).digest('hex'),
+            version: captured.identity.version, sourceCommit: captured.identity.sourceCommit, gitTree: captured.identity.gitTree,
+            credentialCount: captured.credentials.before.stored, backgroundStatus: captured.service.status, expiresAt });
+          message = 'Removal inspection ready. Verified removal is not yet available in this installation. App files, credentials and saved data are preserved.';
+        }, { signal: operation.controller.signal });
+      } catch { removalPreview = null; message = 'Removal inspection did not finish: work is busy, changed or unverified. No removal ran; app files and saved data are preserved.'; }
+      finally { pending = null; revision++; publish(); }
+    })();
+    publish(); await operation.done; return { snapshot: status() };
+  }
   function prepare(changes, reset = []) {
     record(changes, [], ['updates.channel', 'updates.source']); invalidate();
     const input = policy.control.capture({ commandId: randomUUID(), conversationId, target: null, text: 'Review this Mac’s Desktop update settings.' });
@@ -140,6 +186,12 @@ export function createUpdateManager({ policy, version = null, history = null, so
     }
     if (payload.operation === 'check') return check(true);
     if (payload.operation === 'stop') { const operation = pending; operation?.controller.abort(); await operation?.done; return { snapshot: status() }; }
+    if (payload.operation === 'removal-inspect') return inspectAppRemoval();
+    if (payload.operation === 'removal-cancel') {
+      if (pending && pending.kind !== 'removal-inspect') throw Error('Desktop removal inspection unavailable');
+      removalPreview = null; const operation = pending; operation?.controller.abort(); await operation?.done;
+      revision++; message = 'Removal inspection cancelled. App files, credentials and saved data are preserved.'; publish(); return { snapshot: status() };
+    }
     if (payload.operation === 'reset') return prepare({}, ['updates.channel']);
     if (payload.operation === 'cancel') { invalidate(); revision++; message = 'Update settings change cancelled. Saved settings and app files are preserved.'; }
     else if (payload.operation === 'apply') {

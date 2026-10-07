@@ -143,8 +143,8 @@ app.whenReady().then(async () => {
   const registerControl = (name, channel) => ipcMain.handle(name, (event, payload) => {
     if (closing) throw Error('App closing');
     return maintenance.control(() => channel().dispatch(event, payload), {
-      passive: payload?.operation === 'status' || name === 'updates:control' && (['stop', 'view'].includes(payload?.operation)
-        || payload?.operation === 'chat' && updateCommand(payload.text)?.operation === 'view')
+      passive: payload?.operation === 'status' || name === 'updates:control' && ['stop', 'view', 'removal-cancel'].includes(
+        payload?.operation === 'chat' ? updateCommand(payload.text)?.operation : payload?.operation)
     });
   });
   const publish = snapshot => {
@@ -282,6 +282,16 @@ app.whenReady().then(async () => {
   delivery = makeDelivery(1);
   const publishUpdates = snapshot => { if (window && !window.isDestroyed()) window.webContents.send('updates:status', snapshot); };
   const makeUpdates = initialRevision => createUpdateManager({ policy, history: updateHistory, sources: () => trustedUpdateSources,
+    removalDetails: () => {
+      const saved = uninstallJournal?.read();
+      return saved ? { phase: saved.phase, version: saved.plan.identity.version,
+        credentialCount: saved.plan.credentials.before.stored, backgroundStatus: saved.plan.service.status } : null;
+    },
+    inspectRemoval: async ({ checkpoint, signal }) => {
+      if (!app.isPackaged || backgroundLaunch || !vault || uninstallJournal?.clear() !== true || maintenanceStore?.clear() !== true) throw Error('uninstall-plan-unavailable');
+      checkpoint(); const { captureMacUninstallPlan } = await moduleAt('../updates/uninstall.mjs'); checkpoint();
+      return captureMacUninstallPlan({ app, background: backgroundNative, directory, vault, checkpoint, signal });
+    },
     recoveryDetails: () => {
       const saved = maintenanceStore?.read();
       return saved ? { phase: saved.phase, fromVersion: saved.from.version, toVersion: saved.to.version,

@@ -23,7 +23,7 @@ function snapshot(value) {
   if (!Number.isSafeInteger(value.count) || value.count < 0 || value.count > 2048 || !Number.isSafeInteger(value.stored)
     || value.stored < 0 || value.stored > value.count || !digest(value.sha256)) throw Error();
 }
-function plan(value) {
+export function checkUninstallPlan(value) {
   canonicalJSON(value); record(value, ['bundle', 'identity', 'team', 'custody', 'credentials', 'service', 'recordInventorySha256']);
   buildIdentity(value.identity); record(value.custody, ['device', 'inode']); record(value.credentials, ['before', 'after']);
   snapshot(value.credentials.before); snapshot(value.credentials.after); record(value.service, ['qualified', 'status']);
@@ -36,7 +36,7 @@ function plan(value) {
     || !digest(value.recordInventorySha256)) throw Error();
 }
 function intent(value, row) {
-  record(value, ['schemaVersion', 'id', 'revision', 'phase', 'createdAt', 'updatedAt', 'plan']); plan(value.plan);
+  record(value, ['schemaVersion', 'id', 'revision', 'phase', 'createdAt', 'updatedAt', 'plan']); checkUninstallPlan(value.plan);
   if (value.schemaVersion !== 1 || typeof value.id !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value.id)
     || !phases.includes(value.phase) || !time(value.createdAt) || value.createdAt > value.updatedAt
     || value.updatedAt !== row.clock || value.revision !== row.revision) throw Error();
@@ -104,7 +104,7 @@ export async function captureMacUninstallPlan(options, { run = runMacUpdateComma
     await run('/usr/bin/codesign', ['--verify', '--deep', '--strict', '-R', requirement, bundle], signal); check();
     const value = { bundle, identity, team, custody: { device: original[0].dev.toString(), inode: original[0].ino.toString() },
       credentials: capturedCredentials, service: capturedService, recordInventorySha256: capturedRecords };
-    plan(value); return immutable(value);
+    checkUninstallPlan(value); return immutable(value);
   } catch { throw Error('uninstall-plan-unavailable'); }
 }
 
@@ -181,7 +181,7 @@ export function openUninstallJournal(directory, { vault, clock = Date.now }) {
       owned(token) { try { return owns(readState(), token); } catch { return false; } },
       begin(value) {
         const saved = transaction(state => {
-          plan(value); if (state.value !== null && state.value.phase !== 'removed'
+          checkUninstallPlan(value); if (state.value !== null && state.value.phase !== 'removed'
             || canonicalJSON(value.credentials) !== canonicalJSON(vault.previewCredentialRemoval())) throw Error();
           return save(state, { schemaVersion: 1, id: randomUUID(), phase: phases[0], createdAt: state.now, plan: value });
         }); return claim(saved);

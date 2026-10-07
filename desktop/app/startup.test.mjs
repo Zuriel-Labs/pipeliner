@@ -120,3 +120,28 @@ test('Packaged entry rejects development authority inputs before initialization;
   const foreignIpc=entry(false,['--qualify','--test-data-directory=/private/owned-test'],'foreign-ipc');
   assert.throws(foreignIpc.run,/test-storage-chromium-context/);assert.deepEqual(foreignIpc.calls,[['storage'],['chromium']]);
 });
+
+test('host removal inspection binds actual app storage and exposes only recorded recovery details', async () => {
+  const start = source.indexOf('  const makeUpdates = initialRevision =>'), end = source.indexOf('  updates = makeUpdates(1);', start);
+  assert.ok(start >= 0 && end > start);
+  for (const mode of ['normal', 'source', 'background', 'vault', 'uninstall', 'update', 'cancelled']) {
+    let captured, inspected = 0, checkpoints = 0;
+    const plan = Object.freeze({ synthetic: true }), signal = new AbortController().signal;
+    const checkpoint = () => { checkpoints++; if (mode === 'cancelled') throw Error('Synthetic cancelled capture'); };
+    const saved = { phase: 'service-pending', plan: { identity: { version: '0.1.0' }, credentials: { before: { stored: 2 } }, service: { status: 'enabled' }, bundle: '/private/secret-bundle' } };
+    const context = { policy: {}, updateHistory: {}, trustedUpdateSources: [], maintenance: {}, maintenanceStore: { clear: () => mode !== 'update' },
+      uninstallJournal: { clear: () => mode !== 'uninstall', read: () => saved }, vault: mode === 'vault' ? null : {}, directory: '/private/synthetic-data',
+      backgroundNative: {}, app: { isPackaged: mode !== 'source', getVersion: () => '0.1.0' }, backgroundLaunch: mode === 'background',
+      moduleAt: async name => { assert.equal(name, '../updates/uninstall.mjs'); return { async captureMacUninstallPlan(options) {
+        inspected++; assert.equal(options.app, context.app); assert.equal(options.background, context.backgroundNative);
+        assert.equal(options.directory, context.directory); assert.equal(options.vault, context.vault); assert.equal(options.checkpoint, checkpoint); assert.equal(options.signal, signal);
+        assert.deepEqual(Object.keys(options).sort(), ['app', 'background', 'checkpoint', 'directory', 'signal', 'vault']); return plan;
+      } }; }, createUpdateManager(options) { captured = options; return {}; }, maintenanceRecovery: () => false, publishUpdates() {} };
+    runInNewContext(`${source.slice(start, end)}\nmakeUpdates(1);`, context, { timeout: 1000 });
+    assert.deepEqual(JSON.parse(JSON.stringify(captured.removalDetails())), { phase: 'service-pending', version: '0.1.0', credentialCount: 2, backgroundStatus: 'enabled' });
+    assert.doesNotMatch(JSON.stringify(captured.removalDetails()), /private|secret-bundle/);
+    if (mode === 'normal') assert.equal(await captured.inspectRemoval({ checkpoint, signal }), plan);
+    else await assert.rejects(captured.inspectRemoval({ checkpoint, signal }));
+    assert.equal(inspected, mode === 'normal' ? 1 : 0); assert.equal(checkpoints, mode === 'normal' ? 2 : mode === 'cancelled' ? 1 : 0);
+  }
+});

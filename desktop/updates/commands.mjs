@@ -1,7 +1,8 @@
 import { containsSecret } from '../connections/commands.mjs';
 
 export const updateShapes = Object.freeze({ view: [[], []], chat: [['text'], []], prepare: [['changes'], []],
-  source: [['name'], []], reset: [[], []], apply: [[], ['hash']], cancel: [[], []], check: [[], []], stop: [[], []], install: [[], []] });
+  source: [['name'], []], reset: [[], []], apply: [[], ['hash']], cancel: [[], []], check: [[], []], stop: [[], []], install: [[], []],
+  'removal-inspect': [[], []], 'removal-cancel': [[], []] });
 export function updateCommand(text) {
   if (typeof text !== 'string' || text.length > 2000 || containsSecret(text) || /["`<>\n\r]/.test(text)) return null;
   const input = text.trim().replace(/[.!?]$/, ''); let match;
@@ -16,5 +17,7 @@ export function updateCommand(text) {
   if (/^check for Desktop updates$/i.test(input)) return { operation: 'check' };
   if (/^cancel Desktop update check$/i.test(input)) return { operation: 'stop' };
   if (/^update Desktop when idle$/i.test(input)) return { operation: 'install' };
+  if (/^(?:review|inspect) Desktop removal$/i.test(input)) return { operation: 'removal-inspect' };
+  if (/^(?:cancel|discard) Desktop removal$/i.test(input)) return { operation: 'removal-cancel' };
   return null;
 }

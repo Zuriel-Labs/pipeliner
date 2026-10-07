@@ -19,6 +19,11 @@ const phases = ['preparing', 'staged', 'verified', 'replacing', 'relaunching', '
 const time = value => Number.isSafeInteger(value) && value >= 0;
 const same = (a, b) => a.dev === b.dev && a.ino === b.ino;
 const identity = { repository: null, table: 'maintenance_state', key: 1 };
+const completedIdentity = id => ({ repository: null, table: 'maintenance_completed', key: id });
+const completedTriggers = [
+  "CREATE TRIGGER immutable_maintenance_completed_update BEFORE UPDATE ON maintenance_completed BEGIN SELECT RAISE(ABORT,'Immutable maintenance receipt'); END",
+  "CREATE TRIGGER immutable_maintenance_completed_delete BEFORE DELETE ON maintenance_completed BEGIN SELECT RAISE(ABORT,'Immutable maintenance receipt'); END",
+];
 function plan(value) {
   canonicalJSON(value); record(value, ['from', 'to', 'sha256', 'bytes']); buildIdentity(value.from); buildIdentity(value.to);
   if (!isNewerUpdateVersion(value.to.version, value.from.version) || typeof value.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(value.sha256)
@@ -52,6 +57,17 @@ function replacement(value, intent) {
     || ['device', 'inode'].some(key => typeof value[key] !== 'string' || !/^[1-9][0-9]{0,19}$/.test(value[key]))
     || value.device !== intent.copy.receipt.device || value.inode === intent.copy.receipt.inode) throw Error();
 }
+function intentRecord(value, directory, row) {
+  record(value, ['schemaVersion', 'id', 'phase', 'from', 'to', 'sha256', 'bytes', 'createdAt', 'updatedAt', 'revision'], ['backups', 'installer', 'copy', 'replacement']);
+  plan({ from: value.from, to: value.to, sha256: value.sha256, bytes: value.bytes });
+  if (value.backups !== undefined) updateBackups(value.backups, { directory, build: value.from });
+  if (value.installer !== undefined) installer(value.installer, directory, value);
+  if (value.copy !== undefined) bundleCopy(value.copy, directory, value);
+  if (value.replacement !== undefined) replacement(value.replacement, value);
+  if (value.schemaVersion !== 1 || typeof value.id !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value.id)
+    || !phases.includes(value.phase) || !time(value.createdAt) || value.createdAt > value.updatedAt
+    || value.updatedAt !== row.clock || value.revision !== row.revision) throw Error();
+}
 
 // Host-only intent, not update trust or effect reconciliation. A pending record never clears on reopen.
 export function openUpdateMaintenance(directory, { vault, clock = Date.now }) {
@@ -62,7 +78,7 @@ export function openUpdateMaintenance(directory, { vault, clock = Date.now }) {
     const owner = lstatSync(path), root = lstatSync(directory);
     db = new DatabaseSync(path, { allowExtension: false, timeout: 1000 });
     const version = db.prepare('PRAGMA user_version').get().user_version;
-    if (![0, 1].includes(version) || !version && db.prepare("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").all().length) throw Error();
+    if (![0, 1, 2].includes(version) || !version && db.prepare("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").all().length) throw Error();
     db.exec('PRAGMA trusted_schema=OFF; PRAGMA secure_delete=ON; PRAGMA temp_store=MEMORY; PRAGMA journal_mode=DELETE; PRAGMA synchronous=EXTRA;');
     const size = db.prepare('PRAGMA page_size').get().page_size;
     if (!Number.isInteger(size) || size < 512 || size > 65536
@@ -89,17 +105,7 @@ export function openUpdateMaintenance(directory, { vault, clock = Date.now }) {
       const row = db.prepare('SELECT revision,clock,payload FROM maintenance_state WHERE id=1').get();
       if (!row || !time(row.revision) || !time(row.clock) || !time(now) || now < row.clock) throw Error();
       const value = codec.decode(identity, row.payload, { revision: row.revision, clock: row.clock });
-      if (value !== null) {
-        record(value, ['schemaVersion', 'id', 'phase', 'from', 'to', 'sha256', 'bytes', 'createdAt', 'updatedAt', 'revision'], ['backups', 'installer', 'copy', 'replacement']);
-        plan({ from: value.from, to: value.to, sha256: value.sha256, bytes: value.bytes });
-        if (value.backups !== undefined) updateBackups(value.backups, { directory, build: value.from });
-        if (value.installer !== undefined) installer(value.installer, directory, value);
-        if (value.copy !== undefined) bundleCopy(value.copy, directory, value);
-        if (value.replacement !== undefined) replacement(value.replacement, value);
-        if (value.schemaVersion !== 1 || typeof value.id !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value.id)
-          || !phases.includes(value.phase) || !time(value.createdAt) || value.createdAt > value.updatedAt
-          || value.updatedAt !== row.clock || value.revision !== row.revision) throw Error();
-      }
+      if (value !== null) intentRecord(value, directory, row);
       return { value, row, now };
     }
     function save(state, value) {
@@ -119,14 +125,46 @@ export function openUpdateMaintenance(directory, { vault, clock = Date.now }) {
     }
     function owned(state) { return Boolean(active && state.value?.id === active.id && state.row.revision === active.revision); }
     readState();
+    if (version < 2) {
+      if (db.prepare("SELECT name FROM sqlite_master WHERE name='maintenance_completed'").get()) throw Error();
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        db.exec('CREATE TABLE maintenance_completed(id TEXT PRIMARY KEY,revision INTEGER NOT NULL CHECK(revision>=0),clock INTEGER NOT NULL CHECK(clock>=0),completed INTEGER NOT NULL CHECK(completed>=clock),payload BLOB NOT NULL CHECK(length(payload) BETWEEN 28 AND 16384));');
+        for (const sql of completedTriggers) db.exec(sql);
+        db.exec('PRAGMA user_version=2; COMMIT');
+      } catch (error) { db.exec('ROLLBACK'); throw error; }
+      const parent = openSync(directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      try { fsyncSync(parent); } finally { closeSync(parent); }
+    }
+    function readCompleted(state = readState()) {
+      const triggers = db.prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND tbl_name='maintenance_completed'").all().map(row => row.sql);
+      if (triggers.length !== completedTriggers.length || completedTriggers.some(sql => !triggers.includes(sql))) throw Error();
+      const rows = db.prepare('SELECT id,revision,clock,completed,payload FROM maintenance_completed ORDER BY completed DESC,id LIMIT 1025').all();
+      if (rows.length > 1024) throw Error();
+      return rows.map(row => {
+        if (!time(row.revision) || !time(row.clock) || !time(row.completed) || row.completed < row.clock
+          || row.completed > state.row.clock || row.revision >= state.row.revision) throw Error();
+        const value = codec.decode(completedIdentity(row.id), row.payload, { revision: row.revision, clock: row.clock, completedAt: row.completed });
+        record(value, ['intent', 'completedAt']); intentRecord(value.intent, directory, row);
+        if (value.intent.id !== row.id || value.completedAt !== row.completed || !value.intent.copy?.receipt || !value.intent.replacement
+          || !value.intent.backups || !value.intent.installer || !['replacing', 'relaunching', 'repair-required'].includes(value.intent.phase)) throw Error();
+        return value;
+      });
+    }
+    readCompleted();
     return Object.freeze({
       read() { return guarded(() => immutable(readState().value)); },
+      completed() { return guarded(() => immutable(readCompleted())); },
       clear() { try { return readState().value === null; } catch { return false; } },
       owned() { try { return owned(readState()); } catch { return false; } },
       begin(input) {
         const token = Object.freeze({}), value = guarded(() => { plan(input); return structuredClone(input); });
         const id = randomUUID(), revision = transaction(state => {
           if (state.value !== null) throw Error();
+          readCompleted(state);
+          const free = db.prepare('PRAGMA max_page_count').get().max_page_count - db.prepare('PRAGMA page_count').get().page_count
+            + db.prepare('PRAGMA freelist_count').get().freelist_count;
+          if (free * size < 2 * 16384 + 4 * size) throw Error();
           return save(state, { ...value, schemaVersion: 1, id, phase: 'preparing', createdAt: state.now });
         });
         active = { token, id, revision }; return token;
@@ -392,6 +430,9 @@ export function openUpdateMaintenance(directory, { vault, clock = Date.now }) {
           if (!stable(artifactInfo, inspect(artifactRoot)) || realpathSync(artifactRoot) !== artifactRoot) throw Error();
           transaction(state => {
             if (active || state.row.revision !== initial.row.revision || canonicalJSON(state.value) !== canonicalJSON(intent)) throw Error();
+            readCompleted(state);
+            db.prepare('INSERT INTO maintenance_completed VALUES(?,?,?,?,?)').run(intent.id, intent.revision, intent.updatedAt, state.now,
+              codec.encode(completedIdentity(intent.id), { intent, completedAt: state.now }, { revision: intent.revision, clock: intent.updatedAt, completedAt: state.now }));
             save(state, null);
           });
         } catch { throw Error('maintenance-relaunch-recovery-required'); }

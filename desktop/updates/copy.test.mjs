@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, realpath, mkdir, writeFile, readFile, readdir, rm, lstat, symlink, link, rename } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -40,7 +40,7 @@ async function checkCopy(unsafe, journaled = false, replacement = null, recovery
   const release = { kind: 'pipeliner-desktop-update', schemaVersion: 1, source: trust.id, ...current, version: to.version, sequence: 1,
     issuedAt: 900, expiresAt: 2000, url: trust.origin + trust.path + 'Pipeliner.dmg', bytes: bytes.length,
     sha256: createHash('sha256').update(bytes).digest('hex'), sourceCommit: to.sourceCommit, gitTree: to.gitTree };
-  let mode, mount, attached, copied, detached, authorized, controller, destination, vault, history, journal, journalToken, workspaces, development, artifacts, db, exchanges = 0;
+  let mode, mount, attached, copied, detached, authorized, controller, destination, vault, history, journal, journalToken, workspaces, development, artifacts, db, custodyFailure, exchanges = 0;
   const quarantine = '0081;00000000;PipelinerSynthetic54;';
   const entities = () => [{ 'dev-entry': '/dev/disk999' }, { 'dev-entry': '/dev/disk999s1', 'mount-point': mount }];
   const run = async (command, args, signal, input) => {
@@ -191,6 +191,7 @@ async function checkCopy(unsafe, journaled = false, replacement = null, recovery
             } finally { data.close(); }
           };
           const beforeData = sourceFiles.map(dataDigest);
+          assert.deepEqual(journal.completed(), []);
           const action = () => journal.finishRelaunch({ running: { bundle: installed, identity: recovery === 'wrong-build' ? from : to },
             checkpoint() { if (recovery === 'lost-checkpoint') throw Error('Synthetic startup cancellation'); }, signal: controller.signal }, { run });
           let getters = 0;
@@ -204,11 +205,35 @@ async function checkCopy(unsafe, journaled = false, replacement = null, recovery
           if (recovery === 'missing-data') await rename(sourceFiles[0], sourceFiles[0] + '.saved');
           if (recovery === 'future-data') { db = new DatabaseSync(sourceFiles[1]); db.exec('PRAGMA user_version=3'); db.close(); db = undefined; }
           if (recovery === 'journal-refusal') { db = new DatabaseSync(join(root, 'maintenance.sqlite')); db.exec("CREATE TRIGGER refuse_finish BEFORE UPDATE ON maintenance_state BEGIN SELECT RAISE(ABORT,'synthetic finish refusal'); END;"); }
+          if (recovery === 'custody-refusal') {
+            const prepare = DatabaseSync.prototype.prepare;
+            custodyFailure = mock.method(DatabaseSync.prototype, 'prepare', function(sql, ...args) {
+              if (sql.startsWith('INSERT INTO maintenance_completed ')) throw Error('Synthetic custody insert refusal');
+              return Reflect.apply(prepare, this, [sql, ...args]);
+            });
+          }
           if (['valid-relaunch', 'uncertain-relaunch'].includes(recovery)) {
             await action(); assert.equal(journal.clear(), true); assert.equal(journal.read(), null); assert.equal(journal.owned(), false);
             await assert.rejects(action()); assert.throws(() => journal.advance(journalToken, 'staged'));
             assert.deepEqual(sourceFiles.map(dataDigest), beforeData);
-          } else { await assert.rejects(action()); assert.deepEqual(journal.read(), pending); assert.equal(journal.clear(), false); }
+            const completed = journal.completed(); assert.deepEqual(completed, [{ intent: pending, completedAt: 1000 }]); assert(Object.isFrozen(completed));
+            assert.equal((await readFile(join(root, 'maintenance.sqlite'))).includes(Buffer.from(receipt.directory)), false);
+            journal.close(); journal = openUpdateMaintenance(root, { vault, clock: () => 1000 });
+            assert.deepEqual(journal.completed(), completed); assert.equal(journal.clear(), true);
+            db = new DatabaseSync(join(root, 'maintenance.sqlite'));
+            assert.throws(() => db.exec('DELETE FROM maintenance_completed'), /Immutable/);
+            assert.throws(() => db.exec('UPDATE maintenance_completed SET clock=clock+1'), /Immutable/);
+            const trigger = db.prepare("SELECT sql FROM sqlite_master WHERE name='immutable_maintenance_completed_update'").get().sql;
+            db.exec('DROP TRIGGER immutable_maintenance_completed_update');
+            const archived = db.prepare('SELECT payload FROM maintenance_completed WHERE id=?').get(pending.id), changed = Buffer.from(archived.payload); changed[changed.length - 1] ^= 1;
+            db.prepare('UPDATE maintenance_completed SET payload=? WHERE id=?').run(changed, pending.id);
+            db.exec(trigger);
+            assert.throws(() => journal.completed()); assert.throws(() => journal.begin(plan));
+            assert.deepEqual(Buffer.from(db.prepare('SELECT payload FROM maintenance_completed WHERE id=?').get(pending.id).payload), changed);
+          } else {
+            await assert.rejects(action()); assert.deepEqual(journal.read(), pending); assert.equal(journal.clear(), false); assert.deepEqual(journal.completed(), []);
+            if (custodyFailure) assert.equal(custodyFailure.mock.calls.filter(call => call.arguments[0].startsWith('INSERT INTO maintenance_completed ') && call.error?.message === 'Synthetic custody insert refusal').length, 1);
+          }
           assert.equal(exchanges, 1); assert.equal((await lstat(receipt.bundle)).isDirectory(), true);
         }
         return;
@@ -289,7 +314,7 @@ async function checkCopy(unsafe, journaled = false, replacement = null, recovery
     await assert.rejects(invoke('detach'), /^Error: update-bundle-copy-recovery-required$/);
     assert.equal(attached, true); assert((await readdir(directory)).some(name => name.startsWith('candidate-')));
     assert.deepEqual(await readFile(file), bytes); assert.deepEqual(JSON.parse(await readFile(join(installed, 'Contents/Resources/pipeliner-build.json'), 'utf8')), from);
-  } finally { db?.close(); journal?.close(); await artifacts?.close(); development?.close(); workspaces?.close(); history?.close(); vault?.close(); await rm(root, { recursive: true }); await assert.rejects(lstat(root), error => error.code === 'ENOENT'); }
+  } finally { custodyFailure?.mock.restore(); db?.close(); journal?.close(); await artifacts?.close(); development?.close(); workspaces?.close(); history?.close(); vault?.close(); await rm(root, { recursive: true }); await assert.rejects(lstat(root), error => error.code === 'ENOENT'); }
 }
 test('verified image copying preserves native metadata and links, rejects stale trust and returns only after detach', () => checkCopy(false));
 test('copy tree guards refuse absolute external aliases and hard-linked files before native copying', () => checkCopy(true));
@@ -299,7 +324,7 @@ test('replacement coordinator persists effect identities, verifies both namespac
 });
 
 test('startup reconciliation requires the exact exchanged target and compatible protected data without replay', async () => {
-  for (const recovery of ['valid-relaunch', 'wrong-build', 'relaunch-signature', 'changed-bundle', 'missing-data', 'future-data', 'cancel', 'lost-checkpoint', 'journal-refusal'])
+  for (const recovery of ['valid-relaunch', 'wrong-build', 'relaunch-signature', 'changed-bundle', 'missing-data', 'future-data', 'cancel', 'lost-checkpoint', 'journal-refusal', 'custody-refusal'])
     await checkCopy(false, true, 'valid-swap', recovery);
   await checkCopy(false, true, 'swap-journal-refusal', 'uncertain-relaunch');
 });

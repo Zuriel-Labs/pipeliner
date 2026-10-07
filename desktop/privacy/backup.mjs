@@ -1,7 +1,7 @@
 import { constants, lstatSync, fstatSync, openSync, closeSync, readSync, writeSync, fsyncSync, unlinkSync, existsSync, realpathSync, readdirSync } from 'node:fs';
 import { dirname, basename, join, resolve } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
-import { canonicalJSON, record } from '../core/settings.mjs';
+import { canonicalJSON, immutable, record } from '../core/settings.mjs';
 import { DatabaseSync } from 'node:sqlite';
 
 const maximum = 512 * 1024 ** 2, chunkSize = 64 * 1024, headerSize = 48, magic = Buffer.from('PPLBKP01');
@@ -120,7 +120,7 @@ export function protectLegacyBackups(directory, store, { vault, currentVersion }
   return results;
 }
 
-export function verifyProtectedBackup(path, { vault, store, version, checkpoint = () => {} }) {
+function readProtectedBackup(path, { vault, store, version, checkpoint = () => {} }, consume) {
   let fd, plain;
   try {
     if (typeof checkpoint !== 'function') throw Error(); checkpoint();
@@ -141,12 +141,69 @@ export function verifyProtectedBackup(path, { vault, store, version, checkpoint 
       const count = read(fd, 4, position).readUInt32BE(0), expected = Math.min(chunkSize, manifest.sourceBytes - index * chunkSize);
       if (count !== expected + 28) throw Error(); position += 4;
       plain = vault.openPayload(binding(id, 'chunk.' + index), read(fd, count, position));
-      try { if (plain.length !== expected) throw Error(); hash.update(plain); } finally { plain.fill(0); plain = undefined; }
+      try { if (plain.length !== expected) throw Error(); hash.update(plain); consume?.(plain); } finally { plain.fill(0); plain = undefined; }
       position += count;
     }
     if (position !== before.size || hash.digest('hex') !== manifest.sourceHash) throw Error();
-    const sha256 = hashFile(fd, before.size, checkpoint); stable(path, fd, before, parent); checkpoint();
+    const sha256 = hashFile(fd, before.size, checkpoint); checkpoint(); stable(path, fd, before, parent);
     return { path, ...manifest, sha256 };
   } catch { throw Error('protected-backup-invalid'); }
   finally { plain?.fill(0); if (fd !== undefined) closeSync(fd); }
+}
+
+export function verifyProtectedBackup(path, options) { return readProtectedBackup(path, options); }
+
+// A private compatible copy only. The maintenance coordinator must separately authorize and reconcile promotion.
+export function materializeProtectedBackup(source, { directory, vault, store, version, checkpoint = () => {}, signal }) {
+  let fd, output, owner, parent, written = 0; const digest = createHash('sha256');
+  try {
+    if (typeof checkpoint !== 'function' || signal !== undefined && !(signal instanceof AbortSignal)) throw Error();
+    const check = () => { signal?.throwIfAborted(); checkpoint(); signal?.throwIfAborted(); }; check();
+    const original = verifyProtectedBackup(source, { vault, store, version, checkpoint: check });
+    parent = location(join(directory, store + '.sqlite'));
+    if (parent.path === dirname(source)) throw Error();
+    output = join(parent.path, store + '.sqlite');
+    fd = openSync(output, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW, 0o600); owner = fstatSync(fd);
+    if (!regular(owner) || owner.size !== 0) throw Error();
+    const inspect = () => {
+      check(); const current = lstatSync(output), held = fstatSync(fd), root = lstatSync(parent.path);
+      if (!regular(current) || !regular(held) || !same(owner, current) || !same(owner, held) || current.size !== written || held.size !== written
+        || !same(root, parent.info) || root.mode !== parent.info.mode || root.uid !== parent.info.uid || realpathSync(parent.path) !== parent.path) throw Error();
+    };
+    const restored = readProtectedBackup(source, { vault, store, version, checkpoint: inspect }, bytes => {
+      for (let offset = 0; offset < bytes.length;) {
+        inspect(); const count = writeSync(fd, bytes, offset, bytes.length - offset, written);
+        if (!count) throw Error(); digest.update(bytes.subarray(offset, offset + count)); offset += count; written += count;
+      }
+    });
+    inspect(); fsyncSync(fd);
+    if (canonicalJSON(restored) !== canonicalJSON(original) || written !== original.sourceBytes || digest.copy().digest('hex') !== original.sourceHash) throw Error();
+    const before = fstatSync(fd); if (hashFile(fd, written, inspect) !== original.sourceHash) throw Error(); stable(output, fd, before, parent);
+    const header = read(fd, 100, 0);
+    try { if (!header.subarray(0, 16).equals(Buffer.from('SQLite format 3\0')) || header[18] !== 1 || header[19] !== 1) throw Error(); }
+    finally { header.fill(0); }
+    const db = new DatabaseSync(output, { readOnly: true, allowExtension: false, timeout: 1000 });
+    try {
+      db.exec('PRAGMA trusted_schema=OFF; PRAGMA temp_store=MEMORY;');
+      if (db.prepare('PRAGMA user_version').get().user_version !== version || db.prepare('PRAGMA quick_check').get().quick_check !== 'ok'
+        || db.prepare('PRAGMA foreign_key_check').get()) throw Error();
+    } finally { db.close(); }
+    stable(output, fd, before, parent); inspect();
+    const folder = openSync(parent.path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    try { if (!same(parent.info, fstatSync(folder))) throw Error(); fsyncSync(folder); } finally { closeSync(folder); }
+    inspect(); stable(output, fd, before, parent);
+    return immutable({ destination: output, store, schemaVersion: version, bytes: written, sha256: original.sourceHash, archiveSha256: original.sha256 });
+  } catch {
+    let preserved = false, removed = false;
+    if (fd !== undefined && owner) try {
+      const named = lstatSync(output), held = fstatSync(fd);
+      if (!regular(named) || !regular(held) || !same(owner, named) || !same(owner, held) || named.size !== written || held.size !== written
+        || hashFile(fd, written) !== digest.copy().digest('hex') || !same(parent.info, lstatSync(parent.path)) || realpathSync(parent.path) !== parent.path) throw Error();
+      unlinkSync(output); removed = true;
+      const folder = openSync(parent.path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      try { if (!same(parent.info, fstatSync(folder))) throw Error(); fsyncSync(folder); } finally { closeSync(folder); }
+    } catch (error) { preserved = error.code !== 'ENOENT'; }
+    throw Error(preserved ? removed ? 'protected-backup-recovery-required; output cleanup unverified' : 'protected-backup-recovery-required; altered output preserved'
+      : 'protected-backup-materialization-failed; current stores preserved');
+  } finally { if (fd !== undefined) closeSync(fd); }
 }

@@ -8,7 +8,7 @@ import { openVault } from '../connections/vault.mjs';
 import { openWorkspaceStore } from '../repositories/store.mjs';
 import { openDevelopmentStore } from '../development/state.mjs';
 import { openArtifactStore } from '../delivery/artifacts.mjs';
-import { verifyProtectedBackup } from '../privacy/backup.mjs';
+import { verifyProtectedBackup, materializeProtectedBackup } from '../privacy/backup.mjs';
 import { captureUpdateBackups } from './backup.mjs';
 
 test('update capture seals current compatible stores under real read locks and preserves authority on refusal', async () => {
@@ -40,6 +40,36 @@ test('update capture seals current compatible stores under real read locks and p
       assert.deepEqual(readFileSync(join(root, receipt.store + '.sqlite')), originals[receipt.store]);
     }
     assert.deepEqual(readFileSync(authority), bytes);
+    const recovery = realpathSync(mkdtempSync(join(root, 'recovery-'))), restored = [];
+    for (const receipt of captured.databases) {
+      const value = materializeProtectedBackup(receipt.path, { directory: recovery, vault, store: receipt.store, version: receipt.schemaVersion, checkpoint() {} });
+      assert.equal(value.sha256, receipt.sourceHash); assert.equal(value.bytes, receipt.sourceBytes);
+      assert.deepEqual(readFileSync(value.destination), originals[receipt.store]); restored.push(value);
+    }
+    const recoveredWorkspaces = openWorkspaceStore(recovery, { vault }), recoveredDevelopment = openDevelopmentStore(recovery, { vault });
+    const recoveredArtifacts = await openArtifactStore(recovery, { vault, limits: () => ({ keepLatest: 3, warningBytes: 1024 ** 3, capacityBytes: 2 * 1024 ** 3 }) });
+    try { assert.deepEqual(recoveredWorkspaces.draft(), { id: 'synthetic', text: 'private fixture' }); assert.equal(recoveredArtifacts.inventory('synthetic').items.length, 0); }
+    finally { await recoveredArtifacts.close(); recoveredDevelopment.close(); recoveredWorkspaces.close(); }
+    const first = captured.databases[0], preserved = readFileSync(restored[0].destination);
+    assert.throws(() => materializeProtectedBackup(first.path, { directory: recovery, vault, store: first.store, version: first.schemaVersion, checkpoint() {} }));
+    assert.deepEqual(readFileSync(restored[0].destination), preserved);
+    const refused = realpathSync(mkdtempSync(join(root, 'refused-recovery-'))), archive = readFileSync(first.path), corrupt = Buffer.from(archive);
+    corrupt[corrupt.length - 1] ^= 1; writeFileSync(first.path, corrupt);
+    assert.throws(() => materializeProtectedBackup(first.path, { directory: refused, vault, store: first.store, version: first.schemaVersion }), /protected-backup-materialization-failed/);
+    assert.deepEqual(readdirSync(refused), []); writeFileSync(first.path, archive);
+    const interrupted = new AbortController(); let partial = false;
+    assert.throws(() => materializeProtectedBackup(first.path, { directory: refused, vault, store: first.store, version: first.schemaVersion,
+      signal: interrupted.signal, checkpoint() {
+        const copy = join(refused, 'workspaces.sqlite');
+        if (existsSync(copy) && readFileSync(copy).length) { partial = true; interrupted.abort(); }
+      } }), /protected-backup-materialization-failed/);
+    assert.equal(partial, true); assert.deepEqual(readdirSync(refused), []);
+    assert.deepEqual(readFileSync(first.path), archive);
+    const altered = realpathSync(mkdtempSync(join(root, 'altered-recovery-'))), output = join(altered, 'workspaces.sqlite'); let alteredOutput = false;
+    assert.throws(() => materializeProtectedBackup(first.path, { directory: altered, vault, store: first.store, version: first.schemaVersion, checkpoint() {
+      if (!alteredOutput && existsSync(output) && readFileSync(output).length) { appendFileSync(output, 'altered'); alteredOutput = true; }
+    } }), /protected-backup-recovery-required/);
+    assert.equal(alteredOutput, true); assert.equal(existsSync(output), true);
     // A completed capture releases every SQLite read transaction.
     writer.exec('PRAGMA user_version=6'); const changed = readFileSync(join(root, 'workspaces.sqlite'));
     assert.throws(() => captureUpdateBackups({ directory: root, vault, build, checkpoint() {} }), /update-backup-unverified/);

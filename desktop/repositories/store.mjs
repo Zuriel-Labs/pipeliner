@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { protectedFile } from '../core/storage.mjs';
-import { canonicalJSON } from '../core/settings.mjs';
+import { canonicalJSON, record } from '../core/settings.mjs';
 import { transact } from '../core/runtime.mjs';
 import { createRecordCodec } from '../privacy/records.mjs';
 import { migrateProtectedStore, finishProtectedMigration } from '../privacy/migration.mjs';
@@ -108,6 +108,27 @@ export function openWorkspaceStore(directory, { vault } = {}) {
     if (repository !== null && (!identifier(repository) || !db.prepare('SELECT id FROM workspaces WHERE id=?').get(repository))) throw new Error('workspace-unavailable');
     return encode({ repository, kind });
   }
+  function observeReadyBatch(repository, observations, observedAt) {
+    try {
+      if (!identifier(repository) || !Array.isArray(observations) || observations.length > 10000
+        || !Number.isSafeInteger(observedAt) || observedAt < 0) throw Error();
+      canonicalJSON(observations); const seen = new Set();
+      for (const row of observations) {
+        record(row, ['issue', 'ready', 'own']);
+        if (!remoteIdentifier(row.issue) || typeof row.ready !== 'boolean' || typeof row.own !== 'boolean' || seen.has(row.issue)) throw Error();
+        seen.add(row.issue);
+      }
+    } catch { throw Error('setup-record-invalid'); }
+    return transact(db, () => {
+      const read = db.prepare('SELECT * FROM issue_ready WHERE repository=? AND issue=?');
+      const write = db.prepare('INSERT INTO issue_ready VALUES(?,?,?,?,?) ON CONFLICT(repository,issue) DO UPDATE SET ready=excluded.ready,observed_at=excluded.observed_at,payload=excluded.payload');
+      return observations.map(({ issue, ready, own }) => {
+        const before = readyObservation(read.get(repository, issue)), row = { repository, issue, ready: Number(ready), observed_at: observedAt };
+        write.run(repository, issue, row.ready, observedAt, codec.encode(readyIdentity(row), readyValue(row)));
+        return { ready, drift: Boolean(before && Boolean(before.ready) !== ready && !own) };
+      });
+    });
+  }
   return Object.freeze({
     schedule: repository => decode('schedule_states', db.prepare('SELECT * FROM schedule_states WHERE repository=?').get(repository)),
     saveSchedule(repository, state) {
@@ -127,14 +148,9 @@ export function openWorkspaceStore(directory, { vault } = {}) {
       if (!identifier(repository) || !db.prepare('SELECT id FROM workspaces WHERE id=?').get(repository)) throw new Error('workspace-unavailable');
       db.prepare('INSERT INTO issue_contexts VALUES(?,?,?) ON CONFLICT(repository) DO UPDATE SET data=excluded.data,hash=excluded.hash').run(repository, seal('issue_contexts', { repository, hash: digest(value) }, value), digest(value));
     },
+    observeReadyBatch,
     observeReady(repository, issue, ready, observedAt, own = false) {
-      if (!identifier(repository) || !remoteIdentifier(issue) || typeof ready !== 'boolean' || !Number.isSafeInteger(observedAt) || observedAt < 0 || typeof own !== 'boolean') throw new Error('setup-record-invalid');
-      return transact(db, () => {
-        const before = readyObservation(db.prepare('SELECT * FROM issue_ready WHERE repository=? AND issue=?').get(repository, issue));
-        const row = { repository, issue, ready: Number(ready), observed_at: observedAt };
-        db.prepare('INSERT INTO issue_ready VALUES(?,?,?,?,?) ON CONFLICT(repository,issue) DO UPDATE SET ready=excluded.ready,observed_at=excluded.observed_at,payload=excluded.payload').run(repository, issue, Number(ready), observedAt, codec.encode(readyIdentity(row), readyValue(row)));
-        return { ready, drift: Boolean(before && Boolean(before.ready) !== ready && !own) };
-      });
+      return observeReadyBatch(repository, [{ issue, ready, own }], observedAt)[0];
     },
     register(value) {
       if (!identifier(value?.id) || !remoteIdentifier(value.repositoryId) || typeof value.slug !== 'string' || !/^[a-z0-9-]{1,39}\/[a-z0-9_.-]{1,100}$/.test(value.slug)

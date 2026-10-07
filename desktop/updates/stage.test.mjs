@@ -10,15 +10,20 @@ import { canonicalJSON } from '../core/settings.mjs';
 import { openVault } from '../connections/vault.mjs';
 import { openUpdateHistory } from './history.mjs';
 import { stageUpdateInstaller, verifyStagedInstaller } from './stage.mjs';
+import { openUpdateMaintenance } from './maintenance.mjs';
+import { captureUpdateBackups } from './backup.mjs';
+import { openWorkspaceStore } from '../repositories/store.mjs';
+import { openDevelopmentStore } from '../development/state.mjs';
+import { openArtifactStore } from '../delivery/artifacts.mjs';
 
 test('installer staging requires protected signed history, exact bytes, current authority and awaited owned cleanup', async () => {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-54-update-stage-'))), directory = join(root, 'stage'); mkdirSync(directory, { mode: 0o700 });
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-54-update-stage-'))), directory = join(root, 'updates'); mkdirSync(directory, { mode: 0o700 });
   const { publicKey, privateKey } = generateKeyPairSync('ed25519'), trust = { id: 'synthetic-publisher', key: publicKey, origin: 'https://updates.example.com', path: '/desktop/releases/' };
   const current = { channel: 'stable', platform: 'darwin', architecture: 'arm64', version: '0.1.0' }, bytes = Buffer.alloc(512 * 1024 + 79, 7);
   const release = { kind: 'pipeliner-desktop-update', schemaVersion: 1, source: trust.id, ...current, version: '0.2.0', sequence: 1,
     issuedAt: 900, expiresAt: 2000, url: trust.origin + trust.path + 'Pipeliner.dmg', bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'),
     sourceCommit: 'b'.repeat(40), gitTree: 'c'.repeat(40) };
-  let now = 1000, vault, history, requests = 0, closed = 0;
+  let now = 1000, vault, history, journal, workspaces, development, artifacts, requests = 0, closed = 0;
   try {
     vault = await openVault(root, { available: async () => true, encrypt: async text => Buffer.from(text), decrypt: async data => ({ result: data.toString(), shouldReEncrypt: false }) });
     history = openUpdateHistory(root, { vault, clock: () => now });
@@ -65,6 +70,38 @@ test('installer staging requires protected signed history, exact bytes, current 
     assert.deepEqual(readFileSync(result.file), bytes); assert(Object.isFrozen(result)); assert.equal(closed, requests);
     const verify = (options = {}) => verifyStagedInstaller({ directory, file: result.file, history, trust, current, isCurrent: () => true, ...options }, { clock: () => now });
     assert.deepEqual(await verify(), result);
+    const from = { kind: 'pipeliner-desktop-build', schemaVersion: 1, sourceCommit: 'a'.repeat(40), gitTree: 'a'.repeat(40),
+      version: current.version, platform: current.platform, architecture: current.architecture };
+    journal = openUpdateMaintenance(root, { vault, clock: () => now });
+    const binding = { history, trust, current, checkpoint() {} };
+    const plan = { from, to: { ...from, version: release.version, sourceCommit: release.sourceCommit, gitTree: release.gitTree },
+      bytes: release.bytes, sha256: release.sha256 };
+    const wrongTarget = journal.begin({ ...plan, to: { ...plan.to, gitTree: 'd'.repeat(40) } }), beforeWrongTarget = journal.read();
+    await assert.rejects(journal.bindInstaller(wrongTarget, result, binding));
+    assert.deepEqual(journal.read(), beforeWrongTarget); assert.deepEqual(readFileSync(result.file), bytes); journal.cancel(wrongTarget);
+    const intent = journal.begin(plan), preparing = journal.read();
+    await assert.rejects(journal.bindInstaller({}, result, binding));
+    await assert.rejects(journal.bindInstaller(intent, { ...result, sha256: 'f'.repeat(64) }, binding));
+    await assert.rejects(journal.bindInstaller(intent, result, { ...binding, current: { ...current, version: '0.0.1' } }));
+    const stopped = new AbortController(); let checkpoints = 0;
+    await assert.rejects(journal.bindInstaller(intent, result, { ...binding, signal: stopped.signal, checkpoint() { if (++checkpoints > 5) stopped.abort(); } }));
+    assert.deepEqual(journal.read(), preparing); assert.deepEqual(readFileSync(result.file), bytes);
+    let changedDuringRead = false; checkpoints = 0;
+    await assert.rejects(journal.bindInstaller(intent, result, { ...binding, checkpoint() {
+      if (++checkpoints > 5 && !changedDuringRead) { journal.advance(intent, 'staged'); changedDuringRead = true; }
+    } }));
+    assert.equal(changedDuringRead, true); assert.equal(journal.read().phase, 'staged'); assert.equal(journal.read().installer, undefined);
+    assert.deepEqual(readFileSync(result.file), bytes);
+    await journal.bindInstaller(intent, result, binding);
+    assert.deepEqual(journal.read().installer, { file: result.file, bytes: release.bytes, sha256: release.sha256 });
+    assert.equal(journal.read().phase, 'staged'); assert.equal(readFileSync(join(root, 'maintenance.sqlite')).includes(Buffer.from(result.file)), false);
+    await assert.rejects(journal.bindInstaller(intent, result, binding)); assert.throws(() => journal.advance(intent, 'verified'));
+    workspaces = openWorkspaceStore(root, { vault }); development = openDevelopmentStore(root, { vault });
+    artifacts = await openArtifactStore(root, { vault, limits: () => ({ keepLatest: 3, warningBytes: 1024 ** 3, capacityBytes: 2 * 1024 ** 3 }) });
+    journal.bindBackups(intent, captureUpdateBackups({ directory: root, vault, build: from, checkpoint() {} }));
+    journal.advance(intent, 'verified'); journal.advance(intent, 'replacing'); const replacing = journal.read(); assert.throws(() => journal.cancel(intent));
+    journal.close(); journal = openUpdateMaintenance(root, { vault, clock: () => now });
+    assert.deepEqual(journal.read(), replacing); assert.equal(journal.owned(), false); assert.throws(() => journal.advance(intent, 'relaunching'));
     writeFileSync(result.file, Buffer.alloc(bytes.length, 8)); await assert.rejects(verify(), /update-installer-unverified/);
     assert.deepEqual(readFileSync(result.file), Buffer.alloc(bytes.length, 8)); writeFileSync(result.file, bytes);
     await assert.rejects(verify({ isCurrent: () => false }), /update-installer-unverified/);
@@ -102,5 +139,5 @@ test('installer staging requires protected signed history, exact bytes, current 
     await assert.rejects(invoke({ replace: true }), /^Error: update-installer-recovery-required$/);
     const held = readdirSync(directory); assert.equal(held.length, 1); assert.equal(readFileSync(join(directory, held[0]), 'utf8'), 'preserve replaced file');
     assert.equal(history.read(trust, current).sequence, 1); assert.equal(closed, requests);
-  } finally { history?.close(); vault?.close(); rmSync(root, { recursive: true }); assert.equal(existsSync(root), false); }
+  } finally { journal?.close(); await artifacts?.close(); development?.close(); workspaces?.close(); history?.close(); vault?.close(); rmSync(root, { recursive: true }); assert.equal(existsSync(root), false); }
 });

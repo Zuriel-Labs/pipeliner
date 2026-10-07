@@ -57,9 +57,9 @@ test('update capture seals current compatible stores under real read locks and p
     assert.throws(() => journal.bindBackups(intent, captured)); assert.deepEqual(journal.read(), beforeBinding); writeFileSync(damagedPath, intact);
     journal.bindBackups(intent, captured); assert.deepEqual(journal.read().backups, captured);
     assert.equal(readFileSync(join(root, 'maintenance.sqlite')).includes(Buffer.from(damagedPath)), false);
-    assert.throws(() => journal.bindBackups(intent, captured)); journal.advance(intent, 'verified'); journal.advance(intent, 'replacing');
-    const replacement = journal.read(); assert.throws(() => journal.cancel(intent)); journal.close(); journal = openUpdateMaintenance(root, { vault });
-    assert.deepEqual(journal.read(), replacement); assert.equal(journal.owned(), false); assert.throws(() => journal.advance(intent, 'relaunching'));
+    assert.throws(() => journal.bindBackups(intent, captured)); assert.throws(() => journal.advance(intent, 'verified')); journal.advance(intent, 'repair-required');
+    const pending = journal.read(); assert.throws(() => journal.cancel(intent)); journal.close(); journal = openUpdateMaintenance(root, { vault });
+    assert.deepEqual(journal.read(), pending); assert.equal(journal.owned(), false); assert.throws(() => journal.advance(intent, 'relaunching'));
     const recovery = realpathSync(mkdtempSync(join(root, 'recovery-'))), restored = [];
     for (const receipt of captured.databases) {
       const value = materializeProtectedBackup(receipt.path, { directory: recovery, vault, store: receipt.store, version: receipt.schemaVersion, checkpoint() {} });

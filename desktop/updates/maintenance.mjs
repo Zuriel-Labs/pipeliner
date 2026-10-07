@@ -7,6 +7,7 @@ import { createRecordCodec } from '../privacy/records.mjs';
 import { buildIdentity } from '../package/build.mjs';
 import { isNewerUpdateVersion } from './manifest.mjs';
 import { updateBackups, verifyUpdateBackups } from './backup.mjs';
+import { verifyStagedInstaller } from './stage.mjs';
 
 const phases = ['preparing', 'staged', 'verified', 'replacing', 'relaunching', 'repair-required'];
 const time = value => Number.isSafeInteger(value) && value >= 0;
@@ -16,6 +17,13 @@ function plan(value) {
   canonicalJSON(value); record(value, ['from', 'to', 'sha256', 'bytes']); buildIdentity(value.from); buildIdentity(value.to);
   if (!isNewerUpdateVersion(value.to.version, value.from.version) || typeof value.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(value.sha256)
     || !Number.isSafeInteger(value.bytes) || value.bytes < 1 || value.bytes > 8 * 1024 ** 3) throw Error();
+}
+function installer(value, directory, intent) {
+  canonicalJSON(value); record(value, ['file', 'bytes', 'sha256']);
+  const folder = directory + '/updates/';
+  if (typeof value.file !== 'string' || !value.file.startsWith(folder)
+    || !/^update-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\.dmg$/.test(value.file.slice(folder.length))
+    || value.bytes !== intent.bytes || value.sha256 !== intent.sha256) throw Error();
 }
 
 // Host-only intent, not update trust or effect reconciliation. A pending record never clears on reopen.
@@ -55,9 +63,10 @@ export function openUpdateMaintenance(directory, { vault, clock = Date.now }) {
       if (!row || !time(row.revision) || !time(row.clock) || !time(now) || now < row.clock) throw Error();
       const value = codec.decode(identity, row.payload, { revision: row.revision, clock: row.clock });
       if (value !== null) {
-        record(value, ['schemaVersion', 'id', 'phase', 'from', 'to', 'sha256', 'bytes', 'createdAt', 'updatedAt', 'revision'], ['backups']);
+        record(value, ['schemaVersion', 'id', 'phase', 'from', 'to', 'sha256', 'bytes', 'createdAt', 'updatedAt', 'revision'], ['backups', 'installer']);
         plan({ from: value.from, to: value.to, sha256: value.sha256, bytes: value.bytes });
         if (value.backups !== undefined) updateBackups(value.backups, { directory, build: value.from });
+        if (value.installer !== undefined) installer(value.installer, directory, value);
         if (value.schemaVersion !== 1 || typeof value.id !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value.id)
           || !phases.includes(value.phase) || !time(value.createdAt) || value.createdAt > value.updatedAt
           || value.updatedAt !== row.clock || value.revision !== row.revision) throw Error();
@@ -96,11 +105,35 @@ export function openUpdateMaintenance(directory, { vault, clock = Date.now }) {
       advance(token, phase) {
         const revision = transaction(state => {
           if (!owned(state) || token !== active.token || !phases.includes(phase) || state.value.phase === 'repair-required'
-            || ['verified', 'replacing', 'relaunching'].includes(phase) && !state.value.backups
+            || ['verified', 'replacing', 'relaunching'].includes(phase) && (!state.value.backups || !state.value.installer)
             || phase !== 'repair-required' && phases.indexOf(phase) !== phases.indexOf(state.value.phase) + 1) throw Error();
           return save(state, { ...state.value, phase });
         });
         active.revision = revision;
+      },
+      async bindInstaller(token, receipt, options) {
+        try {
+          record(options, ['history', 'trust', 'current'], ['checkpoint', 'signal']); canonicalJSON(receipt); record(receipt, ['file', 'bytes', 'sha256', 'release']);
+          const candidate = immutable(structuredClone(receipt)), checkpoint = options.checkpoint ?? (() => {}), signal = options.signal;
+          const trust = { ...options.trust }, current = { ...options.current };
+          const initial = readState(), eligible = state => owned(state) && token === active.token && !state.value.installer
+            && ['preparing', 'staged'].includes(state.value.phase) && state.row.revision === initial.row.revision;
+          if (typeof checkpoint !== 'function' || signal !== undefined && !(signal instanceof AbortSignal) || !eligible(initial)
+            || ['version', 'platform', 'architecture'].some(key => current[key] !== initial.value.from[key])) throw Error();
+          installer({ file: candidate.file, bytes: candidate.bytes, sha256: candidate.sha256 }, directory, initial.value);
+          const isCurrent = () => {
+            try { signal?.throwIfAborted(); checkpoint(); signal?.throwIfAborted(); return eligible(readState()); } catch { return false; }
+          };
+          const verified = await verifyStagedInstaller({ directory: directory + '/updates', file: candidate.file,
+            history: options.history, trust, current, signal, isCurrent }, { clock });
+          if (!isCurrent() || canonicalJSON(verified) !== canonicalJSON(candidate)
+            || ['version', 'platform', 'architecture', 'sourceCommit', 'gitTree'].some(key => verified.release[key] !== initial.value.to[key])) throw Error();
+          const revision = transaction(state => {
+            if (!eligible(state)) throw Error();
+            return save(state, { ...state.value, phase: 'staged', installer: { file: verified.file, bytes: verified.bytes, sha256: verified.sha256 } });
+          });
+          active.revision = revision;
+        } catch { throw Error('maintenance-state-unavailable'); }
       },
       bindBackups(token, capture) {
         const backups = guarded(() => {

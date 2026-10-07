@@ -9,6 +9,8 @@ assert.throws(() => admission.activate({ run: '/tmp/foreign' }), /test-process-c
 const closed = child => new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve); });
 let stage = 'spawn', passed = 0;
 async function main() {
+  const context = require('../desktop/test-storage.cjs').validateContext(path.resolve(__dirname, '..'));
+  assert.equal(context.run_path, process.env.TEST_ARTIFACT_RUN);
   const child = cp.spawn('/bin/sh', ['-c', 'printf "%s\\n" "$$"; /bin/ps -p "$$" -o pgid=; exit 7'], { detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = ''; child.stdout.on('data', bytes => output += bytes);
   assert.equal(await closed(child), 7); assert.deepEqual(output.trim().split(/\s+/).map(Number), [child.pid, child.pid]);

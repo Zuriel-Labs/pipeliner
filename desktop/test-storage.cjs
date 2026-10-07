@@ -2,7 +2,6 @@
 // Explicit test entry points only. Real profiles never call this owner.
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
 const { createHash } = require('node:crypto');
 const chromiumHome = '/Users/chris/.local/share/eaglepro-test-storage-candidates/chromium-singleton-95c420f82716';
 const chromiumLauncher = chromiumHome + '/test-artifacts';
@@ -53,7 +52,7 @@ function classifyStartup(arguments_, environment = process.env) {
   return Object.freeze({ qualifying, testMode, testDirectory });
 }
 
-function validateContext(repository, environment = process.env, execute = spawnSync) {
+function validateContext(repository, environment = process.env, execute = require('node:child_process').spawnSync) {
   if (!environment.TEST_ARTIFACT_RUN) throw new Error('test-storage-run-required');
   if (environment.TEST_ARTIFACT_CHROMIUM_HELPER && environment.TEST_ARTIFACT_CHROMIUM_HELPER !== chromiumHelper) {
     throw new Error('test-storage-chromium-helper');

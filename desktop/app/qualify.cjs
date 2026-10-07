@@ -779,8 +779,8 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
       try {
         if (process.argv.includes('--qualify-workload-profile')) {
           profiler = new (require('node:inspector').Session)(); profiler.connect();
-          post = method => new Promise((resolve, reject) => profiler.post(method, (error, result) => error ? reject(error) : resolve(result)));
-          await post('Profiler.enable'); await post('Profiler.start');
+          post = (method, parameters = {}) => new Promise((resolve, reject) => profiler.post(method, parameters, (error, result) => error ? reject(error) : resolve(result)));
+          await post('Profiler.enable'); await post('Profiler.setSamplingInterval', { interval: 10000 }); await post('Profiler.start');
         }
         const writes = [...issueFixtures.values()].reduce((count, fixture) => count + fixture.writes.length, 0), coldReads = catalogReads;
         for (const target of targets) {

@@ -6,6 +6,8 @@ const { syncBuiltinESMExports } = require('node:module');
 const root = fs.realpathSync(path.join(__dirname, '..'));
 const home = '/Users/chris/.local/share/eaglepro-test-storage-candidates/pipeliner-54-quality-closure-transaction-be11b6af99e84244';
 const wrapper = home + '/test-artifacts-quality-groups';
+const contextHome = '/Users/chris/.local/share/eaglepro-test-storage-candidates/pipeliner-54-context-rpc-450ff384b4807c61';
+const contextEntry = contextHome + '/entry.py';
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const pins = Object.freeze({
   [home + '/groups.py']: 'be11b6af99e842442800359cd0a5b2e70e1c5910391cae1fd517cac368595aa5',
@@ -46,28 +48,43 @@ exports.activate = function activate({ run = process.env.TEST_ARTIFACT_RUN, node
     || !/^\/Volumes\/TESTING\/TestArtifacts\/projects\/pipeliner\/issues\/54\/runs\/[A-Za-z0-9-]+$/.test(run)) throw Error('test-process-context-required');
   const manifest = () => JSON.parse(owned(path.join(run, 'manifest.json'), 65536));
   const initial = manifest(), chromium = initial.diagnostic_context?.route === 'quality-explicit-closed-groups-inventory-chromium';
+  const contextRpc = initial.diagnostic_context?.route === 'quality-explicit-closed-groups-inventory-stable-context-rpc';
   const expected = { ...pins, ...(chromium ? {
     [chromiumHome + '/storage.py']: '6fbb08f51bf7f950672a4f7462983ae6b1b30253e880d336beb5955ec57e2de3',
     [chromiumHome + '/chromium_singleton.py']: 'ca4cf859353eb6889a58c36ba1d478aa9544a9f7ac9d1e3a9c2e6b4ee28ec10d',
-  } : { '/Users/chris/.local/share/eaglepro-test-storage/storage.py': 'e4a75d6c2ff4ca1cd1135da2bba1a3e72b649127ab29c2a9aef1dc161b9426d6' }) };
+  } : { '/Users/chris/.local/share/eaglepro-test-storage/storage.py': 'e4a75d6c2ff4ca1cd1135da2bba1a3e72b649127ab29c2a9aef1dc161b9426d6' }),
+    ...(contextRpc ? { [contextEntry]: '450ff384b4807c618df4d2ca051522e8265daf23fac22753e229897f18cdcb4a' } : {}) };
   function verify() {
     const value = manifest();
     if (value.status !== 'running' || value.managed_by !== 'eaglepro-test-storage' || value.project !== 'pipeliner' || value.issue !== '54'
       || value.owner_uid !== process.getuid() || value.run_path !== run || value.volume_uuid !== '3F381C66-C7CC-4F8F-B3BE-E46151ACF674'
-      || value.diagnostic_context?.route !== 'quality-explicit-closed-groups-inventory-' + (chromium ? 'chromium' : 'stable')
+      || value.diagnostic_context?.route !== 'quality-explicit-closed-groups-inventory-' + (chromium ? 'chromium' : 'stable') + (contextRpc ? '-context-rpc' : '')
       || value.quality_groups?.version !== 1 || Object.keys(value.diagnostic_context.source_sha256).length !== Object.keys(expected).length
+      || (contextRpc && (value.quality_context_rpc?.version !== 1 || value.quality_context_rpc.repo !== root
+        || value.quality_context_rpc.source_path !== contextEntry || value.quality_context_rpc.source_sha256 !== expected[contextEntry]
+        || value.quality_context_rpc.non_authorizing_requests_only !== true))
       || Object.entries(expected).some(([file, digest]) => value.diagnostic_context.source_sha256[file] !== digest || hash(owned(file)) !== digest)
       || ['tmp', 'logs', 'outputs', 'recordings'].some(name => value.paths?.[name] !== path.join(run, name))) throw Error('test-process-receipt-unverified');
-    if (hash(owned(wrapper)) !== 'cb5f528f1c8dc810012c15450a0ed9a1f077031258f108a453a3063d99731048') throw Error('test-process-wrapper-unverified');
+    if (hash(owned(contextRpc ? contextHome + '/test-artifacts-context-rpc' : wrapper)) !== (contextRpc
+      ? '6089f2fd05cab74302a35f4d27c7a4ce92bfd8efe9941deb357ad3e29330fd62'
+      : 'cb5f528f1c8dc810012c15450a0ed9a1f077031258f108a453a3063d99731048')) throw Error('test-process-wrapper-unverified');
     return value;
   }
   const environment = { TEST_ARTIFACT_RUN: run, ...Object.fromEntries(['tmp','logs','outputs','recordings'].map(name => ['TEST_ARTIFACT_' + name.toUpperCase(), path.join(run, name)])),
     ...(chromium ? { TEST_ARTIFACT_CHROMIUM_HELPER: chromiumHome + '/storage.py', TEST_ARTIFACT_CHROMIUM_TMP: initial.chromium_singleton?.temp_path,
       MAC_CHROMIUM_TMPDIR: initial.chromium_singleton?.temp_path } : {}) };
-  const storage = require('../desktop/test-storage.cjs').validateContext(root, environment);
-  if (chromium) require('../desktop/test-storage.cjs').nativeTestEnvironment(storage, environment);
   const deadline = Date.now() + 15000;
   while (verify().quality_groups.enrollment_boundary_ready !== true) { if (Date.now() > deadline) throw Error('test-process-boundary-timeout'); pause(); }
+  const contextExecute = (file, args, options) => {
+    verify();
+    if (options?.detached) throw Error('test-process-sync-detached-unqualified');
+    if (file !== '/Users/chris/.local/bin/test-artifacts' || JSON.stringify(args) !== JSON.stringify(['validate-run', '--repo', root, '--run', run])) {
+      throw Error('test-process-context-command-unverified');
+    }
+    return cp.spawnSync('/opt/homebrew/bin/python3', ['-I', '-B', contextEntry, ...args], options);
+  };
+  const storage = require('../desktop/test-storage.cjs').validateContext(root, environment, contextRpc ? contextExecute : undefined);
+  if (chromium) require('../desktop/test-storage.cjs').nativeTestEnvironment(storage, environment);
   const hostNode = fs.realpathSync(node);
   const sourceHash = hash(owned(__filename)), gate = path.join(__dirname, 'desktop-test-process-gate.py'), gateHash = hash(owned(gate));
   const bootstrap = path.join(run, 'outputs', 'process-bootstrap.cjs'), gates = path.join(run, 'outputs', 'process-gates');
@@ -111,7 +128,8 @@ exports.activate = function activate({ run = process.env.TEST_ARTIFACT_RUN, node
         args: ['/opt/homebrew/bin/python3', '-I', '-B', gate, lease, nonce, String(process.pid), options.file, ...targetArgs] });
       this.spawnfile = options.file; this.spawnargs = options.args;
       if (!this.pid) return result;
-      const enrolled = syncSpawn(wrapper, ['enroll', '--repo', root, '--run', run, '--leader-pid', String(this.pid), ...(chromium ? ['--chromium-singleton'] : [])],
+      const enrollmentArgs = ['enroll', '--repo', root, '--run', run, '--leader-pid', String(this.pid), ...(chromium ? ['--chromium-singleton'] : [])];
+      const enrolled = syncSpawn(contextRpc ? '/opt/homebrew/bin/python3' : wrapper, contextRpc ? ['-I', '-B', contextEntry, ...enrollmentArgs] : enrollmentArgs,
         { encoding: 'utf8', timeout: 15000, maxBuffer: 65536 });
       if (enrolled.status !== 0 || enrolled.error) throw Error('test-process-enrollment-refused');
       const acknowledgment = JSON.parse(enrolled.stdout), receipt = verify();
@@ -140,8 +158,9 @@ exports.activate = function activate({ run = process.env.TEST_ARTIFACT_RUN, node
     if (options?.detached) throw Error('test-process-sync-detached-unqualified');
     return originalFunction(file, nodeArgs(file, args ?? []), options);
   }
-  cp.spawnSync = (file, args, options) => sync(syncSpawn, file, args, options);
+  cp.spawnSync = (file, args, options) => contextRpc && file === '/Users/chris/.local/bin/test-artifacts' && args?.[0] === 'validate-run'
+    ? contextExecute(file, args, options) : sync(syncSpawn, file, args, options);
   cp.execFileSync = (file, args, options) => sync(syncExec, file, args, options);
   syncBuiltinESMExports();
-  return globalThis[active] = Object.freeze({ run, bootstrap, route: chromium ? 'chromium' : 'stable' });
+  return globalThis[active] = Object.freeze({ run, bootstrap, route: chromium ? 'chromium' : contextRpc ? 'stable-context-rpc' : 'stable' });
 };

@@ -65,6 +65,11 @@ try {
       'pipeliner-update-exchanged\n'); helperExchanges++;
   } else await assert.rejects(run(executable, args), error => error.code === 2 && error.stdout === '' && error.stderr === 'update-swap-refused\n');
   await unchanged();
+  phase = 'parent-verification';
+  const parent = await lstat(source, { bigint: true }), inspectParent = ['--verify-parent', source, parent.dev.toString(), parent.ino.toString()];
+  if (volume.GlobalPermissionsEnabled) assert.equal((await run(executable, inspectParent)).stdout, 'pipeliner-update-parent-verified\n');
+  else await assert.rejects(run(executable, inspectParent), error => error.code === 2 && error.stdout === '' && error.stderr === 'update-swap-refused\n');
+  await unchanged();
   phase = 'kernel';
   const kernel = 'import ctypes,os,sys\nlib=ctypes.CDLL("/usr/lib/libSystem.B.dylib",use_errno=True)\n' +
     'call=lib.renameatx_np\ncall.argtypes=[ctypes.c_int,ctypes.c_char_p,ctypes.c_int,ctypes.c_char_p,ctypes.c_uint]\ncall.restype=ctypes.c_int\n' +
@@ -92,6 +97,7 @@ try {
   result = { kind: 'pipeliner-native-update-exchange', schemaVersion: 1, kernelExchanges: 2, helperExchanges,
     ownershipEnforced: volume.GlobalPermissionsEnabled, helperAcceptance: volume.GlobalPermissionsEnabled ? 'passed' : 'refused-ignored-ownership',
     beforeEffectRefusals: volume.GlobalPermissionsEnabled ? 5 : 6, actualACLGuard: 'passed', installedAppTouched: false,
+    parentVerification: volume.GlobalPermissionsEnabled ? 'passed' : 'refused-ignored-ownership',
     powerLoss: 'not-run', elapsedMs: Math.round(performance.now() - started) };
 } catch (error) {
   failure = true; failureCode = Number.isInteger(error.code) ? error.code : 'unverified';

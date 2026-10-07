@@ -41,21 +41,34 @@ static int entry(int parent, int fd, const struct stat *original, int before) {
     return !before || (held.st_mtimespec.tv_sec == original->st_mtimespec.tv_sec && held.st_mtimespec.tv_nsec == original->st_mtimespec.tv_nsec
         && held.st_ctimespec.tv_sec == original->st_ctimespec.tv_sec && held.st_ctimespec.tv_nsec == original->st_ctimespec.tv_nsec);
 }
+static int parent(const char *path, struct stat *root) {
+    char canonical[PATH_MAX]; size_t length = strlen(path);
+    if (!length || length >= PATH_MAX || path[0] != '/') return -1;
+    for (size_t n = 0; n < length; ++n) if ((unsigned char)path[n] < 32 || (unsigned char)path[n] == 127) return -1;
+    if (!realpath(path, canonical) || strcmp(path, canonical) != 0) return -1;
+    int fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW_ANY);
+    struct statfs volume;
+    if (fd >= 0 && protected(fd, root, 1) && fstatfs(fd, &volume) == 0 && strcmp(volume.f_fstypename, "apfs") == 0
+        && !(volume.f_flags & (MNT_RDONLY | MNT_IGNORE_OWNERSHIP))) return fd;
+    if (fd >= 0) close(fd); return -1;
+}
 int main(int argc, char **argv) {
-    int parents[2] = {-1, -1}, bundles[2] = {-1, -1}, code = 2, attempted = 0;
-    struct stat roots[2], apps[2]; uintmax_t values[4]; char canonical[PATH_MAX];
-    if (argc != 7 || getuid() == 0 || getuid() != geteuid() || getgid() != getegid()) goto done;
+    int parents[2] = {-1, -1}, bundles[2] = {-1, -1}, code = 2, attempted = 0, inspection = 0;
+    struct stat roots[2], apps[2]; uintmax_t values[4];
+    if (getuid() == 0 || getuid() != geteuid() || getgid() != getegid()) goto done;
+    if (argc == 5 && strcmp(argv[1], "--verify-parent") == 0) {
+        inspection = 1;
+        if (!number(argv[3], &values[0]) || !number(argv[4], &values[1])) goto done;
+        parents[0] = parent(argv[2], &roots[0]);
+        if (parents[0] >= 0 && (uintmax_t)roots[0].st_dev == values[0] && (uintmax_t)roots[0].st_ino == values[1]
+            && named(parents[0], argv[2], &roots[0])) code = 0;
+        goto done;
+    }
+    if (argc != 7) goto done;
     for (int i = 0; i < 4; ++i) if (!number(argv[i + 3], &values[i])) goto done;
     for (int i = 0; i < 2; ++i) {
-        const char *path = argv[i + 1]; size_t length = strlen(path);
-        if (!length || length >= PATH_MAX || path[0] != '/') goto done;
-        for (size_t n = 0; n < length; ++n) if ((unsigned char)path[n] < 32 || (unsigned char)path[n] == 127) goto done;
-        if (!realpath(path, canonical) || strcmp(path, canonical) != 0) goto done;
-        parents[i] = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW_ANY);
-        if (parents[i] < 0 || !protected(parents[i], &roots[i], 1)) goto done;
-        struct statfs volume;
-        if (fstatfs(parents[i], &volume) != 0 || strcmp(volume.f_fstypename, "apfs") != 0
-            || volume.f_flags & (MNT_RDONLY | MNT_IGNORE_OWNERSHIP)) goto done;
+        parents[i] = parent(argv[i + 1], &roots[i]);
+        if (parents[i] < 0) goto done;
         bundles[i] = openat(parents[i], "Pipeliner.app", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW_ANY);
         if (bundles[i] < 0 || !protected(bundles[i], &apps[i], 0)
             || (uintmax_t)apps[i].st_dev != values[i * 2] || (uintmax_t)apps[i].st_ino != values[i * 2 + 1]) goto done;
@@ -78,7 +91,7 @@ done:
         if (bundles[i] >= 0 && close(bundles[i]) != 0) code = attempted ? 3 : 2;
         if (parents[i] >= 0 && close(parents[i]) != 0) code = attempted ? 3 : 2;
     }
-    if (code == 0) { if (puts("pipeliner-update-exchanged") < 0 || fflush(stdout) != 0) return 3; }
+    if (code == 0) { if (puts(inspection ? "pipeliner-update-parent-verified" : "pipeliner-update-exchanged") < 0 || fflush(stdout) != 0) return inspection ? 2 : 3; }
     else fputs(code == 3 ? "update-swap-recovery-required\n" : "update-swap-refused\n", stderr);
     return code;
 }

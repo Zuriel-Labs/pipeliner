@@ -144,5 +144,34 @@ function configureOwnedPaths(app, storage, directory, io = fs, uid = process.get
   return Object.freeze(destinations);
 }
 
-module.exports = { classifyStartup, validateContext, validateOwnedDataDirectory, configureOwnedPaths,
+
+function negativeFixtureLease(declaration, sourceURL) {
+  const run = process.env.TEST_ARTIFACT_RUN;
+  if (!run) throw Error('test-storage-negative-fixture-contract-required');
+  const root = fs.realpathSync(path.join(__dirname, '..'));
+  const storage = validateContext(root), record = storage.negative_fixture_provider; // Original authenticated RPC result.
+  const pins = {source_sha256: "d35dfab36c87d67f7f03f0c2450c479876b016c25de64ab1b13c1444a446692a", policy_sha256: "612740ef97755078f3555b81c3b8030f27fe65ce79958c15dd31fab9642fcf97", client_sha256: "aad92683de7317763fccd3d9102fe53ccbd3412af8dd38037e54f28aded013ff"};
+  if (!storage.verified || storage.run_path !== run || storage.project !== 'pipeliner' || record?.run_path !== run || record.owner_uid !== process.getuid()
+    || record?.version !== 1 || record.ack_transport !== 'original-validated-context-result'
+    || record.kind !== 'pipeliner-54-typed-negative-rpc-v3' || Object.entries(pins).some(([key,pin]) => record[key] !== pin)) throw Error('test-storage-negative-fixture-contract-required');
+  const file = record.client_path;
+  if (fs.realpathSync(file) !== file) throw Error('test-storage-negative-fixture-client');
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  let raw;
+  try {
+    const before=fs.fstatSync(fd,{bigint:true});
+    if (!before.isFile() || before.uid!==BigInt(process.getuid()) || before.nlink!==1n || before.mode&0o022n || before.size>1048576n) throw Error('test-storage-negative-fixture-client');
+    const buffer=Buffer.alloc(1048577);let length=0;
+    while(length<buffer.length){const count=fs.readSync(fd,buffer,length,buffer.length-length,null);if(count===0)break;length+=count;}
+    raw=buffer.subarray(0,length);const after=fs.fstatSync(fd,{bigint:true}),named=fs.lstatSync(file,{bigint:true});
+    if (!before.isFile() || before.uid!==BigInt(process.getuid()) || before.nlink!==1n || before.mode&0o022n || before.size>1048576n
+      || raw.length!==Number(before.size) || ['dev','ino','mode','size','mtimeNs','ctimeNs'].some(key=>before[key]!==after[key] || after[key]!==named[key])
+      || createHash('sha256').update(raw).digest('hex')!==pins.client_sha256) throw Error('test-storage-negative-fixture-client');
+  } finally { fs.closeSync(fd); }
+  const Module = require('node:module'), client = new Module(file); client.filename=file;client.paths=[];
+  client._compile(raw.toString('utf8'),file); // Execute exactly the verified bytes; no path reread.
+  return client.exports.negativeFixtureLease(declaration,sourceURL,storage);
+}
+
+module.exports = { negativeFixtureLease, classifyStartup, validateContext, validateOwnedDataDirectory, configureOwnedPaths,
   nativeTestEnvironment, nativeTestLauncher, chromiumLauncher };

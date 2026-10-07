@@ -24,12 +24,19 @@ const active = Symbol.for('pipeliner.developer.process-admission');
 const pause = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
 function owned(file, maximum = 262144) {
   if (fs.realpathSync(file) !== file) throw Error('test-process-file-unverified');
-  const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
   try {
-    const before = fs.fstatSync(fd), bytes = fs.readFileSync(fd), after = fs.fstatSync(fd), current = fs.lstatSync(file);
-    if (!before.isFile() || before.uid !== process.getuid() || before.nlink !== 1 || before.size > maximum || before.mode & 0o022
-      || bytes.length !== before.size || before.dev !== current.dev || before.ino !== current.ino || current.isSymbolicLink()
-      || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) throw Error('test-process-file-unverified');
+    const before = fs.fstatSync(fd, { bigint:true });
+    if (!before.isFile() || before.uid !== BigInt(process.getuid()) || before.nlink !== 1n
+      || before.size > BigInt(maximum) || before.mode & 0o022n) throw Error('test-process-file-unverified');
+    const buffer = Buffer.alloc(maximum + 1); let length = 0;
+    while (length < buffer.length) {
+      const count = fs.readSync(fd, buffer, length, buffer.length - length, null);
+      if (count === 0) break; length += count;
+    }
+    const bytes = buffer.subarray(0, length), after = fs.fstatSync(fd, { bigint:true }), current = fs.lstatSync(file, { bigint:true });
+    if (bytes.length !== Number(before.size) || ['dev','ino','uid','mode','nlink','size','mtimeNs','ctimeNs'].some(key =>
+      before[key] !== after[key] || after[key] !== current[key])) throw Error('test-process-file-unverified');
     return bytes;
   } finally { fs.closeSync(fd); }
 }
@@ -48,7 +55,28 @@ exports.activate = function activate({ run = process.env.TEST_ARTIFACT_RUN, node
     || !/^\/Volumes\/TESTING\/TestArtifacts\/projects\/pipeliner\/issues\/54\/runs\/[A-Za-z0-9-]+$/.test(run)) throw Error('test-process-context-required');
   const manifest = () => JSON.parse(owned(path.join(run, 'manifest.json'), 65536));
   const initial = manifest(), chromium = initial.diagnostic_context?.route === 'quality-explicit-closed-groups-inventory-chromium';
-  const nativeDiagnostic = initial.diagnostic_context?.route === 'quality-explicit-closed-groups-inventory-stable-context-rpc-native-failure-operands';
+  const typedNegatives = initial.diagnostic_context?.route === 'quality-explicit-closed-groups-inventory-stable-context-rpc-native-failure-operands-typed-negatives-v3';
+  const negativeHome = "/Users/chris/.local/share/eaglepro-test-storage-candidates/pipeliner-54-typed-negatives-d35dfab36c87d67f";
+  const negativeRecipeHash = "0527b96423bc6d60b5329d16f28884d73362f751a81bd2cfbebbeed145997455";
+  const negativeRecord = initial.negative_fixture_rpc;
+  const negativePins = typedNegatives ? {
+    [negativeHome + '/entry.py']: "d35dfab36c87d67f7f03f0c2450c479876b016c25de64ab1b13c1444a446692a",
+    [negativeHome + '/policy.py']: "612740ef97755078f3555b81c3b8030f27fe65ce79958c15dd31fab9642fcf97",
+    [negativeHome + '/client.cjs']: "aad92683de7317763fccd3d9102fe53ccbd3412af8dd38037e54f28aded013ff",
+    [negativeHome + '/routing-preflight.py']: "6abcfa8db091af56d6c24883672008a98766dd70ba71a02504f9614f0a358928",
+    [negativeHome + '/context-read-diagnostic.py']: "8fd8a0b597c861780708e20b4837a3d312b95a8bdb15e4cc75540381d061d8f8",
+    [negativeHome + '/receipt-publication.py']: "501638ca3954e9ccc8018770aeb4dd773609c9271ad4cfb3f26dac1c6a1a9405",
+    [negativeRecord?.recipe_path]: negativeRecipeHash,
+  } : {};
+  if (typedNegatives && (negativeRecord?.version !== 1 || negativeRecord.kind !== 'pipeliner-54-typed-negative-rpc-v3'
+    || negativeRecord.source_path !== negativeHome + '/entry.py' || negativeRecord.source_sha256 !== negativePins[negativeRecord.source_path]
+    || negativeRecord.client_path !== negativeHome + '/client.cjs' || negativeRecord.client_sha256 !== negativePins[negativeRecord.client_path]
+    || negativeRecord.policy_path !== negativeHome + '/policy.py' || negativeRecord.policy_sha256 !== negativePins[negativeRecord.policy_path]
+    || negativeRecord.preflight_path !== negativeHome + '/routing-preflight.py' || negativeRecord.preflight_sha256 !== negativePins[negativeRecord.preflight_path]
+    || negativeRecord.context_client_path !== negativeHome + '/context-read-diagnostic.py' || negativeRecord.context_client_sha256 !== negativePins[negativeRecord.context_client_path]
+    || negativeRecord.publication_path !== negativeHome + '/receipt-publication.py' || negativeRecord.publication_sha256 !== negativePins[negativeRecord.publication_path]
+    || negativeRecord.recipe_sha256 !== negativeRecipeHash || negativeRecord.paired_original_rpc !== true)) throw Error('test-process-negative-fixture-unverified');
+  const nativeDiagnostic = typedNegatives || initial.diagnostic_context?.route === 'quality-explicit-closed-groups-inventory-stable-context-rpc-native-failure-operands';
   const diagnosticPath = path.join(path.dirname(contextHome), 'pipeliner-54-context-native-diagnostic-6a806b00dd6e5038', 'entry.py');
   const diagnosticHash = '6a806b00dd6e50386cec25ecdb94866be684ea16a8d865c4ed60c2c473e48e86';
   const contextRpc = nativeDiagnostic || initial.diagnostic_context?.route === 'quality-explicit-closed-groups-inventory-stable-context-rpc';
@@ -57,12 +85,12 @@ exports.activate = function activate({ run = process.env.TEST_ARTIFACT_RUN, node
     [chromiumHome + '/chromium_singleton.py']: 'ca4cf859353eb6889a58c36ba1d478aa9544a9f7ac9d1e3a9c2e6b4ee28ec10d',
   } : { '/Users/chris/.local/share/eaglepro-test-storage/storage.py': 'e4a75d6c2ff4ca1cd1135da2bba1a3e72b649127ab29c2a9aef1dc161b9426d6' }),
     ...(contextRpc ? { [contextEntry]: '450ff384b4807c618df4d2ca051522e8265daf23fac22753e229897f18cdcb4a' } : {}),
-    ...(nativeDiagnostic ? { [diagnosticPath]: diagnosticHash } : {}) };
+    ...(nativeDiagnostic ? { [diagnosticPath]: diagnosticHash } : {}), ...negativePins };
   function verify() {
     const value = manifest();
     if (value.status !== 'running' || value.managed_by !== 'eaglepro-test-storage' || value.project !== 'pipeliner' || value.issue !== '54'
       || value.owner_uid !== process.getuid() || value.run_path !== run || value.volume_uuid !== '3F381C66-C7CC-4F8F-B3BE-E46151ACF674'
-      || value.diagnostic_context?.route !== 'quality-explicit-closed-groups-inventory-' + (chromium ? 'chromium' : 'stable') + (contextRpc ? '-context-rpc' : '') + (nativeDiagnostic ? '-native-failure-operands' : '')
+      || value.diagnostic_context?.route !== 'quality-explicit-closed-groups-inventory-' + (chromium ? 'chromium' : 'stable') + (contextRpc ? '-context-rpc' : '') + (nativeDiagnostic ? '-native-failure-operands' : '') + (typedNegatives ? '-typed-negatives-v3' : '')
       || value.quality_groups?.version !== 1 || Object.keys(value.diagnostic_context.source_sha256).length !== Object.keys(expected).length
       || (contextRpc && (value.quality_context_rpc?.version !== 1 || value.quality_context_rpc.repo !== root
         || value.quality_context_rpc.source_path !== contextEntry || value.quality_context_rpc.source_sha256 !== expected[contextEntry]
@@ -90,7 +118,7 @@ exports.activate = function activate({ run = process.env.TEST_ARTIFACT_RUN, node
     if (file !== '/Users/chris/.local/bin/test-artifacts' || JSON.stringify(args) !== JSON.stringify(['validate-run', '--repo', root, '--run', run])) {
       throw Error('test-process-context-command-unverified');
     }
-    return cp.spawnSync('/opt/homebrew/bin/python3', ['-I', '-B', contextEntry, ...args], options);
+    return cp.spawnSync('/opt/homebrew/bin/python3', ['-I', '-B', typedNegatives ? negativeRecord.context_client_path : contextEntry, ...args], options);
   };
   const storage = require('../desktop/test-storage.cjs').validateContext(root, environment, contextRpc ? contextExecute : undefined);
   if (chromium) require('../desktop/test-storage.cjs').nativeTestEnvironment(storage, environment);
@@ -105,6 +133,7 @@ exports.activate = function activate({ run = process.env.TEST_ARTIFACT_RUN, node
   const original = cp.ChildProcess.prototype.spawn, syncSpawn = cp.spawnSync, syncExec = cp.execFileSync;
   const nodeArgs = (file, args) => {
     let isNode = false; try { isNode = fs.realpathSync(file) === hostNode; } catch { /* Preserve original launch error. */ }
+    if (typedNegatives && isNode && Array.isArray(args) && args[0] === '--require' && args[1] === bootstrap) return args;
     return isNode && Array.isArray(args) ? ['--require', bootstrap, ...args] : args;
   };
   // ponytail: one run lock serializes admission; preserve each production cancellation group.

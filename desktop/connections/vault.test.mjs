@@ -91,13 +91,18 @@ test('exact host credential removal is atomic, covers orphaned MCP records and p
     db = new DatabaseSync(join(root, 'connections.sqlite'));
     const wrapped = Buffer.from(db.prepare('SELECT payload FROM vault_key WHERE id=1').get().payload);
     const first = vault.connectionInventory();
+    const predicted = vault.previewCredentialRemoval();
+    assert.equal(Object.isFrozen(predicted), true); assert.deepEqual(predicted.before, first);
+    assert.equal(predicted.after.count, first.count); assert.equal(predicted.after.stored, 0);
+    assert.notEqual(predicted.after.sha256, first.sha256); assert.deepEqual(vault.connectionInventory(), first);
     assert.equal(Object.isFrozen(first), true); assert.equal(first.count, 3); assert.equal(first.stored, 3);
     assert.deepEqual(Object.keys(first).sort(), ['count', 'sha256', 'stored']); assert.match(first.sha256, /^[a-f0-9]{64}$/);
     assert.equal(JSON.stringify(first).includes('synthetic-uninstall-secret'), false);
     vault.save('github', vault.get('github').epoch, { credential: 'synthetic-uninstall-secret-changed' });
     assert.throws(() => vault.forgetCredentials(first), /credential-removal-unverified/);
     assert.equal(vault.connectionInventory().stored, 3);
-    const before = vault.connectionInventory(), epochs = new Map(['github', 'ollama', orphan].map(id => [id, vault.get(id).epoch]));
+    const before = vault.connectionInventory(), expectedAfter = vault.previewCredentialRemoval().after;
+    const epochs = new Map(['github', 'ollama', orphan].map(id => [id, vault.get(id).epoch]));
     for (const invalid of [{ ...before, count: 2 }, { ...before, extra: true }, { ...before, sha256: '0'.repeat(64) }, null])
       assert.throws(() => vault.forgetCredentials(invalid), /credential-removal-unverified/);
     let getters = 0;
@@ -121,6 +126,7 @@ test('exact host credential removal is atomic, covers orphaned MCP records and p
     assert.equal(vault.get('github').epoch, epochs.get('github')); assert.equal(vault.get('ollama').epoch, epochs.get('ollama'));
     db.prepare('UPDATE connections SET payload=? WHERE id=?').run(bytes, orphan); assert.deepEqual(vault.connectionInventory(), before);
     const after = vault.forgetCredentials(before); assert.equal(after.count, 3); assert.equal(after.stored, 0); assert.notEqual(after.sha256, before.sha256);
+    assert.deepEqual(after, expectedAfter); assert.deepEqual(after, predicted.after);
     for (const [id, epoch] of epochs) {
       assert.deepEqual(vault.get(id), { epoch: epoch + 1, value: null }); assert.equal(vault.current(id, epoch), false);
       assert.equal(vault.save(id, epoch, { credential: 'late secret' }), false);
@@ -130,6 +136,7 @@ test('exact host credential removal is atomic, covers orphaned MCP records and p
     assert.throws(() => vault.forgetCredentials(before), /credential-removal-unverified/);
     db.prepare('UPDATE connections SET epoch=? WHERE id=?').run(Number.MAX_SAFE_INTEGER, 'ollama');
     const exhausted = vault.connectionInventory(); assert.throws(() => vault.forgetCredentials(exhausted), /credential-removal-unverified/);
+    assert.throws(() => vault.previewCredentialRemoval(), /credential-removal-preview-unverified/);
     assert.deepEqual(vault.connectionInventory(), exhausted); db.prepare('UPDATE connections SET epoch=2 WHERE id=?').run('ollama');
     db.prepare('INSERT INTO connections VALUES(?,?,NULL)').run('foreign-entry', 1);
     assert.throws(() => vault.connectionInventory(), /credential-inventory-unverified/);

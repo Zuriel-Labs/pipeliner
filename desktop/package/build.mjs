@@ -8,7 +8,7 @@ export const buildIdentityName = 'pipeliner-build.json';
 export const dataCompatibilityName = 'pipeliner-data.json';
 const currentFormats = immutable({
   databases: { connections: 0, policy: 3, owner: 0, execution: 1, skills: 1, tools: 1, privacy: 1, updates: 1,
-    workspaces: 5, development: 2, artifacts: 2, maintenance: 2 },
+    workspaces: 5, development: 2, artifacts: 2, maintenance: 2, uninstall: 1 },
   policyDocument: 4, connectionRecord: 1, protectedPayload: 1, protectedRecord: 1, migrationBackup: 1,
 });
 export function buildIdentity(value) {

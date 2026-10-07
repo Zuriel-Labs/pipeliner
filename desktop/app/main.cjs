@@ -35,7 +35,7 @@ if (startup.testMode) {
 } else { app.setPath('userData', dataDirectory); app.setPath('crashDumps', path.join(dataDirectory, 'crashes')); }
 protocol.registerSchemesAsPrivileged([{ scheme: 'pipeliner', privileges: { standard: true, secure: true } }]);
 if (!app.requestSingleInstanceLock()) app.exit(0);
-let window, manager, vault, workspaces, workspaceStore, issues, pipelines, policy, development, developmentStore, supervisor, scheduling, scheduler, background, backgroundHost, backgroundNative, skills, skillStore, tools, toolStore, toolConnections, privacy, privacyRecords, appearance, delivery, updates, updateHistory, maintenanceStore, maintenance, permissions, artifacts, retentionMonitor, attachWindow, attachment, requestShutdown, authorizationMonitor, maintenanceUnavailable = false, shutdownPaused = false, closing = false, verifiedClose = false;
+let window, manager, vault, workspaces, workspaceStore, issues, pipelines, policy, development, developmentStore, supervisor, scheduling, scheduler, background, backgroundHost, backgroundNative, skills, skillStore, tools, toolStore, toolConnections, privacy, privacyRecords, appearance, delivery, updates, updateHistory, maintenanceStore, uninstallJournal, maintenance, permissions, artifacts, retentionMonitor, attachWindow, attachment, requestShutdown, authorizationMonitor, maintenanceUnavailable = false, shutdownPaused = false, closing = false, verifiedClose = false;
 const hostCapabilities = Object.freeze(['workspace.read', 'workspace.write', 'worker.exec', 'provider.turn', 'git.push', 'github.read', 'github.issue.write', 'github.pr.write', 'github.project.write', 'extension.install', 'extension.invoke']);
 // A production publisher requires reviewed provenance; none is invented for this preview.
 const trustedUpdateSources = Object.freeze([]);
@@ -97,6 +97,7 @@ app.whenReady().then(async () => {
   const { createUpdateManager } = await moduleAt('../updates/manager.mjs');
   const { openUpdateHistory } = await moduleAt('../updates/history.mjs');
   const { openUpdateMaintenance } = await moduleAt('../updates/maintenance.mjs');
+  const { openUninstallJournal } = await moduleAt('../updates/uninstall.mjs');
   const { updateCommand } = await moduleAt('../updates/commands.mjs');
   const { createMaintenanceGate } = await moduleAt('../updates/idle.mjs');
   const { inspectMacDelivery } = await moduleAt('../delivery/mac.mjs');
@@ -125,10 +126,10 @@ app.whenReady().then(async () => {
   const { nativeKeyEntry, nativeFolderEntry, nativeMCPEntry } = await moduleAt('../connections/native-entry.mjs');
   phase('host-modules-ready');
   const activeConnections = new Set();
-  const maintenanceRecovery = () => maintenanceStore ? !maintenanceStore.clear() : maintenanceUnavailable;
+  const maintenanceRecovery = () => { try { return maintenanceUnavailable || [maintenanceStore, uninstallJournal].some(value => value && value.clear() !== true); } catch { return true; } };
   maintenance = createMaintenanceGate({ ready: () => {
     if (closing || !vault || !workspaceStore || !policy || !developmentStore || !supervisor || !scheduler || !backgroundHost || !privacyRecords || !updateHistory
-      || !maintenanceStore) return false;
+      || !maintenanceStore || !uninstallJournal) return false;
     if (scheduler.busy() || issues.busy() || manager.status().connections.some(connection => connection.busy || connection.cleanupPending)
       || backgroundHost.status().busy || backgroundHost.status().cleanupPending
       || [workspaces, pipelines, scheduling, background, skills, tools, privacy, appearance, delivery, permissions].some(value => value.status().busy)) return false;
@@ -138,7 +139,7 @@ app.whenReady().then(async () => {
       || workspaceStore.pending().length || developmentStore.recovery().some(run => run.uncertainEffects)) return false;
     return true;
   }, verify: signal => supervisor.verifyIdle(signal), recovery: maintenanceRecovery });
-  const executionAllowed = () => !closing && !maintenance.active() && maintenanceStore?.clear() === true && (backgroundHost?.executionAllowed() ?? !backgroundLaunch);
+  const executionAllowed = () => !closing && !maintenance.active() && !maintenanceRecovery() && maintenanceStore?.clear() === true && uninstallJournal?.clear() === true && (backgroundHost?.executionAllowed() ?? !backgroundLaunch);
   const registerControl = (name, channel) => ipcMain.handle(name, (event, payload) => {
     if (closing) throw Error('App closing');
     return maintenance.control(() => channel().dispatch(event, payload), {
@@ -389,7 +390,7 @@ app.whenReady().then(async () => {
       powerMonitor.removeListener('suspend', suspendHost); powerMonitor.removeListener('resume', wakeHost); powerMonitor.removeListener('shutdown', endSession);
       await tools.close(); await toolConnections?.close();
       await privacy.close(); privacyRecords?.close();
-      await permissions.close(); await updates.close(); updateHistory?.close(); maintenanceStore?.close(); await delivery.close(); await artifacts?.close(); backgroundHost?.close(); background.close(); scheduling.close(); pipelines.close(); skills.close(); appearance.close();
+      await permissions.close(); await updates.close(); updateHistory?.close(); uninstallJournal?.close(); maintenanceStore?.close(); await delivery.close(); await artifacts?.close(); backgroundHost?.close(); background.close(); scheduling.close(); pipelines.close(); skills.close(); appearance.close();
       developmentStore?.close(); policy?.close(); skillStore?.close(); toolStore?.close(); workspaceStore?.close(); vault?.close(); verifiedClose = true; phase('shutdown-finished'); app.quit();
     } catch { closing = false; console.error('Pipeliner shutdown needs verified recovery. Work remains preserved.'); await attachWindow(); publish(manager.status()); }
   };
@@ -402,9 +403,11 @@ app.whenReady().then(async () => {
     vault = await openVault(directory, { available: () => safeStorage.isAsyncEncryptionAvailable(), encrypt: text => safeStorage.encryptStringAsync(text), decrypt: bytes => safeStorage.decryptStringAsync(bytes) });
     phase('vault-ready');
     if (closing) { vault.close(); return; }
+    try { uninstallJournal = openUninstallJournal(directory, { vault }); }
+    catch { maintenanceUnavailable = true; console.error('Desktop app removal needs protected recovery. Existing data preserved.'); }
     try { maintenanceStore = openUpdateMaintenance(directory, { vault }); }
     catch { maintenanceUnavailable = true; console.error('Desktop maintenance needs protected recovery. Existing data preserved.'); }
-    if (app.isPackaged && !backgroundLaunch && maintenanceStore && !maintenanceStore.clear()) {
+    if (app.isPackaged && !backgroundLaunch && maintenanceStore && !maintenanceStore.clear() && uninstallJournal?.clear() === true) {
       try {
         const { readBuildIdentity } = await moduleAt('../package/build.mjs');
         const bundle = path.dirname(path.dirname(path.dirname(process.execPath)));

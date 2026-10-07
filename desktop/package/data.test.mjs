@@ -18,12 +18,15 @@ test('bundle data support metadata binds the exact build and preserves existing 
     const support = metadata.dataCompatibilityForBuild(identity, '0.160.0');
     assert(Object.isFrozen(support)); assert(Object.isFrozen(support.formats.databases));
     assert.deepEqual(support.build, identity); assert.equal(support.formats.databases.maintenance, 2);
+    assert.equal(support.formats.databases.uninstall, 1);
     assert.equal(support.formats.databases.policy, 3); assert.equal(support.formats.policyDocument, 4);
     assert.equal(support.codexCLI, '0.160.0'); assert.equal(metadata.dataCompatibilityName, 'pipeliner-data.json');
     const nextBuild = { ...identity, version: '0.2.0', sourceCommit: 'd'.repeat(40) };
     const next = metadata.dataCompatibilityForBuild(nextBuild, support.codexCLI);
     assert.equal(typeof metadata.requireSameDataSupport, 'function');
     assert.equal(metadata.requireSameDataSupport(support, next), undefined);
+    const missingRemovalSupport = structuredClone(next); delete missingRemovalSupport.formats.databases.uninstall;
+    assert.throws(() => metadata.requireSameDataSupport(support, missingRemovalSupport));
     const changed = structuredClone(next); changed.formats.databases.workspaces++;
     assert.throws(() => metadata.requireSameDataSupport(support, changed));
     const unsupported = structuredClone(support); unsupported.formats.databases.workspaces++;

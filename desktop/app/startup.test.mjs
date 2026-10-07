@@ -6,17 +6,26 @@ import { runInNewContext } from 'node:vm';
 
 const require = createRequire(import.meta.url), source = readFileSync(new URL('./main.cjs',import.meta.url),'utf8');
 const testStorage = require('../test-storage.cjs');
+test('host maintenance fence blocks pending or unreadable uninstall state and partial store initialization', () => {
+  const expression = source.match(/^  const maintenanceRecovery = (.+);$/m)?.[1]; assert.ok(expression);
+  for (const mode of ['ready', 'update', 'uninstall', 'unreadable', 'partial']) {
+    const context = { maintenanceUnavailable: mode === 'partial', maintenanceStore: { clear: () => mode !== 'update' },
+      uninstallJournal: mode === 'partial' ? null : { clear() { if (mode === 'unreadable') throw Error('Synthetic unreadable state'); return mode !== 'uninstall'; } } };
+    assert.equal(runInNewContext(`(${expression})()`, context, { timeout: 1000 }), mode !== 'ready');
+  }
+});
 test('pending startup recovery stops before normal stores can create missing data; only verified packaged foreground proceeds', async () => {
   const start = source.indexOf('    if (app.isPackaged && !backgroundLaunch && maintenanceStore'), end = source.indexOf('    const initialRevision = manager.status().revision + 1;', start);
   assert.ok(start >= 0 && end > start);
   const block = source.slice(start, end);
-  for (const mode of ['source', 'background', 'unavailable', 'refused', 'cancelled', 'verified', 'clear']) {
+  for (const mode of ['source', 'background', 'unavailable', 'uninstall', 'refused', 'cancelled', 'verified', 'clear']) {
     let pending = mode !== 'clear', finished = 0, continued = 0, published = 0;
     const store = mode === 'unavailable' ? null : { clear: () => !pending, async finishRelaunch(options) {
       finished++; assert.equal(options.running.bundle, '/private/Pipeliner.app'); options.checkpoint();
       if (mode !== 'verified') throw Error('Synthetic native refusal'); pending = false;
     } };
     const context = { app: { isPackaged: mode !== 'source' }, backgroundLaunch: mode === 'background', maintenanceStore: store,
+      uninstallJournal: { clear: () => mode !== 'uninstall' },
       maintenanceRecovery: () => pending, moduleAt: async () => ({ readBuildIdentity: async () => ({ synthetic: true }) }),
       path: require('node:path'), process: { execPath: '/private/Pipeliner.app/Contents/MacOS/Pipeliner' }, closing: mode === 'cancelled', AbortController,
       updates: { sync() {}, status: () => ({ recoveryRequired: pending }) }, publishUpdates(status) { assert.equal(status.recoveryRequired, true); published++; },

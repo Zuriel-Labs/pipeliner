@@ -25,13 +25,14 @@ test('durable update intent fences stale owners and preserves interrupted or alt
     for (const changed of [{ ...plan, to: from }, { ...plan, bytes: 0 }, { ...plan, sha256: 'bad' }, { ...plan, path: '/private/foreign' }])
       assert.throws(() => store.begin(changed));
     let getterCalls = 0; assert.throws(() => store.begin({ ...plan, get from() { getterCalls++; return from; } })); assert.equal(getterCalls, 0);
-    const gate = createMaintenanceGate({ ready: () => store.clear() || store.owned(), verify: async () => true, recovery: () => !store.clear() });
+    const gate = createMaintenanceGate({ ready: () => true, verify: async () => true, recovery: () => !store.clear() });
     let token;
     await gate.control(() => gate.exclusive(async checkpoint => {
       token = store.begin(plan); checkpoint();
+      assert.equal(store.owned(), false); assert.equal(store.owned({}), false); assert.equal(store.owned(token), true);
       await assert.rejects(gate.control(() => assert.fail('competing mutation')), /maintenance-recovery-required/);
       assert.equal(await gate.control(() => store.read().phase, { passive: true }), 'preparing');
-    }));
+    }, { ownsRecovery: () => store.owned(token) }));
     await assert.rejects(gate.exclusive(() => assert.fail('pending maintenance consumer')), /maintenance-recovery-required/);
     const first = store.read();
     assert.equal(first.phase, 'preparing'); assert.deepEqual(first.from, plan.from); assert.deepEqual(first.to, plan.to);

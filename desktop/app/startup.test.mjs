@@ -55,6 +55,39 @@ function entry(packaged, args, storageAvailable = true) {
     process:{argv:['/private/package/Pipeliner',...args],resourcesPath:'/private/package/Resources',on(){}},performance:{now:()=>0},console:{error(...values){calls.push(['error',...values]);}},__dirname:'/private/package/Resources/app' };
   return {calls,run:()=>runInNewContext(`(function(){${source}\n})();`,context,{timeout:1000})};
 }
+test('host update preparation captures only the running packaged build and binds private journal ownership', async () => {
+  const start = source.indexOf('  const makeUpdates = initialRevision =>'), end = source.indexOf('  updates = makeUpdates(1);', start);
+  assert.ok(start >= 0 && end > start);
+  for (const mode of ['normal', 'source', 'background', 'cancelled', 'duplicate-team', 'native-refused']) {
+    const token = Object.freeze({}), signal = new AbortController().signal, trust = Object.freeze({ synthetic: true }), current = Object.freeze({ synthetic: true });
+    let held = true, nativeCalls = 0, prepared = 0, captured;
+    const build = Object.freeze({ kind: 'synthetic-build' }), checkpoint = () => { if (mode === 'cancelled') throw Error('Synthetic cancelled host'); }, onIntent = () => {};
+    const context = { policy: {}, updateHistory: {}, trustedUpdateSources: [], maintenance: { active: () => held },
+      maintenanceStore: { owned: candidate => candidate === token, async prepare(options) {
+        prepared++; assert.deepEqual(JSON.parse(JSON.stringify(options.installed)), { bundle: '/private/Pipeliner.app', identity: build, team: 'ABCDEFGHIJ' });
+        assert.equal(options.history, context.updateHistory); assert.equal(options.trust, trust); assert.equal(options.current, current);
+        assert.equal(options.signal, signal); assert.equal(options.onIntent, onIntent); assert.equal(options.checkpoint, checkpoint);
+        assert.equal(options.maxBytes, 8 * 1024 ** 3); assert.equal(options.reserveBytes, 16 * 1024 ** 3); assert.equal(options.timeoutMs, 1800000);
+        if (mode === 'native-refused') throw Error('update-native-trust-unverified'); return token;
+      } }, app: { isPackaged: mode !== 'source', getVersion: () => '0.1.0' }, backgroundLaunch: mode === 'background',
+      moduleAt: async name => {
+        if (name === '../package/build.mjs') return { readBuildIdentity: async (bundle, options) => {
+          assert.equal(bundle, '/private/Pipeliner.app'); assert.equal(options.signal, signal); return build;
+        } };
+        assert.equal(name, '../updates/mac.mjs'); return { runMacUpdateCommand: async (file, args, candidate) => {
+          nativeCalls++; assert.equal(file, '/usr/bin/codesign'); assert.deepEqual([...args], ['--display', '--verbose=4', '/private/Pipeliner.app']); assert.equal(candidate, signal);
+          return { stderr: 'TeamIdentifier=ABCDEFGHIJ\n' + (mode === 'duplicate-team' ? 'TeamIdentifier=ABCDEFGHIJ\n' : '') };
+        } };
+      }, path: require('node:path'), process: { execPath: '/private/Pipeliner.app/Contents/MacOS/Pipeliner' },
+      createUpdateManager(options) { captured = options; return {}; }, maintenanceRecovery: () => false, publishUpdates() {} };
+    runInNewContext(`${source.slice(start, end)}\nmakeUpdates(1);`, context, { timeout: 1000 });
+    assert.equal(captured.ownsIntent(token), true); assert.equal(captured.ownsIntent({}), false); held = false; assert.equal(captured.ownsIntent(token), false); held = true;
+    const invoke = () => captured.prepareInstaller({ trust, current, checkpoint, signal, onIntent });
+    if (mode === 'normal') assert.equal(await invoke(), token); else await assert.rejects(invoke());
+    assert.equal(prepared, ['normal', 'native-refused'].includes(mode) ? 1 : 0);
+    assert.equal(nativeCalls, ['normal', 'native-refused', 'duplicate-team'].includes(mode) ? 1 : 0);
+  }
+});
 test('Packaged entry rejects development authority inputs before initialization; source startup remains usable',()=>{
   for(const argument of ['--qualify','--qualify-tools','--qualify-workload-profile','--qualify=1','--QUALIFY','--test-data-directory=/private/foreign','--test-data-directory','--TEST-DATA-DIRECTORY=/private/foreign','--data-directory=/private/foreign','--data-directory','--key-helper=/private/foreign','--key-helper','--calendar-helper=/private/foreign','--calendar-helper']) {
     const fixture=entry(true,[argument]);assert.throws(fixture.run,/captured-exit-2/);assert.deepEqual(fixture.calls,[['error','Pipeliner rejected an unsupported packaged startup option.']]);

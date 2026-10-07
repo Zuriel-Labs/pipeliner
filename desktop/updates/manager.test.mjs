@@ -161,6 +161,71 @@ test('update controls use protected signed history, exact host sources and await
   } finally { releaseRead?.(); await update?.close(); journal?.close(); history?.close(); vault?.close(); f.close(); }
 });
 
+test('update preparation binds its exact live intent without cancelling itself or reopening competing work', async () => {
+  for (const mode of ['normal', 'stop', 'close', 'policy', 'source', 'foreign', 'wrong-token', 'token-loss']) {
+    const f = fixture(), { publicKey, privateKey } = generateKeyPairSync('ed25519');
+    const source = { id: 'approved-source', label: 'Synthetic Releases', key: publicKey, origin: 'https://updates.example.com', path: '/desktop/releases/' };
+    const trust = { id: source.id, key: source.key, origin: source.origin, path: source.path }, current = { version: '0.1.0', platform: 'darwin', architecture: 'arm64', channel: 'stable' };
+    const from = { kind: 'pipeliner-desktop-build', schemaVersion: 1, version: current.version, platform: current.platform, architecture: current.architecture,
+      sourceCommit: 'a'.repeat(40), gitTree: 'b'.repeat(40) };
+    const release = { kind: 'pipeliner-desktop-update', schemaVersion: 1, source: source.id, ...current, version: '0.2.0', sequence: 1,
+      issuedAt: 900, expiresAt: 100000000, url: source.origin + source.path + 'Pipeliner.dmg', bytes: 1000,
+      sha256: 'c'.repeat(64), sourceCommit: 'd'.repeat(40), gitTree: 'e'.repeat(40) };
+    let vault, history, journal, update, intent, prepared = 0, settled = 0, trusted = true, signal, finish;
+    const hold = new Promise(resolve => { finish = resolve; });
+    try {
+      vault = await openVault(f.root, { available: async () => true, encrypt: async text => Buffer.from(text), decrypt: async bytes => ({ result: bytes.toString(), shouldReEncrypt: false }) });
+      history = openUpdateHistory(f.root, { vault, clock: () => 1000 });
+      const attempt = history.begin(trust, current);
+      history.complete(attempt.token, Buffer.from(canonicalJSON({ release, signature: sign(null, Buffer.from(canonicalJSON(release)), privateKey).toString('base64') })));
+      const open = () => openUpdateMaintenance(f.root, { vault, clock: () => 1000 }); journal = open();
+      f.edit({ 'updates.source': source.id });
+      const maintenance = createMaintenanceGate({ ready: () => true, verify: async () => true, recovery: () => !journal.clear() });
+      update = createUpdateManager({ policy: f.policy, history, version: current.version, host: { platform: current.platform, architecture: current.architecture },
+        maintenance, sources: () => trusted ? [source] : [], recovery: () => !journal.clear(), ownsIntent: token => journal.owned(token),
+        // Synthetic preparation effects; actual protected policy, signed history, journal and host admission.
+        async prepareInstaller(options) {
+          prepared++; signal = options.signal;
+          try {
+            assert.deepEqual(options.trust, trust); assert.deepEqual(options.current, current); options.checkpoint();
+            intent = journal.begin({ from, to: { ...from, version: release.version, sourceCommit: release.sourceCommit, gitTree: release.gitTree }, bytes: release.bytes, sha256: release.sha256 });
+            if (mode !== 'foreign') options.onIntent(mode === 'wrong-token' ? Object.freeze({}) : intent);
+            update.sync(); options.checkpoint(); signal.throwIfAborted();
+            assert.equal(update.status().busy, true); assert.equal(update.status().recoveryRequired, true); assert.equal(signal.aborted, false);
+            assert.throws(() => options.onIntent(intent));
+            await hold; options.checkpoint(); signal.throwIfAborted(); return intent;
+          } finally { settled++; }
+        } });
+      const operation = maintenance.control(() => update.dispatch({ operation: 'install' }));
+      await new Promise(setImmediate); assert.equal(prepared, 1);
+      if (!['foreign', 'wrong-token'].includes(mode)) {
+        assert.equal(update.status().busy, true); assert.equal(signal.aborted, false); assert.equal(maintenance.active(), true);
+        await maintenance.control(() => update.dispatch({ operation: 'view' }), { passive: true });
+        await assert.rejects(maintenance.control(() => assert.fail('competing mutation')), /maintenance-recovery-required/);
+        await assert.rejects(update.dispatch({ operation: 'install' }), /maintenance-recovery-required/);
+        await update.poll(); assert.equal(prepared, 1);
+        let stopping;
+        if (mode === 'stop') stopping = maintenance.control(() => update.dispatch({ operation: 'stop' }), { passive: true });
+        if (mode === 'close') stopping = update.close();
+        if (mode === 'policy') { f.edit({ 'appearance.theme': 'dark' }); update.sync(); }
+        if (mode === 'source') { trusted = false; update.sync(); }
+        if (mode === 'token-loss') { journal.close(); journal = open(); update.sync(); }
+        if (mode !== 'normal') assert.equal(signal.aborted, true);
+        if (stopping) { assert.equal(settled, 0); assert.equal(maintenance.active(), true); }
+        finish(); await stopping;
+      }
+      await operation;
+      assert.equal(settled, 1); assert.equal(update.status().busy, false); assert.equal(maintenance.active(), false);
+      assert.equal(update.status().installQualified, false); assert.equal(journal.clear(), false);
+      assert.equal(update.status().recoveryRequired, true); assert.match(update.status().message, /verified recovery/);
+      assert.doesNotMatch(JSON.stringify(update.status()), new RegExp(f.root));
+      const retained = journal.read(); journal.close(); journal = open();
+      assert.deepEqual(journal.read(), retained); assert.equal(journal.owned(intent), false);
+      await assert.rejects(maintenance.exclusive(() => assert.fail('restart replay')), /maintenance-recovery-required/);
+    } finally { finish(); await update?.close(); journal?.close(); history?.close(); vault?.close(); f.close(); }
+  }
+});
+
 test('Desktop update controls reject stale, expired and untrusted input without broadening policy', async () => {
   const f = fixture();
   try {

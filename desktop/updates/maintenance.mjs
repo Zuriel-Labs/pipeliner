@@ -156,15 +156,16 @@ export function openUpdateMaintenance(directory, { vault, clock = Date.now }) {
       read() { return guarded(() => immutable(readState().value)); },
       completed() { return guarded(() => immutable(readCompleted())); },
       clear() { try { return readState().value === null; } catch { return false; } },
-      owned() { try { return owned(readState()); } catch { return false; } },
+      owned(token) { try { return Boolean(token && token === active?.token && owned(readState())); } catch { return false; } },
       // Host-only composition under the caller's exclusive maintenance checkpoint; no replacement or restoration.
       async prepare(options, { run = runMacUpdateCommand, request, resolve: resolver } = {}) {
         let token, acquired = false;
         try {
-          record(options, ['installed', 'history', 'trust', 'current', 'maxBytes', 'reserveBytes', 'timeoutMs', 'checkpoint', 'signal']);
+          record(options, ['installed', 'history', 'trust', 'current', 'maxBytes', 'reserveBytes', 'timeoutMs', 'checkpoint', 'signal'], ['onIntent']);
           if (Object.values(Object.getOwnPropertyDescriptors(options)).some(value => value.get || value.set)
             || preparing || recovering || typeof run !== 'function' || typeof options.checkpoint !== 'function'
             || typeof options.history?.read !== 'function' || !(options.signal instanceof AbortSignal)
+            || options.onIntent !== undefined && typeof options.onIntent !== 'function'
             || request !== undefined && typeof request !== 'function' || resolver !== undefined && typeof resolver !== 'function'
             || !Number.isSafeInteger(options.maxBytes) || options.maxBytes < 1 || options.maxBytes > 8 * 1024 ** 3
             || !Number.isSafeInteger(options.reserveBytes) || options.reserveBytes < 1024 ** 2 || options.reserveBytes > 1024 ** 4
@@ -197,6 +198,7 @@ export function openUpdateMaintenance(directory, { vault, clock = Date.now }) {
             return save(state, { ...state.value, installer: { file: directory + '/updates/update-' + state.value.id + '.dmg', bytes: release.bytes, sha256: release.sha256 } });
           });
           active.download = true;
+          options.onIntent?.(token);
           check(); const folder = directory + '/updates';
           try { mkdirSync(folder, { mode: 0o700 }); } catch (error) { if (error.code !== 'EEXIST') throw error; }
           const parent = lstatSync(folder);

@@ -128,7 +128,7 @@ app.whenReady().then(async () => {
   const maintenanceRecovery = () => maintenanceStore ? !maintenanceStore.clear() : maintenanceUnavailable;
   maintenance = createMaintenanceGate({ ready: () => {
     if (closing || !vault || !workspaceStore || !policy || !developmentStore || !supervisor || !scheduler || !backgroundHost || !privacyRecords || !updateHistory
-      || !maintenanceStore || !(maintenanceStore.clear() || maintenanceStore.owned())) return false;
+      || !maintenanceStore) return false;
     if (scheduler.busy() || issues.busy() || manager.status().connections.some(connection => connection.busy || connection.cleanupPending)
       || backgroundHost.status().busy || backgroundHost.status().cleanupPending
       || [workspaces, pipelines, scheduling, background, skills, tools, privacy, appearance, delivery, permissions].some(value => value.status().busy)) return false;
@@ -281,6 +281,17 @@ app.whenReady().then(async () => {
   delivery = makeDelivery(1);
   const publishUpdates = snapshot => { if (window && !window.isDestroyed()) window.webContents.send('updates:status', snapshot); };
   const makeUpdates = initialRevision => createUpdateManager({ policy, history: updateHistory, sources: () => trustedUpdateSources,
+    ownsIntent: token => maintenance.active() && maintenanceStore?.owned(token) === true,
+    prepareInstaller: async ({ trust, current, checkpoint, signal, onIntent }) => {
+      if (!app.isPackaged || backgroundLaunch || !maintenanceStore) throw Error('maintenance-state-unavailable');
+      const { readBuildIdentity } = await moduleAt('../package/build.mjs'), { runMacUpdateCommand } = await moduleAt('../updates/mac.mjs');
+      checkpoint(); const bundle = path.dirname(path.dirname(path.dirname(process.execPath))), identity = await readBuildIdentity(bundle, { signal }); checkpoint();
+      const details = await runMacUpdateCommand('/usr/bin/codesign', ['--display', '--verbose=4', bundle], signal); checkpoint();
+      const teams = [...details.stderr.matchAll(/^TeamIdentifier=([A-Z0-9]{10})$/gm)];
+      if (teams.length !== 1) throw Error('maintenance-state-unavailable');
+      return maintenanceStore.prepare({ installed: { bundle, identity, team: teams[0][1] }, history: updateHistory, trust, current,
+        maxBytes: 8 * 1024 ** 3, reserveBytes: 16 * 1024 ** 3, timeoutMs: 1800000, checkpoint, signal, onIntent });
+    },
     maintenance, recovery: maintenanceRecovery, foreground: () => !closing && !maintenance.active() && Boolean(window && !window.isDestroyed() && window.isVisible() && window.isFocused()),
     version: app.isPackaged ? app.getVersion() : null, initialRevision, onChange: publishUpdates,
     onApplied: () => { issues?.sync(); pipelines?.sync(); development?.sync(); scheduling?.sync(); background?.sync(); skills?.sync(); tools?.sync(); appearance?.sync(); privacy?.sync(); delivery?.sync(); } });

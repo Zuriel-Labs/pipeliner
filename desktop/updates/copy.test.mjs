@@ -1,6 +1,7 @@
 import test, { mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, realpath, mkdir, writeFile, readFile, readdir, rm, lstat, symlink, link, rename } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { generateKeyPairSync, sign, createHash, randomUUID } from 'node:crypto';
@@ -162,10 +163,18 @@ async function checkCopy(unsafe, journaled = false, replacement = null, recovery
       artifacts = await openArtifactStore(root, { vault, limits: () => ({ keepLatest: 3, warningBytes: 1024 ** 3, capacityBytes: 2 * 1024 ** 3 }) });
       journal = openUpdateMaintenance(root, { vault, clock: () => 1000 });
       if (preparation) {
-        await rm(file); reset(preparation); let requests = 0, closed = 0;
+        await rm(file); reset(preparation); let requests = 0, closed = 0, intentCalls = 0, boundIntent;
         if (preparation === 'valid-preparation') await rm(directory, { recursive: true });
         preparationOptions = { installed: { bundle: installed, team, identity: from }, history, trust, current,
-          maxBytes: 1024 ** 2, reserveBytes: 1024 ** 2, timeoutMs: 30000, signal: controller.signal, checkpoint() { if (!authorized) throw Error('Synthetic lost admission'); } };
+          maxBytes: 1024 ** 2, reserveBytes: 1024 ** 2, timeoutMs: 30000, signal: controller.signal, checkpoint() { if (!authorized) throw Error('Synthetic lost admission'); },
+          onIntent(token) {
+            intentCalls++; boundIntent = token; const intent = journal.read(); file = intent.installer.file;
+            assert.equal(intent.phase, 'preparing'); assert.equal(requests, 0); assert.equal(journal.owned(token), true);
+            assert.equal(journal.owned({}), false); assert.equal(journal.owned(), false); assert.throws(() => journal.cancel(token));
+            assert.equal(intent.installer.file, join(directory, 'update-' + intent.id + '.dmg'));
+            if (mode === 'valid-preparation') assert.equal(existsSync(directory), false);
+            if (mode === 'intent-refusal') throw Error('Synthetic refused intent consumer');
+          } };
         const native = { run, resolve: async () => {
           if (mode === 'filename-collision') { file = journal.read().installer.file; await writeFile(file, 'Preserve unrelated collision', { mode: 0o600 }); }
           return { address: '8.8.8.8', family: 4 };
@@ -193,6 +202,7 @@ async function checkCopy(unsafe, journaled = false, replacement = null, recovery
           await assert.rejects(journal.prepare({ ...preparationOptions, get installed() { getters++; return preparationOptions.installed; } }, native));
           assert.equal(getters, 0); assert.equal(journal.clear(), true); assert.equal(requests, 0);
           journalToken = await journal.prepare(preparationOptions, native);
+          assert.equal(intentCalls, 1); assert.equal(boundIntent, journalToken); assert.equal(journal.owned(journalToken), true);
           const intent = journal.read(); assert.equal(intent.phase, 'verified'); assert.equal(intent.backups.databases.length, 3);
           assert.deepEqual(intent.copy.receipt.identity, to); assert.equal(intent.installer.file, file); assert(Object.isFrozen(journalToken));
           assert.equal(detached, 1); assert.equal(attached, false); assert.equal(copied, 1);
@@ -206,7 +216,7 @@ async function checkCopy(unsafe, journaled = false, replacement = null, recovery
           } else {
             const pending = journal.read(); assert.equal(pending.phase, 'repair-required'); assert.equal(journal.clear(), false);
             assert.deepEqual(pending.installer, { file, bytes: release.bytes, sha256: release.sha256 });
-            if (['request-refusal', 'stale-download'].includes(preparation)) {
+            if (['intent-refusal', 'request-refusal', 'stale-download'].includes(preparation)) {
               assert.equal(pending.backups, undefined); assert.deepEqual(await readdir(directory), []);
             } else if (preparation === 'filename-collision') {
               assert.equal(await readFile(file, 'utf8'), 'Preserve unrelated collision'); assert.equal(requests, 0);
@@ -216,10 +226,11 @@ async function checkCopy(unsafe, journaled = false, replacement = null, recovery
             if (['copy', 'cancel', 'candidate-support'].includes(preparation)) assert.equal(pending.backups.databases.length, 3);
             journal.close(); journal = openUpdateMaintenance(root, { vault, clock: () => 1000 });
             assert.deepEqual(journal.read(), pending); assert.equal(journal.owned(), false); assert.equal(journal.clear(), false);
-            await assert.rejects(journal.prepare(preparationOptions, native)); assert.equal(requests, preparation === 'filename-collision' ? 0 : 1);
+            await assert.rejects(journal.prepare(preparationOptions, native)); assert.equal(requests, ['intent-refusal', 'filename-collision'].includes(preparation) ? 0 : 1);
           }
         }
         assert.equal(closed, requests); assert.equal(exchanges, 0);
+        assert.equal(intentCalls, ['pre-abort', 'installed-signature'].includes(preparation) ? 0 : 1);
         assert.deepEqual(JSON.parse(await readFile(join(installed, 'Contents/Resources/pipeliner-build.json'), 'utf8')), from);
         return;
       }
@@ -425,6 +436,6 @@ test('startup reconciliation requires the exact exchanged target and compatible 
   await checkCopy(false, true, 'swap-journal-refusal', 'uncertain-relaunch');
 });
 test('host preparation records download custody before effects and preserves verified or failed recovery without replacement', async () => {
-  for (const mode of ['valid-preparation', 'pre-abort', 'installed-signature', 'filename-collision', 'request-refusal', 'stale-download', 'backup-refusal', 'copy', 'cancel', 'candidate-support'])
+  for (const mode of ['valid-preparation', 'pre-abort', 'installed-signature', 'intent-refusal', 'filename-collision', 'request-refusal', 'stale-download', 'backup-refusal', 'copy', 'cancel', 'candidate-support'])
     await checkCopy(false, true, null, null, mode);
 });

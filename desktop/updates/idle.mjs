@@ -19,14 +19,18 @@ export function createMaintenanceGate({ ready, verify, recovery = () => false })
       const owner = Symbol(); controls.add(owner);
       try { return await context.run(owner, work); } finally { controls.delete(owner); }
     },
-    async exclusive(work, { signal } = {}) {
-      if (typeof work !== 'function') throw Error('maintenance-unavailable');
+    async exclusive(work, { signal, ownsRecovery = () => false } = {}) {
+      if (typeof work !== 'function' || typeof ownsRecovery !== 'function') throw Error('maintenance-unavailable');
       signal?.throwIfAborted(); const owner = context.getStore();
       if (recovering()) throw Error('maintenance-recovery-required');
       if (held !== undefined || !idle(owner)) throw Error('maintenance-deferred');
       const lease = Symbol(); held = lease; // Acquire before the first await; no competing control can dispatch.
       const checkpoint = () => {
         if (held !== lease) throw Error('maintenance-inactive');
+        if (recovering()) {
+          let owned = false; try { owned = ownsRecovery() === true; } catch { /* Unverified ownership keeps the recovery fence. */ }
+          if (!owned) throw Error('maintenance-recovery-required');
+        }
         signal?.throwIfAborted(); if (!idle(owner)) throw Error('maintenance-deferred');
       };
       try {

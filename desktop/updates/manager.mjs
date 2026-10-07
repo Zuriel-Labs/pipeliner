@@ -6,9 +6,11 @@ import { readUpdateSource } from './source.mjs';
 import { endpointURL } from '../tools/transport.mjs';
 
 export function createUpdateManager({ policy, version = null, history = null, sources = () => [], reader = readUpdateSource,
-  host = { platform: process.platform, architecture: process.arch }, foreground = () => true, maintenance = null, recovery = () => false, initialRevision = 1, onChange = () => {}, onApplied = () => {} }) {
+  host = { platform: process.platform, architecture: process.arch }, foreground = () => true, maintenance = null, recovery = () => false,
+  prepareInstaller = null, ownsIntent = () => false, initialRevision = 1, onChange = () => {}, onApplied = () => {} }) {
   record(host, ['platform', 'architecture']);
-  if (!Number.isSafeInteger(initialRevision) || initialRevision < 1 || [onChange, onApplied, sources, reader, foreground, recovery].some(fn => typeof fn !== 'function')
+  if (!Number.isSafeInteger(initialRevision) || initialRevision < 1 || [onChange, onApplied, sources, reader, foreground, recovery, ownsIntent].some(fn => typeof fn !== 'function')
+    || prepareInstaller !== null && typeof prepareInstaller !== 'function'
     || history !== null && ['read', 'begin', 'complete', 'fail'].some(name => typeof history[name] !== 'function')
     || maintenance !== null && typeof maintenance.exclusive !== 'function'
     || Object.values(host).some(value => typeof value !== 'string' || !/^[a-z0-9_-]{1,16}$/.test(value))
@@ -35,7 +37,11 @@ export function createUpdateManager({ policy, version = null, history = null, so
     const selected = approved.items.find(item => item.trust.id === view?.values['updates.source'].value) ?? null;
     return { view, approved, selected, current: view ? { ...host, channel: view.values['updates.channel'].value, version } : null };
   }
-  const signature = value => canonicalJSON({ revision: value.view?.revision ?? null, catalog: value.approved.fingerprint, recovery: recovering() });
+  function ownsPreparation(operation = pending) {
+    try { return Boolean(operation?.intent && operation === pending && operation.kind === 'install' && ownsIntent(operation.intent) === true); }
+    catch { return false; }
+  }
+  const signature = value => canonicalJSON({ revision: value.view?.revision ?? null, catalog: value.approved.fingerprint, recovery: recovering() && !ownsPreparation() });
   function invalidate() { if (preview) policy.control.invalidate(preview.inputId); preview = null; applied = null; }
   function sync() {
     const value = inspect(), current = signature(value);
@@ -59,7 +65,7 @@ export function createUpdateManager({ policy, version = null, history = null, so
         .map(key => [key, saved.availability.release[key]])) : null,
       preview: preview ? { hash: preview.hash, scope: preview.scope, target: preview.target, baseRevision: preview.baseRevision, expiresAt: preview.expiresAt,
         before: display(preview.before), after: display(preview.after) } : null,
-      message: recoveryRequired ? 'Desktop maintenance needs verified recovery before work can resume. Keep the installed app and saved data; settings and repositories are preserved.' : message };
+      message: recoveryRequired && !ownsPreparation() ? 'Desktop maintenance needs verified recovery before work can resume. Keep the installed app and saved data; settings and repositories are preserved.' : message };
   }
   function publish() { try { onChange(status()); } catch { message = 'Update view needs refresh. Reopen Settings to inspect saved settings.'; } }
   function prepare(changes, reset = []) {
@@ -134,16 +140,32 @@ export function createUpdateManager({ policy, version = null, history = null, so
       publish(); return { snapshot: status(), applied: result.applied };
     } else if (payload.operation === 'install') {
       if (pending) return { snapshot: status() };
-      if (!capable(inspect()) || !status().release || !maintenance) {
+      const context = inspect();
+      if (!capable(context) || !status().release || !maintenance) {
         revision++; message = 'Update installation is unavailable. A verified release, qualified installer and migration/recovery preview are required. No app files changed.';
       } else {
-        const operation = { controller: new AbortController() }; pending = operation; revision++;
+        const operation = { kind: 'install', controller: new AbortController(), signature: signature(context) }; pending = operation; revision++;
         message = 'Inspecting idle work on this Mac. No installer is downloaded.';
         operation.done = (async () => {
           try {
-            await maintenance.exclusive(checkpoint => {
-              checkpoint(); message = 'Idle work verified. Installation still needs a qualified native installer and compatible recovery preview. No app files changed.';
-            }, { signal: operation.controller.signal });
+            await maintenance.exclusive(async checkpoint => {
+              const check = () => {
+                operation.controller.signal.throwIfAborted();
+                if (closed || pending !== operation || signature(sync()) !== operation.signature || operation.intent && !ownsPreparation(operation)) throw Error('maintenance-deferred');
+                checkpoint(); operation.controller.signal.throwIfAborted();
+              };
+              check();
+              if (!prepareInstaller) { message = 'Idle work verified. Installation still needs a qualified native installer and compatible recovery preview. No app files changed.'; return; }
+              message = 'Preparing the verified update and protected recovery copies. The installed app is preserved.';
+              const token = await prepareInstaller(Object.freeze({ trust: Object.freeze({ ...context.selected.trust }), current: Object.freeze({ ...context.current }),
+                checkpoint: check, signal: operation.controller.signal, onIntent(token) {
+                  if (operation.intent || closed || pending !== operation || operation.controller.signal.aborted || !token || typeof token !== 'object'
+                    || !Object.isFrozen(token) || ownsIntent(token) !== true || !recovering()) throw Error('maintenance-deferred');
+                  operation.intent = token; check(); publish();
+                } }));
+              check(); if (token !== operation.intent || !ownsPreparation(operation)) throw Error('maintenance-deferred');
+              message = 'Update preparation verified. Installation and restart still need qualified completion; the installed app is preserved.';
+            }, { signal: operation.controller.signal, ownsRecovery: () => ownsPreparation(operation) });
           } catch { message = 'Update deferred: work is busy, changed or unverified. Finish or repair pending work, then retry. No work was stopped and no app files changed.'; }
           finally { pending = null; revision++; publish(); }
         })();

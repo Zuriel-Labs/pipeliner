@@ -4,6 +4,7 @@ import { mkdtempSync, realpathSync, rmSync, existsSync, readFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { setImmediate } from 'node:timers/promises';
 import { openVault } from '../connections/vault.mjs';
 import { createMaintenanceGate } from './idle.mjs';
 import { inspectManagedData } from '../privacy/inventory.mjs';
@@ -84,4 +85,88 @@ test('protected uninstall intent survives restart and reconciles only captured c
     assert.throws(() => journal.read()); assert.equal(journal.clear(), false); journal = open(); assert.deepEqual(journal.read(), pending);
     assert.deepEqual(vault.openPayload(binding, protectedRecord), plain);
   } finally { db?.close(); other?.close(); journal?.close(); vault?.close(); rmSync(root, { recursive: true }); assert.equal(existsSync(root), false); }
+});
+
+test('host uninstall coordinator verifies ordered effects and preserves interrupted or changed removal without replaying credential erasure', async () => {
+  const { openUninstallJournal, completeUninstall } = await import('./uninstall.mjs');
+  assert.equal(typeof completeUninstall, 'function');
+  for (const mode of ['complete', 'concurrent', 'settlement', 'verification', 'service', 'trash', 'cancelled', 'takeover', 'credential-commit', 'changed-credentials']) {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-54-uninstall-coordinator-')));
+    let vault, journal, other, token, controller, operation, second, release, erasures = 0, interrupted = false;
+    try {
+      vault = await openVault(root, { available: async () => true, encrypt: async text => Buffer.from(text),
+        decrypt: async bytes => ({ result: bytes.toString(), shouldReEncrypt: false }) });
+      for (const id of ['codex', 'ollama']) vault.save(id, vault.begin(id), { credential: 'synthetic-only' });
+      const binding = { purpose: 'workspace', repository: null, id: 'preserved-record' }, plain = Buffer.from('Preserved records');
+      const protectedRecord = vault.sealPayload(binding, plain), inventory = vault.previewCredentialRemoval();
+      const plan = { bundle: join(root, 'Pipeliner.app'), identity: { kind: 'pipeliner-desktop-build', schemaVersion: 1,
+        sourceCommit: 'a'.repeat(40), gitTree: 'b'.repeat(40), version: '0.1.0', platform: 'darwin', architecture: 'arm64' },
+        team: 'ABCDEFGHIJ', custody: { device: '1', inode: '2' }, credentials: inventory,
+        service: { qualified: true, status: 'enabled' }, recordInventorySha256: 'd'.repeat(64) };
+      journal = openUninstallJournal(root, { vault });
+      const events = [], gate = createMaintenanceGate({ ready: () => true, verify: async () => true, recovery: () => !journal.clear() }); controller = new AbortController();
+      const wrappedVault = { ...vault, forgetCredentials(expected) { erasures++; return vault.forgetCredentials(expected); } };
+      const settled = new Promise(resolve => { release = resolve; });
+      operation = gate.control(() => gate.exclusive(async checkpoint => {
+        token = journal.begin(plan);
+        const options = { journal, vault: wrappedVault, token, checkpoint: () => { controller.signal.throwIfAborted(); checkpoint(); },
+          async settle() { events.push('settle'); assert.equal(journal.clear(), false); if (['complete', 'concurrent'].includes(mode)) await settled; return mode !== 'settlement'; },
+          async logout(saved) { events.push('logout'); assert.deepEqual(saved, plan); if (mode === 'cancelled') controller.abort(); return true; },
+          async removeService(saved) { events.push('service'); assert.deepEqual(saved, plan); if (mode === 'service') throw Error('Synthetic service refusal'); return true; },
+          async trash(saved) { events.push('trash'); assert.deepEqual(saved, plan); assert.deepEqual(vault.connectionInventory(), inventory.after); return mode !== 'trash'; },
+          async verify(intent, stage) {
+            events.push(stage + ':' + intent.phase); assert.equal(Object.isFrozen(intent.plan), true); assert.equal(journal.owned(token), true);
+            if (mode === 'verification') return undefined;
+            if (mode === 'takeover' && stage === 'before') { other = openUninstallJournal(root, { vault }); other.claimRecovery(journal.read()); }
+            if (['credential-commit', 'changed-credentials'].includes(mode) && stage === 'after' && intent.phase === 'credentials-pending' && !interrupted) {
+              interrupted = true;
+              if (mode === 'changed-credentials') vault.save('ollama', vault.begin('ollama'), { credential: 'Synthetic changed connection' });
+              return false;
+            }
+            assert.deepEqual(vault.openPayload(binding, protectedRecord), plain); return true;
+          } };
+        let getters = 0; await assert.rejects(completeUninstall({ ...options, get trash() { getters++; return options.trash; } })); assert.equal(getters, 0);
+        await assert.rejects(completeUninstall({ ...options, token: {} })); assert.deepEqual(events, []);
+        if (mode === 'credential-commit') {
+          await assert.rejects(completeUninstall(options), /uninstall-recovery-required/);
+          const pending = journal.read(); assert.equal(pending.phase, 'credentials-pending'); assert.equal(erasures, 1);
+          assert.deepEqual(vault.connectionInventory(), inventory.after);
+          token = journal.claimRecovery(pending); options.token = token;
+        }
+        const running = completeUninstall(options);
+        if (mode === 'concurrent') {
+          await setImmediate();
+          second = completeUninstall(options).then(() => null, error => error);
+          await setImmediate(); release();
+          const result = await running, refusal = await second;
+          assert.match(refusal?.message ?? '', /uninstall-recovery-required/);
+          assert.equal(events.filter(value => value === 'settle').length, 1); return result;
+        }
+        return running;
+      }, { ownsRecovery: () => journal.owned(token) }));
+      if (mode === 'complete') {
+        await setImmediate(); await setImmediate(); assert.deepEqual(events, ['before:logout-pending', 'settle']);
+        assert.equal(vault.connectionInventory().stored, 2); release();
+      }
+      if (['complete', 'concurrent', 'credential-commit'].includes(mode)) {
+        const receipt = await operation; assert.equal(receipt.phase, 'removed'); assert.equal(Object.isFrozen(receipt), true); assert.equal(journal.clear(), true);
+        assert.equal(erasures, 1); assert.deepEqual(vault.connectionInventory(), inventory.after);
+        assert.equal(events.filter(value => value === 'logout').length, 1); assert.equal(events.filter(value => value === 'service').length, 1);
+        assert.equal(events.filter(value => value === 'trash').length, 1);
+        assert.ok(events.indexOf('logout') < events.indexOf('service') && events.indexOf('service') < events.indexOf('after:credentials-pending') && events.indexOf('after:credentials-pending') < events.indexOf('trash'));
+        await assert.rejects(completeUninstall({ journal, vault, token, checkpoint() {}, settle() {}, logout() {}, removeService() {}, trash() {}, verify() {} }));
+      } else {
+        await assert.rejects(operation, /uninstall-recovery-required/); assert.equal(journal.clear(), false);
+        const phase = journal.read().phase;
+        assert.equal(phase, ({ settlement: 'logout-pending', verification: 'logout-pending', service: 'service-pending', trash: 'trash-pending',
+          cancelled: 'logout-pending', takeover: 'logout-pending', 'changed-credentials': 'credentials-pending' })[mode]);
+        if (mode === 'trash') { assert.equal(erasures, 1); assert.deepEqual(vault.connectionInventory(), inventory.after); }
+        else if (mode === 'changed-credentials') { assert.equal(erasures, 1); assert.equal(vault.connectionInventory().stored, 1); assert.throws(() => journal.claimRecovery(journal.read())); }
+        else { assert.equal(erasures, 0); assert.deepEqual(vault.connectionInventory(), inventory.before); assert.equal(events.includes('trash'), false); }
+        if (mode === 'takeover') assert.equal(events.includes('settle'), false);
+      }
+      assert.deepEqual(vault.openPayload(binding, protectedRecord), plain);
+    } finally { controller?.abort(); release?.(); await Promise.allSettled([operation, second].filter(Boolean));
+      other?.close(); journal?.close(); vault?.close(); rmSync(root, { recursive: true }); assert.equal(existsSync(root), false); }
+  }
 });

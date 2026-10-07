@@ -12,6 +12,7 @@ const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value
 const time = value => Number.isSafeInteger(value) && value >= 0;
 const binding = { repository: null, table: 'uninstall_state', key: 1 };
 const schema = 'CREATE TABLE uninstall_state(id INTEGER PRIMARY KEY CHECK(id=1),revision INTEGER NOT NULL CHECK(revision>=0),clock INTEGER NOT NULL CHECK(clock>=0),payload BLOB NOT NULL CHECK(length(payload) BETWEEN 28 AND 16384))';
+const consumers = new WeakSet();
 function snapshot(value) {
   record(value, ['count', 'stored', 'sha256']);
   if (!Number.isSafeInteger(value.count) || value.count < 0 || value.count > 2048 || !Number.isSafeInteger(value.stored)
@@ -34,6 +35,12 @@ function intent(value, row) {
   if (value.schemaVersion !== 1 || typeof value.id !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value.id)
     || !phases.includes(value.phase) || !time(value.createdAt) || value.createdAt > value.updatedAt
     || value.updatedAt !== row.clock || value.revision !== row.revision) throw Error();
+}
+function credentials(vault, value, phase, recovery = false) {
+  const current = canonicalJSON(vault.connectionInventory()), expected = value.plan.credentials;
+  const allowed = ['logout-pending', 'service-pending', 'credentials-pending'].includes(phase) ? [expected.before] : [expected.after];
+  if (recovery && phase === 'credentials-pending') allowed.push(expected.after);
+  if (!allowed.some(snapshot => canonicalJSON(snapshot) === current)) throw Error();
 }
 
 // Host-only journal. Native effects and PM authority must be verified by the idle coordinator, never inferred from a phase.
@@ -102,12 +109,6 @@ export function openUninstallJournal(directory, { vault, clock = Date.now }) {
     function owns(state, token) { return Boolean(token && active?.token === token && state.value?.id === active.id
       && state.row.revision === active.revision && state.value.phase !== 'removed'); }
     function claim(value) { const token = Object.freeze({}); active = { token, id: value.id, revision: value.revision }; return token; }
-    function credentials(value, phase, recovery = false) {
-      const current = canonicalJSON(vault.connectionInventory()), expected = value.plan.credentials;
-      const allowed = ['logout-pending', 'service-pending', 'credentials-pending'].includes(phase) ? [expected.before] : [expected.after];
-      if (recovery && phase === 'credentials-pending') allowed.push(expected.after);
-      if (!allowed.some(snapshot => canonicalJSON(snapshot) === current)) throw Error();
-    }
     readState();
     return Object.freeze({
       read: () => guarded(() => immutable(readState().value)),
@@ -123,16 +124,49 @@ export function openUninstallJournal(directory, { vault, clock = Date.now }) {
       claimRecovery(expected) {
         const saved = transaction(state => {
           canonicalJSON(expected); if (!state.value || state.value.phase === 'removed' || canonicalJSON(expected) !== canonicalJSON(state.value)) throw Error();
-          credentials(state.value, state.value.phase, true); return save(state, state.value);
+          credentials(vault, state.value, state.value.phase, true); return save(state, state.value);
         }); return claim(saved);
       },
       advance(token, phase) {
         const saved = transaction(state => {
           if (!owns(state, token) || phases.indexOf(phase) !== phases.indexOf(state.value.phase) + 1) throw Error();
-          credentials(state.value, phase); return save(state, { ...state.value, phase });
+          credentials(vault, state.value, phase); return save(state, { ...state.value, phase });
         }); active.revision = saved.revision; if (phase === 'removed') active = undefined; return immutable(saved);
       },
       close() { if (!closed) { closed = true; active = undefined; db.close(); } },
     });
   } catch { db?.close(); throw Error('uninstall-state-unavailable'); }
+}
+
+// Host-only consumer. Caller holds the idle fence and exact PM authority; callbacks independently verify native effects.
+export async function completeUninstall(options) {
+  let held;
+  try {
+    record(options, ['journal', 'vault', 'token', 'checkpoint', 'settle', 'logout', 'removeService', 'trash', 'verify']);
+    if (Object.getOwnPropertySymbols(options).length || Object.values(Object.getOwnPropertyDescriptors(options)).some(value => value.get || value.set)
+      || ['checkpoint', 'settle', 'logout', 'removeService', 'trash', 'verify'].some(name => typeof options[name] !== 'function')) throw Error();
+    const { journal, vault, token, checkpoint, settle, logout, removeService, trash, verify } = options;
+    let current = journal.read();
+    function check() {
+      const result = checkpoint();
+      if (result instanceof Promise) result.catch(() => {});
+      if (result !== undefined || !journal.owned(token) || canonicalJSON(journal.read()) !== canonicalJSON(current)) throw Error();
+      credentials(vault, current, current.phase, true);
+    }
+    async function verified(stage) { check(); if (await verify(current, stage) !== true) throw Error(); check(); }
+    check(); if (consumers.has(journal)) throw Error(); consumers.add(journal); held = journal;
+    await verified('before'); check();
+    if (await settle() !== true) throw Error(); check();
+    const effects = { 'logout-pending': logout, 'service-pending': removeService, 'trash-pending': trash };
+    while (current.phase !== 'removed') {
+      check();
+      if (current.phase === 'credentials-pending') {
+        if (canonicalJSON(vault.connectionInventory()) !== canonicalJSON(current.plan.credentials.after)) vault.forgetCredentials(current.plan.credentials.before);
+      } else if (await effects[current.phase](current.plan) !== true) throw Error();
+      await verified('after');
+      current = journal.advance(token, phases[phases.indexOf(current.phase) + 1]);
+    }
+    return immutable(current);
+  } catch { throw Error('uninstall-recovery-required'); }
+  finally { if (held) consumers.delete(held); }
 }

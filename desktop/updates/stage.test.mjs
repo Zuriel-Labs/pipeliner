@@ -9,7 +9,7 @@ import { generateKeyPairSync, sign, createHash } from 'node:crypto';
 import { canonicalJSON } from '../core/settings.mjs';
 import { openVault } from '../connections/vault.mjs';
 import { openUpdateHistory } from './history.mjs';
-import { stageUpdateInstaller } from './stage.mjs';
+import { stageUpdateInstaller, verifyStagedInstaller } from './stage.mjs';
 
 test('installer staging requires protected signed history, exact bytes, current authority and awaited owned cleanup', async () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-54-update-stage-'))), directory = join(root, 'stage'); mkdirSync(directory, { mode: 0o700 });
@@ -62,7 +62,30 @@ test('installer staging requires protected signed history, exact bytes, current 
       });
     }
     const result = await invoke(); assert.equal(result.bytes, bytes.length); assert.equal(result.sha256, release.sha256); assert.deepEqual(result.release, release);
-    assert.deepEqual(readFileSync(result.file), bytes); assert(Object.isFrozen(result)); assert.equal(closed, requests); unlinkSync(result.file);
+    assert.deepEqual(readFileSync(result.file), bytes); assert(Object.isFrozen(result)); assert.equal(closed, requests);
+    const verify = (options = {}) => verifyStagedInstaller({ directory, file: result.file, history, trust, current, isCurrent: () => true, ...options }, { clock: () => now });
+    assert.deepEqual(await verify(), result);
+    writeFileSync(result.file, Buffer.alloc(bytes.length, 8)); await assert.rejects(verify(), /update-installer-unverified/);
+    assert.deepEqual(readFileSync(result.file), Buffer.alloc(bytes.length, 8)); writeFileSync(result.file, bytes);
+    await assert.rejects(verify({ isCurrent: () => false }), /update-installer-unverified/);
+    const cancelled = new AbortController(); let checked = 0;
+    await assert.rejects(verify({ signal: cancelled.signal, isCurrent() { if (++checked > 3) cancelled.abort(); return true; } }), /update-installer-unverified/);
+    assert.deepEqual(readFileSync(result.file), bytes);
+    let replacement = false; checked = 0;
+    await assert.rejects(verify({ isCurrent() {
+      if (++checked > 3 && !replacement) { unlinkSync(result.file); writeFileSync(result.file, bytes, { mode: 0o600 }); replacement = true; }
+      return true;
+    } }), /update-installer-unverified/);
+    assert.equal(replacement, true); assert.deepEqual(readFileSync(result.file), bytes);
+    let historyReads = 0;
+    await assert.rejects(verify({ history: { read(...args) {
+      const value = history.read(...args);
+      if (++historyReads === 2) writeFileSync(result.file, Buffer.alloc(bytes.length, 8)); return value;
+    } } }), /update-installer-unverified/);
+    assert.deepEqual(readFileSync(result.file), Buffer.alloc(bytes.length, 8)); writeFileSync(result.file, bytes);
+    await assert.rejects(verify({ file: join(root, 'connections.sqlite') }), /update-installer-unverified/);
+    now = 2000; await assert.rejects(verify(), /update-installer-unverified/); now = 1000;
+    assert.equal(closed, requests); unlinkSync(result.file);
     for (const change of [{ status: 302 }, { headers: { 'content-type': 'text/html' } }, { headers: { 'content-encoding': 'gzip' } },
       { headers: { 'content-length': String(bytes.length - 1) } }, { body: Buffer.alloc(bytes.length + 1, 7) },
       { body: Buffer.alloc(bytes.length, 8) }, { body: bytes.subarray(0, bytes.length - 1), headers: { 'content-length': String(bytes.length) } },

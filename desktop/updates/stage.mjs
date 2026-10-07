@@ -11,6 +11,60 @@ import { destination, endpointURL, publicAddress } from '../tools/transport.mjs'
 const same = (a, b) => a.dev === b.dev && a.ino === b.ino;
 const privateFile = value => value.isFile() && !value.isSymbolicLink() && value.nlink === 1 && value.uid === process.getuid() && (value.mode & 0o777) === 0o600;
 
+// A fresh read, never native installation authority. Its caller must still verify the mounted signed bundle.
+export async function verifyStagedInstaller(options, { clock = Date.now } = {}) {
+  let parent, file;
+  try {
+    record(options, ['directory', 'file', 'history', 'trust', 'current', 'isCurrent'], ['signal']);
+    record(options.trust, ['id', 'key', 'origin', 'path']); record(options.current, ['channel', 'platform', 'architecture', 'version']);
+    options = { ...options, trust: { ...options.trust }, current: { ...options.current } };
+    if (![clock, options.isCurrent, options.history?.read].every(value => typeof value === 'function')
+      || typeof options.directory !== 'string' || absolute(options.directory) !== options.directory
+      || typeof options.file !== 'string' || !/^update-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\.dmg$/.test(options.file.slice(options.directory.length + 1))
+      || options.file !== join(options.directory, options.file.slice(options.directory.length + 1))
+      || options.signal !== undefined && !(options.signal instanceof AbortSignal)) throw Error();
+    const began = clock(); checkUpdateContext(options.trust, { ...options.current, sequence: 0 }, began);
+    const active = () => {
+      options.signal?.throwIfAborted();
+      if (options.isCurrent() !== true) throw Error(); options.signal?.throwIfAborted();
+      const now = clock(); if (!Number.isSafeInteger(now) || now < began) throw Error(); return now;
+    };
+    const snapshot = () => {
+      const now = active(), saved = options.history.read(options.trust, options.current), release = saved.availability?.release;
+      if (!saved.availability?.available || !release || saved.sequence !== release.sequence || release.bytes > 8 * 1024 ** 3
+        || now < release.issuedAt || now >= release.expiresAt) throw Error();
+      return immutable(release);
+    };
+    const release = snapshot(), root = await lstat(options.directory);
+    parent = await open(options.directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    const inspectRoot = async () => {
+      active(); const current = await lstat(options.directory), held = await parent.stat();
+      if (!current.isDirectory() || current.isSymbolicLink() || current.uid !== process.getuid() || (current.mode & 0o777) !== 0o700
+        || !same(root, current) || !same(root, held) || current.mode !== held.mode || current.uid !== held.uid
+        || await realpath(options.directory) !== options.directory) throw Error();
+    };
+    await inspectRoot(); file = await open(options.file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); const before = await file.stat();
+    const inspect = async () => {
+      await inspectRoot(); const held = await file.stat(), named = await lstat(options.file);
+      if (!privateFile(held) || !privateFile(named) || !same(before, held) || !same(before, named) || held.size !== release.bytes || named.size !== release.bytes
+        || [held, named].some(value => value.mtimeMs !== before.mtimeMs || value.ctimeMs !== before.ctimeMs)) throw Error();
+    };
+    await inspect(); const hash = createHash('sha256'), bytes = Buffer.alloc(65536);
+    try {
+      for (let offset = 0; offset < release.bytes;) {
+        await inspect(); const count = (await file.read(bytes, 0, Math.min(bytes.length, release.bytes - offset), offset)).bytesRead;
+        if (!count) throw Error(); hash.update(bytes.subarray(0, count)); offset += count;
+      }
+    } finally { bytes.fill(0); }
+    if (hash.digest('hex') !== release.sha256 || canonicalJSON(snapshot()) !== canonicalJSON(release)) throw Error();
+    await inspect(); return immutable({ file: options.file, bytes: release.bytes, sha256: release.sha256, release });
+  } catch { throw Error('update-installer-unverified'); }
+  finally {
+    const closed = await Promise.allSettled([file?.close(), parent?.close()]);
+    if (closed.some(value => value.status === 'rejected')) throw Error('update-installer-unverified');
+  }
+}
+
 // Host-only explicit staging. Protected history supplies authenticated metadata; no native trust or install is implied.
 export async function stageUpdateInstaller(options, { request = httpsRequest, resolve = destination, clock = Date.now } = {}) {
   let parent, file, path, owner, root, verified, timer, req, response, reqClosed, socketClosed, abort, signal, keep = false, repair = false, written = 0;

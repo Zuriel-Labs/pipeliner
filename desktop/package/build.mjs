@@ -32,6 +32,15 @@ export function dataCompatibility(value, identity) {
 export function dataCompatibilityForBuild(identity, codexCLI) {
   return dataCompatibility({ kind: 'pipeliner-desktop-data-support', schemaVersion: 1, build: identity, formats: currentFormats, codexCLI }, identity);
 }
+// No migration is qualified here. Matching declarations remain separate from actual data authentication.
+export function requireSameDataSupport(current, candidate) {
+  try {
+    canonicalJSON(current); canonicalJSON(candidate);
+    const from = dataCompatibility(current, current.build), to = dataCompatibility(candidate, candidate.build);
+    if (canonicalJSON(from.formats) !== canonicalJSON(currentFormats) || canonicalJSON(to.formats) !== canonicalJSON(currentFormats)
+      || from.codexCLI !== to.codexCLI) throw Error();
+  } catch { throw Error('package-data-support-incompatible'); }
+}
 const stable = (a, b) => ['dev', 'ino', 'mode', 'uid', 'nlink', 'size', 'mtimeMs', 'ctimeMs'].every(key => a[key] === b[key]);
 const owner = value => value.uid === process.getuid() || value.uid === 0;
 

@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { protectedFile } from '../core/storage.mjs';
 import { canonicalJSON, immutable, record } from '../core/settings.mjs';
 import { createRecordCodec } from '../privacy/records.mjs';
-import { buildIdentity } from '../package/build.mjs';
+import { buildIdentity, readDataCompatibility, requireSameDataSupport } from '../package/build.mjs';
 import { isNewerUpdateVersion } from './manifest.mjs';
 import { updateBackups, verifyUpdateBackups } from './backup.mjs';
 import { verifyStagedInstaller } from './stage.mjs';
@@ -291,6 +291,12 @@ export function openUpdateMaintenance(directory, { vault, clock = Date.now }) {
           verifyUpdateBackups({ capture: intent.backups, directory, build: intent.from, vault }); check();
           await verifyMacUpdateBundle({ ...installed, signal }, { run }); check();
           await verifyMacUpdateBundle({ bundle: receipt.bundle, team: installed.team, identity: intent.to, signal }, { run }); check();
+          async function support(exchanged = false) {
+            const from = await readDataCompatibility(exchanged ? receipt.bundle : installed.bundle, intent.from, { signal }); check();
+            const to = await readDataCompatibility(exchanged ? installed.bundle : receipt.bundle, intent.to, { signal }); check();
+            requireSameDataSupport(from, to);
+          }
+          await support();
           const inspect = path => lstatSync(path, { bigint: true }), from = inspect(installed.bundle), to = inspect(receipt.bundle);
           const parents = [dirname(installed.bundle), receipt.directory], roots = parents.map(inspect);
           const helper = join(installed.bundle, 'Contents/Resources/helpers/update-exchange'), executable = inspect(helper);
@@ -317,7 +323,7 @@ export function openUpdateMaintenance(directory, { vault, clock = Date.now }) {
             const verified = await run(helper, ['--verify-parent', parents[index], roots[index].dev.toString(), roots[index].ino.toString()], signal);
             if (verified.stdout !== 'pipeliner-update-parent-verified\n' || verified.stderr !== '') throw Error(); bindings();
           }
-          verifyUpdateBackups({ capture: intent.backups, directory, build: intent.from, vault }); bindings();
+          verifyUpdateBackups({ capture: intent.backups, directory, build: intent.from, vault }); bindings(); await support(); bindings();
           const original = { device: from.dev.toString(), inode: from.ino.toString() };
           replacement(original, { ...intent, phase: 'replacing' });
           revision = transaction(state => {
@@ -329,6 +335,7 @@ export function openUpdateMaintenance(directory, { vault, clock = Date.now }) {
           if (result.stdout !== 'pipeliner-update-exchanged\n' || result.stderr !== '') throw Error(); bindings(true);
           await verifyMacUpdateBundle({ bundle: installed.bundle, team: installed.team, identity: intent.to, signal }, { run }); bindings(true);
           await verifyMacUpdateBundle({ bundle: receipt.bundle, team: installed.team, identity: intent.from, signal }, { run }); bindings(true);
+          await support(true); bindings(true);
           const bound = transaction(state => {
             if (!owned(state) || token !== active.token || state.row.revision !== revision || state.value.phase !== 'replacing') throw Error();
             return save(state, { ...state.value, phase: 'relaunching' });
@@ -385,6 +392,9 @@ export function openUpdateMaintenance(directory, { vault, clock = Date.now }) {
             bindings();
             await verifyMacUpdateBundle({ bundle: installed.bundle, team: installed.team, identity: intent.to, signal }, { run }); bindings();
             await verifyMacUpdateBundle({ bundle: receipt.bundle, team: installed.team, identity: intent.from, signal }, { run }); bindings();
+            const from = await readDataCompatibility(receipt.bundle, intent.from, { signal }); bindings();
+            const to = await readDataCompatibility(installed.bundle, intent.to, { signal }); bindings();
+            requireSameDataSupport(from, to);
             for (let index = 0; index < parents.length; index++) {
               const result = await run(helper, ['--verify-parent', parents[index], roots[index].dev.toString(), roots[index].ino.toString()], signal);
               if (result.stdout !== 'pipeliner-update-parent-verified\n' || result.stderr !== '') throw Error(); bindings();

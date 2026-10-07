@@ -20,6 +20,18 @@ test('bundle data support metadata binds the exact build and preserves existing 
     assert.deepEqual(support.build, identity); assert.equal(support.formats.databases.maintenance, 2);
     assert.equal(support.formats.databases.policy, 3); assert.equal(support.formats.policyDocument, 4);
     assert.equal(support.codexCLI, '0.160.0'); assert.equal(metadata.dataCompatibilityName, 'pipeliner-data.json');
+    const nextBuild = { ...identity, version: '0.2.0', sourceCommit: 'd'.repeat(40) };
+    const next = metadata.dataCompatibilityForBuild(nextBuild, support.codexCLI);
+    assert.equal(typeof metadata.requireSameDataSupport, 'function');
+    assert.equal(metadata.requireSameDataSupport(support, next), undefined);
+    const changed = structuredClone(next); changed.formats.databases.workspaces++;
+    assert.throws(() => metadata.requireSameDataSupport(support, changed));
+    const unsupported = structuredClone(support); unsupported.formats.databases.workspaces++;
+    assert.throws(() => metadata.requireSameDataSupport(unsupported, changed));
+    assert.throws(() => metadata.requireSameDataSupport(support, { ...next, codexCLI: '0.161.0' }));
+    assert.throws(() => metadata.requireSameDataSupport(null, next));
+    let reads = 0; assert.throws(() => metadata.requireSameDataSupport(support, { ...next, get formats() { reads++; throw Error(); } }));
+    assert.equal(reads, 0);
     assert.equal('rollbackAuthorized' in support, false); assert.equal('paths' in support, false);
     await assert.rejects(metadata.readDataCompatibility(bundle, identity));
     const original = canonicalJSON(support) + '\n', save = text => writeFile(file, text, { mode: 0o600 });

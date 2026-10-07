@@ -15,6 +15,7 @@ import { openWorkspaceStore } from '../repositories/store.mjs';
 import { openDevelopmentStore } from '../development/state.mjs';
 import { openArtifactStore } from '../delivery/artifacts.mjs';
 import { DatabaseSync } from 'node:sqlite';
+import { dataCompatibilityForBuild } from '../package/build.mjs';
 
 async function checkCopy(unsafe, journaled = false, replacement = null, recovery = null) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'pipeliner-54-update-copy-'))), directory = join(root, 'updates');
@@ -26,6 +27,7 @@ async function checkCopy(unsafe, journaled = false, replacement = null, recovery
     await mkdir(join(bundle, 'Contents/Resources'), { recursive: true, mode: 0o700 });
     await mkdir(join(bundle, 'Contents/MacOS'), { mode: 0o700 });
     await writeFile(join(bundle, 'Contents/Resources/pipeliner-build.json'), canonicalJSON(identity) + '\n', { mode: 0o600 });
+    await writeFile(join(bundle, 'Contents/Resources/pipeliner-data.json'), canonicalJSON(dataCompatibilityForBuild(identity, '0.160.0')) + '\n', { mode: 0o600 });
     await writeFile(join(bundle, 'Contents/Info.plist'), 'Synthetic plist; never native verified.', { mode: 0o600 });
     await writeFile(join(bundle, 'Contents/MacOS/Pipeliner'), 'Synthetic executable; never launched.', { mode: 0o700 });
     await mkdir(join(bundle, 'Contents/Resources/helpers'), { mode: 0o700 });
@@ -78,6 +80,10 @@ async function checkCopy(unsafe, journaled = false, replacement = null, recovery
         const temporary = join(saved.copy.directory, 'synthetic-previous.app');
         await rename(installed, temporary); await rename(saved.copy.receipt.bundle, installed); await rename(temporary, saved.copy.receipt.bundle);
         if (mode === 'swap-tamper') await writeFile(join(installed, 'Contents/Resources/pipeliner-build.json'), canonicalJSON({ ...to, gitTree: 'd'.repeat(40) }) + '\n');
+        if (mode === 'swap-support-tamper') {
+          const path = join(installed, 'Contents/Resources/pipeliner-data.json'), support = JSON.parse(await readFile(path, 'utf8'));
+          support.formats.databases.workspaces++; await writeFile(path, canonicalJSON(support) + '\n');
+        }
         if (mode === 'swap-stale') journal.advance(journalToken, 'repair-required');
         if (mode === 'swap-journal-refusal') {
           db = new DatabaseSync(join(root, 'maintenance.sqlite'));
@@ -158,9 +164,18 @@ async function checkCopy(unsafe, journaled = false, replacement = null, recovery
         assert.throws(() => journal.advance(journalToken, 'replacing'));
         const before = journal.read(); mode = replacement;
         const replace = options => journal.replaceBundle(journalToken, { ...binding, signal: controller.signal, ...options }, { run });
-        if (['pre-tamper', 'swap-parent', 'swap-cancel'].includes(replacement)) {
+        if (['pre-tamper', 'swap-parent', 'swap-cancel', 'missing-source-support', 'missing-target-support', 'changed-target-support', 'changed-target-provider'].includes(replacement)) {
           if (replacement === 'pre-tamper') await writeFile(join(receipt.bundle, 'Contents/Resources/pipeliner-build.json'), canonicalJSON({ ...to, gitTree: 'd'.repeat(40) }) + '\n');
           if (replacement === 'swap-cancel') controller.abort();
+          const supportPath = join(receipt.bundle, 'Contents/Resources/pipeliner-data.json');
+          if (replacement === 'missing-source-support') await rm(join(installed, 'Contents/Resources/pipeliner-data.json'));
+          if (replacement === 'missing-target-support') await rm(supportPath);
+          if (['changed-target-support', 'changed-target-provider'].includes(replacement)) {
+            const support = JSON.parse(await readFile(supportPath, 'utf8'));
+            if (replacement === 'changed-target-support') support.formats.databases.development++;
+            else support.codexCLI = '0.161.0';
+            await writeFile(supportPath, canonicalJSON(support) + '\n');
+          }
           await assert.rejects(replace()); assert.equal(exchanges, 0); assert.deepEqual(journal.read(), before);
         } else if (replacement === 'valid-swap') {
           const result = await replace(); assert.deepEqual(result, { installed, rollback: receipt.bundle, identity: to });
@@ -204,6 +219,13 @@ async function checkCopy(unsafe, journaled = false, replacement = null, recovery
           }
           if (recovery === 'missing-data') await rename(sourceFiles[0], sourceFiles[0] + '.saved');
           if (recovery === 'future-data') { db = new DatabaseSync(sourceFiles[1]); db.exec('PRAGMA user_version=3'); db.close(); db = undefined; }
+          if (recovery === 'missing-support') await rm(join(installed, 'Contents/Resources/pipeliner-data.json'));
+          if (['changed-support', 'changed-provider'].includes(recovery)) {
+            const path = join(installed, 'Contents/Resources/pipeliner-data.json'), support = JSON.parse(await readFile(path, 'utf8'));
+            if (recovery === 'changed-support') support.formats.protectedPayload++;
+            else support.codexCLI = '0.161.0';
+            await writeFile(path, canonicalJSON(support) + '\n');
+          }
           if (recovery === 'journal-refusal') { db = new DatabaseSync(join(root, 'maintenance.sqlite')); db.exec("CREATE TRIGGER refuse_finish BEFORE UPDATE ON maintenance_state BEGIN SELECT RAISE(ABORT,'synthetic finish refusal'); END;"); }
           if (recovery === 'custody-refusal') {
             const prepare = DatabaseSync.prototype.prepare;
@@ -232,6 +254,7 @@ async function checkCopy(unsafe, journaled = false, replacement = null, recovery
             assert.deepEqual(Buffer.from(db.prepare('SELECT payload FROM maintenance_completed WHERE id=?').get(pending.id).payload), changed);
           } else {
             await assert.rejects(action()); assert.deepEqual(journal.read(), pending); assert.equal(journal.clear(), false); assert.deepEqual(journal.completed(), []);
+            if (['missing-support', 'changed-support', 'changed-provider'].includes(recovery)) assert.deepEqual(sourceFiles.map(dataDigest), beforeData);
             if (custodyFailure) assert.equal(custodyFailure.mock.calls.filter(call => call.arguments[0].startsWith('INSERT INTO maintenance_completed ') && call.error?.message === 'Synthetic custody insert refusal').length, 1);
           }
           assert.equal(exchanges, 1); assert.equal((await lstat(receipt.bundle)).isDirectory(), true);
@@ -320,11 +343,11 @@ test('verified image copying preserves native metadata and links, rejects stale 
 test('copy tree guards refuse absolute external aliases and hard-linked files before native copying', () => checkCopy(true));
 test('journal records exact copy ownership before effects, binds detached target and fences retained or interrupted resources', () => checkCopy(false, true));
 test('replacement coordinator persists effect identities, verifies both namespace bindings and retains uncertain outcomes without retry', async () => {
-  for (const mode of ['pre-tamper', 'swap-parent', 'swap-cancel', 'valid-swap', 'swap-refusal', 'swap-tamper', 'swap-stale', 'swap-journal-refusal']) await checkCopy(false, true, mode);
+  for (const mode of ['pre-tamper', 'swap-parent', 'swap-cancel', 'missing-source-support', 'missing-target-support', 'changed-target-support', 'changed-target-provider', 'valid-swap', 'swap-refusal', 'swap-tamper', 'swap-support-tamper', 'swap-stale', 'swap-journal-refusal']) await checkCopy(false, true, mode);
 });
 
 test('startup reconciliation requires the exact exchanged target and compatible protected data without replay', async () => {
-  for (const recovery of ['valid-relaunch', 'wrong-build', 'relaunch-signature', 'changed-bundle', 'missing-data', 'future-data', 'cancel', 'lost-checkpoint', 'journal-refusal', 'custody-refusal'])
+  for (const recovery of ['valid-relaunch', 'wrong-build', 'relaunch-signature', 'changed-bundle', 'missing-data', 'future-data', 'missing-support', 'changed-support', 'changed-provider', 'cancel', 'lost-checkpoint', 'journal-refusal', 'custody-refusal'])
     await checkCopy(false, true, 'valid-swap', recovery);
   await checkCopy(false, true, 'swap-journal-refusal', 'uncertain-relaunch');
 });

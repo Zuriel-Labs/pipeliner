@@ -22,7 +22,7 @@ test('Packaged host modules contain their complete repository-owned static impor
 
 test('Package selection requires its runtime entry and excludes roadmap, fixtures, tests and developer assets', () => {
   const minimum = ['desktop/app/main.cjs', 'desktop/app/preload.cjs', 'desktop/app/index.html', 'desktop/prototype/style.css', 'desktop/development/starter.mjs', 'desktop/authority/Dockerfile', 'LICENSE'];
-  const source = [...minimum, 'docs/pipeliner-desktop-implementation-roadmap.html', 'desktop/app/qualify.cjs', 'desktop/app/startup.test.mjs', 'desktop/codex/qualify.mjs', 'desktop/ollama/qualify.mjs', '.agents/skills/local/SKILL.md', 'desktop/shell/main.cjs', 'desktop/prototype/main.cjs',
+  const source = [...minimum, 'docs/pipeliner-desktop-implementation-roadmap.html', 'desktop/app/qualify.cjs', 'desktop/app/qualification-progress.cjs', 'desktop/app/qualification-progress.test.mjs', 'desktop/app/startup.test.mjs', 'desktop/codex/qualify.mjs', 'desktop/ollama/qualify.mjs', '.agents/skills/local/SKILL.md', 'desktop/shell/main.cjs', 'desktop/prototype/main.cjs',
     'desktop/test-storage.cjs', 'scripts/desktop-quality.mjs', 'scripts/desktop-test-process.cjs', 'scripts/desktop-test-process-gate.py', 'scripts/desktop-test-process-probe.cjs'];
   assert.deepEqual(runtimeInputs(source), minimum.sort());
   for (const value of ['../outside', '/absolute', 'desktop/app/../main.cjs', 'desktop\\app\\main.cjs', 'desktop/app/main.cjs\0extra']) assert.throws(() => runtimeInputs([...minimum,value]), /package-input/);

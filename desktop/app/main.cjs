@@ -25,6 +25,7 @@ const origin = 'pipeliner://app', url = `${origin}/index.html`;
 const argument = name => process.argv.find(value => value.startsWith(`${name}=`))?.slice(name.length + 1);
 const backgroundLaunch = process.argv.includes('--background-helper');
 const entryStarted = performance.now(); let windowReadyMs;
+const phase = name => { if (qualifying) require('./qualification-progress.cjs').phase(name, performance.now() - entryStarted); };
 const dataDirectory = startup.testDirectory ?? argument('--data-directory') ?? path.join(app.getPath('appData'), 'Pipeliner');
 const helper = argument('--key-helper') ?? (app.isPackaged ? path.join(process.resourcesPath, 'helpers/secure-entry') : undefined);
 const calendarHelper = argument('--calendar-helper') ?? (app.isPackaged ? path.join(process.resourcesPath, 'helpers/calendar') : undefined);
@@ -61,6 +62,7 @@ function asset(value) {
 }
 
 app.whenReady().then(async () => {
+  phase('main-ready');
   if (process.platform !== 'darwin' || process.arch !== 'arm64') throw new Error('host-unqualified');
   mkdirSync(dataDirectory, { mode: 0o700, recursive: true });
   const directory = realpathSync(dataDirectory), info = lstatSync(dataDirectory);
@@ -121,6 +123,7 @@ app.whenReady().then(async () => {
   const { githubAdapter } = await moduleAt('../connections/github.mjs');
   const { codexAdapter, ollamaAdapter } = await moduleAt('../connections/providers.mjs');
   const { nativeKeyEntry, nativeFolderEntry, nativeMCPEntry } = await moduleAt('../connections/native-entry.mjs');
+  phase('host-modules-ready');
   const activeConnections = new Set();
   const maintenanceRecovery = () => maintenanceStore ? !maintenanceStore.clear() : maintenanceUnavailable;
   maintenance = createMaintenanceGate({ ready: () => {
@@ -308,6 +311,7 @@ app.whenReady().then(async () => {
     window = new BrowserWindow({ width: 1180, height: 840, minWidth: 420, minHeight: 580, show: false, title: 'Pipeliner', backgroundColor: '#101722',
       webPreferences: { preload: path.join(__dirname, 'preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false, nodeIntegrationInWorker: false, webviewTag: false, webSecurity: true, allowRunningInsecureContent: false } });
     const attached = window;
+    phase('window-created');
     attached.on('focus', () => { if (!closing) void updates?.poll().catch(() => {}); });
     attached.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     for (const event of ['will-navigate', 'will-frame-navigate', 'will-attach-webview']) attached.webContents.on(event, e => e.preventDefault());
@@ -317,7 +321,9 @@ app.whenReady().then(async () => {
       event.preventDefault(); void requestShutdown?.();
     });
     attached.on('closed', () => { if (window === attached) { window = null; void updates?.stop().catch(() => {}); } backgroundHost?.setVisible(false); if (!closing && backgroundHost?.status().effective) app.setActivationPolicy('accessory'); });
-    attached.once('ready-to-show', () => { windowReadyMs ??= performance.now() - entryStarted; if (!closing) attached.show(); }); await attached.loadURL(url); return attached;
+    attached.once('ready-to-show', () => { windowReadyMs ??= performance.now() - entryStarted; phase('window-ready-to-show'); if (!closing) attached.show(); });
+    attached.webContents.once('did-fail-load', () => phase('window-load-failed'));
+    phase('window-load-started'); await attached.loadURL(url); phase('window-load-finished'); return attached;
     })().finally(() => { attachment = null; }); return attachment;
   };
   const channel = () => createConnectionControlChannel(manager, { contents: window.webContents, url, context: () => ({ revision: manager.status().revision }) });
@@ -357,6 +363,7 @@ app.whenReady().then(async () => {
   powerMonitor.on('suspend', suspendHost); powerMonitor.on('resume', wakeHost); powerMonitor.on('shutdown', endSession);
   requestShutdown = async () => {
     if (closing || verifiedClose) return; closing = true; clearInterval(authorizationMonitor); clearInterval(retentionMonitor);
+    phase('shutdown-started');
     try {
       await updates.stop();
       if (!shutdownPaused) { scheduler?.suspend(); await backgroundHost?.suspend(); shutdownPaused = true; }
@@ -366,7 +373,7 @@ app.whenReady().then(async () => {
       await tools.close(); await toolConnections?.close();
       await privacy.close(); privacyRecords?.close();
       await permissions.close(); await updates.close(); updateHistory?.close(); maintenanceStore?.close(); await delivery.close(); await artifacts?.close(); backgroundHost?.close(); background.close(); scheduling.close(); pipelines.close(); skills.close(); appearance.close();
-      developmentStore?.close(); policy?.close(); skillStore?.close(); toolStore?.close(); workspaceStore?.close(); vault?.close(); verifiedClose = true; app.quit();
+      developmentStore?.close(); policy?.close(); skillStore?.close(); toolStore?.close(); workspaceStore?.close(); vault?.close(); verifiedClose = true; phase('shutdown-finished'); app.quit();
     } catch { closing = false; console.error('Pipeliner shutdown needs verified recovery. Work remains preserved.'); await attachWindow(); publish(manager.status()); }
   };
   Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Pipeliner', submenu: [{ role: 'about' }, { type: 'separator' }, { role: 'quit' }] }, { role: 'editMenu' },
@@ -374,7 +381,9 @@ app.whenReady().then(async () => {
   if (!backgroundLaunch) await attachWindow();
   try {
     const { openVault } = await moduleAt('../connections/vault.mjs');
+    phase('vault-started');
     vault = await openVault(directory, { available: () => safeStorage.isAsyncEncryptionAvailable(), encrypt: text => safeStorage.encryptStringAsync(text), decrypt: bytes => safeStorage.decryptStringAsync(bytes) });
+    phase('vault-ready');
     if (closing) { vault.close(); return; }
     try { maintenanceStore = openUpdateMaintenance(directory, { vault }); }
     catch { maintenanceUnavailable = true; console.error('Desktop maintenance needs protected recovery. Existing data preserved.'); }
@@ -439,9 +448,14 @@ app.whenReady().then(async () => {
     authorizationMonitor = setInterval(() => { if (!closing && !maintenance.active() && !maintenanceRecovery()) void backgroundHost.refresh().catch(() => {}); }, 1000); authorizationMonitor.unref();
     await updates.poll();
     await scheduler.check('startup');
-  } catch { publish(manager.status()); }
-  if (qualifying) await require('./qualify.cjs').run({ window, directory, helper, vault, manager, workspaces, issues, pipelines, policy, development, scheduler, scheduling, background, backgroundHost, backgroundNative, skills, skillStore, tools, toolStore, privacy, privacyRecords, appearance, delivery, updates, permissions, artifacts, permissionChannel: permissionChannel(), updateChannel: updateChannel(), deliveryChannel: deliveryChannel(), appearanceChannel: appearanceChannel(), privacyChannel: privacyChannel(), toolChannel: toolChannel(), skillChannel: skillChannel(), attachWindow, backgroundChannel: backgroundChannel(), schedulingChannel: schedulingChannel(), developmentChannel: developmentChannel(), workspaceChannel: workspaceChannel(), issueChannel: issueChannel(), pipelineChannel: pipelineChannel(), channel: channel(), windowReadyMs });
-}).catch(() => { console.error('Pipeliner could not start safely.'); app.exit(1); });
+    phase('protected-state-ready');
+  } catch { phase('protected-state-unavailable'); publish(manager.status()); }
+  if (qualifying) {
+    phase('qualification-started');
+    await require('./qualify.cjs').run({ window, directory, helper, vault, manager, workspaces, issues, pipelines, policy, development, scheduler, scheduling, background, backgroundHost, backgroundNative, skills, skillStore, tools, toolStore, privacy, privacyRecords, appearance, delivery, updates, permissions, artifacts, permissionChannel: permissionChannel(), updateChannel: updateChannel(), deliveryChannel: deliveryChannel(), appearanceChannel: appearanceChannel(), privacyChannel: privacyChannel(), toolChannel: toolChannel(), skillChannel: skillChannel(), attachWindow, backgroundChannel: backgroundChannel(), schedulingChannel: schedulingChannel(), developmentChannel: developmentChannel(), workspaceChannel: workspaceChannel(), issueChannel: issueChannel(), pipelineChannel: pipelineChannel(), channel: channel(), windowReadyMs });
+    phase('qualification-finished');
+  }
+}).catch(() => { phase('main-failed'); console.error('Pipeliner could not start safely.'); app.exit(1); });
 
 async function githubPrompt({ connection, verificationUri, userCode, signal, cancel }) {
   if (verificationUri !== 'https://github.com/login/device') throw new Error('provider-unavailable');

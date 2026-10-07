@@ -13,6 +13,8 @@ if (storageFixture && process.argv.some(arg => qualificationFlags.includes(arg) 
   throw new Error('storage-fixture-native-option-conflict');
 }
 const qualifying = storageFixture || process.argv.some(arg => qualificationFlags.includes(arg));
+const started = performance.now(), progress = createRequire(import.meta.url)('../desktop/app/qualification-progress.cjs');
+const phase = name => { if (qualifying && !storageFixture) progress.phase(name, performance.now() - started); };
 if (process.argv.slice(2).some(arg => ![...qualificationFlags, '--retain-owned-capture', '--storage-fixture'].includes(arg))) throw new Error('argument-denied');
 if (process.platform !== 'darwin' || process.arch !== 'arm64') throw new Error('host-unqualified');
 const { validateContext, nativeTestEnvironment, nativeTestLauncher } = createRequire(import.meta.url)('../desktop/test-storage.cjs');
@@ -56,18 +58,23 @@ try {
   if (process.argv.includes('--qualify-privacy')) {
     privacyExport = await realpath(await mkdtemp(join(tmpdir(), 'pipeliner-54-privacy-export-'))); privacyExportInfo = await lstat(privacyExport);
   }
+  phase('helper-build-started');
   await exec('/usr/bin/clang', ['-fobjc-arc', '-framework', 'AppKit', '-mmacosx-version-min=13.0', ...(qualifying ? ['-DPIPELINER_QUALIFY'] : []), join(root, 'desktop/connections/secure-entry.m'), '-o', helper], { timeout: 30000 });
   await exec('/usr/bin/clang', ['-fobjc-arc', '-framework', 'Foundation', '-mmacosx-version-min=13.0', join(root, 'desktop/scheduling/calendar.m'), '-o', calendar], { timeout: 30000 });
+  phase('helper-build-finished');
   const electron = join(root, 'desktop/prototype/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron'); await access(electron);
+  phase('app-launch-started');
   child = spawn(electron, [join(root, 'desktop/app/main.cjs'), `--key-helper=${helper}`, `--calendar-helper=${calendar}`, ...(qualifying ? ['--qualify', ...process.argv.filter(arg => qualificationFlags.includes(arg) && arg !== '--qualify'), `--test-data-directory=${temporary}`] : [])], {
     env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: homedir(), TMPDIR: temporary, LANG: 'en_US.UTF-8', ...chromiumEnvironment, ...(storage ? { TEST_ARTIFACT_RUN: storage.run_path, ...Object.fromEntries(['tmp','logs','recordings','outputs'].map(name => ['TEST_ARTIFACT_' + name.toUpperCase(), storage.paths[name]])) } : {}), ...(processAdmission ? { PIPELINER_TEST_NODE: process.execPath } : {}), ...(nativeRoot ? { PIPELINER_NATIVE_WORKSPACE_ROOT: nativeRoot } : {}), ...(privacyExport ? { PIPELINER_PRIVACY_EXPORT_DIRECTORY: privacyExport } : {}) }, stdio: ['ignore', 'pipe', 'pipe'],
   });
   if (qualifying) timer = setTimeout(() => child.kill('SIGTERM'), 180000);
   child.stdout.setEncoding('utf8'); child.stdout.on('data', bytes => {
     report += bytes; if (Buffer.byteLength(report) > 262144) child.kill('SIGTERM');
-    // Only fixture panel stages are streamed; provider/renderer output remains suppressed.
+    // Only exact fixture progress and panel stages are streamed; arbitrary child output stays suppressed.
     const end = report.lastIndexOf('\n'); if (end < delivered) return;
-    for (const line of report.slice(delivered, end).split('\n')) if (line.startsWith('{"privacyNativePanel"')) {
+    for (const line of report.slice(delivered, end).split('\n')) {
+      const marker = progress.progress(line); if (marker) { console.log(JSON.stringify(marker)); continue; }
+      if (!line.startsWith('{"privacyNativePanel"')) continue;
       try { const stage = JSON.parse(line), expected = privacyExport ?? (nativeRoot ? join(nativeRoot, 'repository') : join(homedir(), 'Documents', `pipeliner-36-native-${child.pid}`));
         if (['save-cancel', 'save', 'open'].includes(stage.privacyNativePanel) && stage.directory === expected) console.log(JSON.stringify(stage));
       } catch { /* Do not forward malformed native output. */ }

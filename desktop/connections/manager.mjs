@@ -12,7 +12,7 @@ export const safeConnectionError = error => /^(http-\d{3}|graphql-(forbidden|rej
 
 // Host-only handle. Workers and renderer receive status, never this object or records.
 export function createConnectionManager({ vault, adapters, onChange = () => {}, initialRevision = 1 }) {
-  const tasks = new Map(), errors = new Map(), leases = new Map(); let revision = initialRevision, closed = false;
+  const tasks = new Map(), errors = new Map(), leases = new Map(), turns = new Set(); let revision = initialRevision, closed = false;
   const fence = id => { for (const lease of leases.get(id) ?? []) lease.abort(); };
   const changed = () => { revision++; onChange(status()); };
   const requireReady = id => { if (closed || !vault || !connectionIds.includes(id) || !adapters[id]) throw new Error('connection-unavailable'); };
@@ -126,7 +126,7 @@ export function createConnectionManager({ vault, adapters, onChange = () => {}, 
           if (pending) throw new Error('provider-turn-pending');
           if (!input || Object.keys(input).sort().join(',') !== 'maxOutput,messages,tools' || !Array.isArray(input.messages) || !Array.isArray(input.tools)
             || !Number.isSafeInteger(input.maxOutput) || input.maxOutput < 1 || input.maxOutput > 8192 || Buffer.byteLength(JSON.stringify(input)) > 1024 * 1024) throw new Error('provider-input-invalid');
-          pending = true;
+          pending = true; const settlement = Promise.withResolvers(); turns.add(settlement.promise);
           try {
             const result = await adapters[id].turn({ ...input, value: lease.value, model, signal: lease.signal });
             lease.check(); return result;
@@ -138,11 +138,11 @@ export function createConnectionManager({ vault, adapters, onChange = () => {}, 
               vault.save(id, epoch, { ...lease.value, view: { ...view, health: ['http-401', 'reauthentication-required', 'account-changed'].includes(code) ? 'reauthentication' : 'offline', capability: null } }); changed();
             }
             throw error;
-          } finally { pending = false; }
+          } finally { pending = false; turns.delete(settlement.promise); settlement.resolve(); }
         },
       });
     },
     epoch(id) { requireReady(id); return vault.get(id).epoch; },
-    async close() { if (tasks.get('codex')?.operation === 'connect') disconnect('codex'); closed = true; for (const id of leases.keys()) fence(id); for (const task of tasks.values()) task.controller.abort(); await Promise.allSettled([...tasks.values()].map(task => task.done)); },
+    async close() { if (tasks.get('codex')?.operation === 'connect') disconnect('codex'); closed = true; for (const id of leases.keys()) fence(id); for (const task of tasks.values()) task.controller.abort(); await Promise.allSettled([...Array.from(tasks.values(), task => task.done), ...turns]); },
   });
 }

@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
+import { randomBytes, createCipheriv, createDecipheriv, createHash } from 'node:crypto';
 import { protectedFile } from '../core/storage.mjs';
 import { canonicalJSON, record } from '../core/settings.mjs';
 
@@ -35,6 +35,7 @@ export async function openVault(directory, protection) {
     if (key.length !== 32) throw new Error('protected-record-invalid');
     if (unwrapped.shouldReEncrypt) db.prepare('UPDATE vault_key SET payload=? WHERE id=1 AND payload=?')
       .run(await protection.encrypt(unwrapped.result), wrapped);
+    const retainedKey = Buffer.from(db.prepare('SELECT payload FROM vault_key WHERE id=1').get().payload);
     let closed = false;
     const ready = () => { if (closed) throw new Error('vault-closed'); };
     const seal = (id, epoch, value) => {
@@ -68,7 +69,52 @@ export async function openVault(directory, protection) {
       else if (db.prepare('UPDATE connections SET epoch=?,payload=? WHERE id=? AND epoch=?').run(epoch, payload, id, before.epoch).changes !== 1) throw new Error('connection-changed');
       return epoch;
     }
+    function inventory() {
+      if (db.prepare('SELECT length(payload) AS bytes FROM vault_key WHERE id=1').get()?.bytes !== retainedKey.length
+        || !Buffer.from(db.prepare('SELECT payload FROM vault_key WHERE id=1').get().payload).equals(retainedKey)) throw Error();
+      const hash = createHash('sha256').update('pipeliner:credential-inventory:1\n').update(retainedKey);
+      let count = 0, stored = 0, bytes = 0;
+      // ponytail: 2,048 rows and 8 MiB of ciphertext; qualify larger inventories before raising these ceilings.
+      for (const row of db.prepare('SELECT id,epoch,length(payload) AS bytes FROM connections ORDER BY id LIMIT 2049').iterate()) {
+        if (++count > 2048 || !Number.isSafeInteger(row.epoch) || row.epoch < 1) throw Error(); validId(row.id);
+        if (row.bytes !== null) {
+          if (!Number.isSafeInteger(row.bytes) || row.bytes < 28 || row.bytes > limit + 28 || (bytes += row.bytes) > 4 * limit) throw Error();
+          get(row.id); stored++;
+        }
+        hash.update(canonicalJSON(row) + '\n');
+        if (row.bytes !== null) hash.update(Buffer.from(db.prepare('SELECT payload FROM connections WHERE id=?').get(row.id).payload));
+      }
+      return Object.freeze({ count, stored, sha256: hash.digest('hex') });
+    }
+    function credentialTransaction(exclusive, work, failure) {
+      ready(); let started = false;
+      try {
+        db.exec(exclusive ? 'BEGIN IMMEDIATE' : 'BEGIN'); started = true;
+        const result = work(); db.exec('COMMIT'); started = false; return result;
+      } catch {
+        if (started) try { db.exec('ROLLBACK'); } catch {
+          closed = true; key.fill(0); retainedKey.fill(0);
+          try { db.close(); } catch { /* Storage remains unavailable; no completion is reported. */ }
+        }
+        throw Error(failure);
+      }
+    }
     return Object.freeze({ get, begin,
+      connectionInventory: () => credentialTransaction(false, inventory, 'credential-inventory-unverified'),
+      // Host-only uninstall primitive. The coordinator must first settle leases/logout under its durable idle fence.
+      forgetCredentials(expected) {
+        return credentialTransaction(true, () => {
+          canonicalJSON(expected); record(expected, ['count', 'stored', 'sha256']); const before = inventory();
+          if (canonicalJSON(expected) !== canonicalJSON(before)) throw Error();
+          const epochs = db.prepare('SELECT id,epoch FROM connections ORDER BY id').all();
+          if (epochs.some(row => !Number.isSafeInteger(row.epoch + 1))) throw Error();
+          if (db.prepare('UPDATE connections SET epoch=epoch+1,payload=NULL').run().changes !== before.count) throw Error();
+          const after = inventory(); if (after.count !== before.count || after.stored !== 0) throw Error();
+          const current = db.prepare('SELECT epoch,payload IS NOT NULL AS stored FROM connections WHERE id=?');
+          for (const row of epochs) { const saved = current.get(row.id); if (saved?.epoch !== row.epoch + 1 || saved.stored !== 0) throw Error(); }
+          return after;
+        }, 'credential-removal-unverified');
+      },
       sealPayload(binding, bytes) {
         ready(); const aad = payloadBinding(binding);
         if (!Buffer.isBuffer(bytes) || bytes.length > limit) throw new Error('protected-payload-limit');
@@ -88,7 +134,7 @@ export async function openVault(directory, protection) {
       current(id, epoch) { ready(); validId(id); return (db.prepare('SELECT epoch FROM connections WHERE id=?').get(id)?.epoch ?? 0) === epoch; },
       save(id, epoch, value) { ready(); validId(id); return db.prepare('UPDATE connections SET payload=? WHERE id=? AND epoch=?').run(seal(id, epoch, value), id, epoch).changes === 1; },
       erase: id => begin(id, true),
-      close() { if (!closed) { closed = true; db.close(); key.fill(0); } },
+      close() { if (!closed) { closed = true; db.close(); key.fill(0); retainedKey.fill(0); } },
     });
   } catch { db.close(); key?.fill(0); throw new Error('secure-storage-unavailable'); }
 }

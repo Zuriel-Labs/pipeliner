@@ -48,21 +48,30 @@ exports.activate = function activate({ run = process.env.TEST_ARTIFACT_RUN, node
     || !/^\/Volumes\/TESTING\/TestArtifacts\/projects\/pipeliner\/issues\/54\/runs\/[A-Za-z0-9-]+$/.test(run)) throw Error('test-process-context-required');
   const manifest = () => JSON.parse(owned(path.join(run, 'manifest.json'), 65536));
   const initial = manifest(), chromium = initial.diagnostic_context?.route === 'quality-explicit-closed-groups-inventory-chromium';
-  const contextRpc = initial.diagnostic_context?.route === 'quality-explicit-closed-groups-inventory-stable-context-rpc';
+  const nativeDiagnostic = initial.diagnostic_context?.route === 'quality-explicit-closed-groups-inventory-stable-context-rpc-native-failure-operands';
+  const diagnosticPath = path.join(path.dirname(contextHome), 'pipeliner-54-context-native-diagnostic-6a806b00dd6e5038', 'entry.py');
+  const diagnosticHash = '6a806b00dd6e50386cec25ecdb94866be684ea16a8d865c4ed60c2c473e48e86';
+  const contextRpc = nativeDiagnostic || initial.diagnostic_context?.route === 'quality-explicit-closed-groups-inventory-stable-context-rpc';
   const expected = { ...pins, ...(chromium ? {
     [chromiumHome + '/storage.py']: '6fbb08f51bf7f950672a4f7462983ae6b1b30253e880d336beb5955ec57e2de3',
     [chromiumHome + '/chromium_singleton.py']: 'ca4cf859353eb6889a58c36ba1d478aa9544a9f7ac9d1e3a9c2e6b4ee28ec10d',
   } : { '/Users/chris/.local/share/eaglepro-test-storage/storage.py': 'e4a75d6c2ff4ca1cd1135da2bba1a3e72b649127ab29c2a9aef1dc161b9426d6' }),
-    ...(contextRpc ? { [contextEntry]: '450ff384b4807c618df4d2ca051522e8265daf23fac22753e229897f18cdcb4a' } : {}) };
+    ...(contextRpc ? { [contextEntry]: '450ff384b4807c618df4d2ca051522e8265daf23fac22753e229897f18cdcb4a' } : {}),
+    ...(nativeDiagnostic ? { [diagnosticPath]: diagnosticHash } : {}) };
   function verify() {
     const value = manifest();
     if (value.status !== 'running' || value.managed_by !== 'eaglepro-test-storage' || value.project !== 'pipeliner' || value.issue !== '54'
       || value.owner_uid !== process.getuid() || value.run_path !== run || value.volume_uuid !== '3F381C66-C7CC-4F8F-B3BE-E46151ACF674'
-      || value.diagnostic_context?.route !== 'quality-explicit-closed-groups-inventory-' + (chromium ? 'chromium' : 'stable') + (contextRpc ? '-context-rpc' : '')
+      || value.diagnostic_context?.route !== 'quality-explicit-closed-groups-inventory-' + (chromium ? 'chromium' : 'stable') + (contextRpc ? '-context-rpc' : '') + (nativeDiagnostic ? '-native-failure-operands' : '')
       || value.quality_groups?.version !== 1 || Object.keys(value.diagnostic_context.source_sha256).length !== Object.keys(expected).length
       || (contextRpc && (value.quality_context_rpc?.version !== 1 || value.quality_context_rpc.repo !== root
         || value.quality_context_rpc.source_path !== contextEntry || value.quality_context_rpc.source_sha256 !== expected[contextEntry]
         || value.quality_context_rpc.non_authorizing_requests_only !== true))
+      || (nativeDiagnostic && (value.quality_native_failure_diagnostic?.version !== 1
+        || value.quality_native_failure_diagnostic.source_path !== diagnosticPath
+        || value.quality_native_failure_diagnostic.source_sha256 !== diagnosticHash
+        || value.quality_native_failure_diagnostic.acceptance_changed !== false
+        || value.quality_native_failure_diagnostic.watchdog_bytes_and_protocol_unchanged !== true))
       || Object.entries(expected).some(([file, digest]) => value.diagnostic_context.source_sha256[file] !== digest || hash(owned(file)) !== digest)
       || ['tmp', 'logs', 'outputs', 'recordings'].some(name => value.paths?.[name] !== path.join(run, name))) throw Error('test-process-receipt-unverified');
     if (hash(owned(contextRpc ? contextHome + '/test-artifacts-context-rpc' : wrapper)) !== (contextRpc
@@ -162,5 +171,5 @@ exports.activate = function activate({ run = process.env.TEST_ARTIFACT_RUN, node
     ? contextExecute(file, args, options) : sync(syncSpawn, file, args, options);
   cp.execFileSync = (file, args, options) => sync(syncExec, file, args, options);
   syncBuiltinESMExports();
-  return globalThis[active] = Object.freeze({ run, bootstrap, route: chromium ? 'chromium' : contextRpc ? 'stable-context-rpc' : 'stable' });
+  return globalThis[active] = Object.freeze({ run, bootstrap, route: chromium ? 'chromium' : nativeDiagnostic ? 'stable-context-rpc-native-failure-operands' : contextRpc ? 'stable-context-rpc' : 'stable' });
 };

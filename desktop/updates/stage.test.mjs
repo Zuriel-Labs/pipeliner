@@ -99,9 +99,9 @@ test('installer staging requires protected signed history, exact bytes, current 
     workspaces = openWorkspaceStore(root, { vault }); development = openDevelopmentStore(root, { vault });
     artifacts = await openArtifactStore(root, { vault, limits: () => ({ keepLatest: 3, warningBytes: 1024 ** 3, capacityBytes: 2 * 1024 ** 3 }) });
     journal.bindBackups(intent, captureUpdateBackups({ directory: root, vault, build: from, checkpoint() {} }));
-    journal.advance(intent, 'verified'); journal.advance(intent, 'replacing'); const replacing = journal.read(); assert.throws(() => journal.cancel(intent));
+    assert.throws(() => journal.advance(intent, 'verified')); journal.advance(intent, 'repair-required'); const pending = journal.read(); assert.throws(() => journal.cancel(intent));
     journal.close(); journal = openUpdateMaintenance(root, { vault, clock: () => now });
-    assert.deepEqual(journal.read(), replacing); assert.equal(journal.owned(), false); assert.throws(() => journal.advance(intent, 'relaunching'));
+    assert.deepEqual(journal.read(), pending); assert.equal(journal.owned(), false); assert.throws(() => journal.advance(intent, 'relaunching'));
     writeFileSync(result.file, Buffer.alloc(bytes.length, 8)); await assert.rejects(verify(), /update-installer-unverified/);
     assert.deepEqual(readFileSync(result.file), Buffer.alloc(bytes.length, 8)); writeFileSync(result.file, bytes);
     await assert.rejects(verify({ isCurrent: () => false }), /update-installer-unverified/);

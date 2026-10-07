@@ -1,7 +1,6 @@
 import { constants } from 'node:fs';
 import { lstat, realpath, mkdir, rmdir, readdir, readlink, statfs, open } from 'node:fs/promises';
 import { join, resolve, dirname, isAbsolute } from 'node:path';
-import { randomUUID } from 'node:crypto';
 import { canonicalJSON, immutable, record } from '../core/settings.mjs';
 import { buildIdentity } from '../package/build.mjs';
 import { withMacUpdateImage } from './image.mjs';
@@ -16,13 +15,14 @@ const inside = (root, path) => path === root || path.startsWith(root + '/');
 export async function stageMacUpdateBundle(options, { run = runMacUpdateCommand, clock = Date.now } = {}) {
   let root, owner, appOwner, copiedTree, copying = false;
   try {
-    record(options, ['directory', 'installed', 'image', 'maxBytes', 'reserveBytes']);
+    record(options, ['directory', 'id', 'installed', 'image', 'maxBytes', 'reserveBytes']);
     record(options.installed, ['bundle', 'team', 'identity']);
     const installed = { ...options.installed, identity: buildIdentity(options.installed.identity) };
     const image = { ...options.image, current: { ...options.image.current }, trust: { ...options.image.trust } };
-    const { directory, maxBytes, reserveBytes } = options, signal = image.signal ?? new AbortController().signal;
+    const { directory, id, maxBytes, reserveBytes } = options, signal = image.signal ?? new AbortController().signal;
     if (process.platform !== 'darwin' || process.arch !== 'arm64' || typeof run !== 'function' || typeof clock !== 'function'
       || !(signal instanceof AbortSignal) || typeof directory !== 'string' || resolve(directory) !== directory
+      || typeof id !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(id)
       || /[\x00-\x1f\x7f]/.test(directory) || typeof image.isCurrent !== 'function' || installed.team !== image.team
       || ['version', 'platform', 'architecture'].some(key => installed.identity[key] !== image.current?.[key])
       || !Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 8 * 1024 ** 3
@@ -80,7 +80,7 @@ export async function stageMacUpdateBundle(options, { run = runMacUpdateCommand,
       const original = await inventory(source.bundle, false), capacity = await statfs(directory, { bigint: true });
       if (capacity.bavail * capacity.bsize < BigInt(original.bytes + reserveBytes)) throw Error();
       await privateDirectory(directory, parent); await unchanged(original);
-      root = join(directory, 'candidate-' + randomUUID()); await mkdir(root, { mode: 0o700 }); owner = await stat(root);
+      root = join(directory, 'candidate-' + id); await mkdir(root, { mode: 0o700 }); owner = await stat(root);
       if (owner.dev !== parent.dev) throw Error();
       await privateDirectory(root, owner); const bundle = join(root, 'Pipeliner.app');
       try { await stat(bundle); throw Error(); } catch (error) { if (error.code !== 'ENOENT') throw error; }

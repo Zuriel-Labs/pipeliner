@@ -8,6 +8,9 @@ import { buildIdentity } from '../package/build.mjs';
 import { isNewerUpdateVersion } from './manifest.mjs';
 import { updateBackups, verifyUpdateBackups } from './backup.mjs';
 import { verifyStagedInstaller } from './stage.mjs';
+import { stageMacUpdateBundle } from './copy.mjs';
+import { runMacUpdateCommand } from './mac.mjs';
+import { resolve } from 'node:path';
 
 const phases = ['preparing', 'staged', 'verified', 'replacing', 'relaunching', 'repair-required'];
 const time = value => Number.isSafeInteger(value) && value >= 0;
@@ -24,6 +27,21 @@ function installer(value, directory, intent) {
   if (typeof value.file !== 'string' || !value.file.startsWith(folder)
     || !/^update-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\.dmg$/.test(value.file.slice(folder.length))
     || value.bytes !== intent.bytes || value.sha256 !== intent.sha256) throw Error();
+}
+function bundleCopy(value, directory, intent) {
+  canonicalJSON(value); record(value, ['directory', 'installed'], ['receipt']); record(value.installed, ['bundle', 'team', 'identity']);
+  const installed = value.installed;
+  if (value.directory !== directory + '/updates/candidate-' + intent.id || typeof installed.bundle !== 'string'
+    || resolve(installed.bundle) !== installed.bundle || !installed.bundle.endsWith('/Pipeliner.app') || /[\x00-\x1f\x7f]/.test(installed.bundle)
+    || typeof installed.team !== 'string' || !/^[A-Z0-9]{10}$/.test(installed.team)
+    || canonicalJSON(buildIdentity(installed.identity)) !== canonicalJSON(intent.from)) throw Error();
+  if (value.receipt !== undefined) {
+    const receipt = value.receipt; record(receipt, ['directory', 'bundle', 'identity', 'team', 'bytes', 'nodes', 'device', 'inode']);
+    if (receipt.directory !== value.directory || receipt.bundle !== value.directory + '/Pipeliner.app' || receipt.team !== installed.team
+      || canonicalJSON(buildIdentity(receipt.identity)) !== canonicalJSON(intent.to) || !Number.isSafeInteger(receipt.bytes)
+      || receipt.bytes < 1 || receipt.bytes > 8 * 1024 ** 3 || !Number.isSafeInteger(receipt.nodes) || receipt.nodes < 1 || receipt.nodes > 20000
+      || ['device', 'inode'].some(key => typeof receipt[key] !== 'string' || !/^[1-9][0-9]{0,19}$/.test(receipt[key]))) throw Error();
+  }
 }
 
 // Host-only intent, not update trust or effect reconciliation. A pending record never clears on reopen.
@@ -63,10 +81,11 @@ export function openUpdateMaintenance(directory, { vault, clock = Date.now }) {
       if (!row || !time(row.revision) || !time(row.clock) || !time(now) || now < row.clock) throw Error();
       const value = codec.decode(identity, row.payload, { revision: row.revision, clock: row.clock });
       if (value !== null) {
-        record(value, ['schemaVersion', 'id', 'phase', 'from', 'to', 'sha256', 'bytes', 'createdAt', 'updatedAt', 'revision'], ['backups', 'installer']);
+        record(value, ['schemaVersion', 'id', 'phase', 'from', 'to', 'sha256', 'bytes', 'createdAt', 'updatedAt', 'revision'], ['backups', 'installer', 'copy']);
         plan({ from: value.from, to: value.to, sha256: value.sha256, bytes: value.bytes });
         if (value.backups !== undefined) updateBackups(value.backups, { directory, build: value.from });
         if (value.installer !== undefined) installer(value.installer, directory, value);
+        if (value.copy !== undefined) bundleCopy(value.copy, directory, value);
         if (value.schemaVersion !== 1 || typeof value.id !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value.id)
           || !phases.includes(value.phase) || !time(value.createdAt) || value.createdAt > value.updatedAt
           || value.updatedAt !== row.clock || value.revision !== row.revision) throw Error();
@@ -105,7 +124,7 @@ export function openUpdateMaintenance(directory, { vault, clock = Date.now }) {
       advance(token, phase) {
         const revision = transaction(state => {
           if (!owned(state) || token !== active.token || !phases.includes(phase) || state.value.phase === 'repair-required'
-            || ['verified', 'replacing', 'relaunching'].includes(phase) && (!state.value.backups || !state.value.installer)
+            || ['verified', 'replacing', 'relaunching'].includes(phase) && (!state.value.backups || !state.value.installer || !state.value.copy?.receipt)
             || phase !== 'repair-required' && phases.indexOf(phase) !== phases.indexOf(state.value.phase) + 1) throw Error();
           return save(state, { ...state.value, phase });
         });
@@ -147,9 +166,69 @@ export function openUpdateMaintenance(directory, { vault, clock = Date.now }) {
         });
         active.revision = revision;
       },
+      async stageBundle(token, options, { run = runMacUpdateCommand } = {}) {
+        let copying = false;
+        try {
+          record(options, ['installed', 'history', 'trust', 'current', 'maxBytes', 'reserveBytes'], ['checkpoint', 'signal']);
+          if (Object.values(Object.getOwnPropertyDescriptors(options)).some(value => value.get || value.set)) throw Error();
+          canonicalJSON(options.installed); canonicalJSON(options.current);
+          const installed = immutable(structuredClone(options.installed)), trust = { ...options.trust }, current = { ...options.current };
+          const checkpoint = options.checkpoint ?? (() => {}), signal = options.signal ?? new AbortController().signal;
+          const { maxBytes, reserveBytes } = options;
+          if (typeof run !== 'function' || typeof checkpoint !== 'function' || !(signal instanceof AbortSignal)
+            || !Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 8 * 1024 ** 3
+            || !Number.isSafeInteger(reserveBytes) || reserveBytes < 1024 ** 2 || reserveBytes > 1024 ** 4) throw Error();
+          signal.throwIfAborted(); checkpoint(); signal.throwIfAborted();
+          const initial = readState(), copy = { directory: directory + '/updates/candidate-' + initial.value?.id, installed };
+          const eligible = state => owned(state) && token === active.token && state.value.phase === 'staged' && state.value.installer && state.value.backups;
+          if (!eligible(initial) || initial.value.copy || ['version', 'platform', 'architecture'].some(key => current[key] !== initial.value.from[key])) throw Error();
+          bundleCopy(copy, directory, initial.value);
+          const revision = transaction(state => {
+            if (!eligible(state) || state.value.copy || state.row.revision !== initial.row.revision) throw Error();
+            return save(state, { ...state.value, copy });
+          });
+          active.revision = revision; active.copying = true; copying = true;
+          const isCurrent = () => {
+            try { signal.throwIfAborted(); checkpoint(); signal.throwIfAborted(); const state = readState();
+              return Boolean(eligible(state) && state.row.revision === revision && canonicalJSON(state.value.copy) === canonicalJSON(copy));
+            } catch { return false; }
+          };
+          let receipt;
+          try {
+            receipt = await stageMacUpdateBundle({ directory: directory + '/updates', id: initial.value.id, installed,
+              image: { directory: directory + '/updates', file: initial.value.installer.file, history: options.history, trust, current,
+                team: installed.team, signal, isCurrent }, maxBytes, reserveBytes }, { run, clock });
+          } catch (error) {
+            if (error.message === 'update-bundle-copy-recovery-required') {
+              active.revision = transaction(state => {
+                if (!eligible(state) || state.row.revision !== revision) throw Error();
+                return save(state, { ...state.value, phase: 'repair-required' });
+              });
+            }
+            throw error;
+          }
+          if (!isCurrent()) throw Error();
+          bundleCopy({ ...copy, receipt }, directory, initial.value);
+          const bound = transaction(state => {
+            if (!eligible(state) || state.row.revision !== revision || canonicalJSON(state.value.copy) !== canonicalJSON(copy)) throw Error();
+            return save(state, { ...state.value, copy: { ...copy, receipt } });
+          });
+          active.revision = bound; return immutable(receipt);
+        } catch { throw Error('maintenance-state-unavailable'); }
+        finally { if (copying && active?.token === token) active.copying = false; }
+      },
       // The installer must verify owned cleanup before cancelling a pre-replacement intent.
       cancel(token) {
-        transaction(state => { if (!owned(state) || token !== active.token || !['preparing', 'staged', 'verified'].includes(state.value.phase)) throw Error(); save(state, null); });
+        transaction(state => {
+          if (!owned(state) || token !== active.token || active.copying || !['preparing', 'staged', 'verified'].includes(state.value.phase)) throw Error();
+          if (state.value.copy) {
+            const folder = directory + '/updates', parent = lstatSync(folder);
+            if (!parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== process.getuid() || (parent.mode & 0o777) !== 0o700
+              || realpathSync(folder) !== folder || parent.dev !== root.dev) throw Error();
+            try { lstatSync(state.value.copy.directory); throw Error(); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+          }
+          save(state, null);
+        });
         active = undefined;
       },
       close() { if (!closed) { closed = true; active = undefined; db.close(); } },

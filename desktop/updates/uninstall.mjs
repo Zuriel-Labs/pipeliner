@@ -16,6 +16,8 @@ const time = value => Number.isSafeInteger(value) && value >= 0;
 const binding = { repository: null, table: 'uninstall_state', key: 1 };
 const schema = 'CREATE TABLE uninstall_state(id INTEGER PRIMARY KEY CHECK(id=1),revision INTEGER NOT NULL CHECK(revision>=0),clock INTEGER NOT NULL CHECK(clock>=0),payload BLOB NOT NULL CHECK(length(payload) BETWEEN 28 AND 16384))';
 const consumers = new WeakSet();
+const custodyKeys = ['dev', 'ino', 'uid', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs'];
+const bundlePaths = bundle => [bundle, dirname(bundle), join(bundle, 'Contents'), join(bundle, 'Contents/Resources'), join(bundle, 'Contents/MacOS'), join(bundle, 'Contents/MacOS/Pipeliner'), join(bundle, 'Contents/Resources', buildIdentityName)];
 function snapshot(value) {
   record(value, ['count', 'stored', 'sha256']);
   if (!Number.isSafeInteger(value.count) || value.count < 0 || value.count > 2048 || !Number.isSafeInteger(value.stored)
@@ -49,6 +51,11 @@ function checkpoint(work) {
   const result = work(); if (result instanceof Promise) result.catch(() => {});
   if (result !== undefined) throw Error();
 }
+function recordInventory(directory) {
+  const inventory = inspectManagedData(directory).filter(value => ['policy', 'workspaces', 'development', 'execution', 'extensions', 'privacy', 'artifacts', 'archives', 'migration'].includes(value.id));
+  if (inventory.some(value => value.state === 'unavailable')) throw Error();
+  return createHash('sha256').update(canonicalJSON(inventory.map(({ id, count, bytes, state }) => ({ id, count, bytes, state })))).digest('hex');
+}
 
 // Read-only host capture. Signature/custody evidence does not grant PM authority or qualify any removal effect.
 export async function captureMacUninstallPlan(options, { run = runMacUpdateCommand } = {}) {
@@ -63,23 +70,18 @@ export async function captureMacUninstallPlan(options, { run = runMacUpdateComma
     if (!bundle.endsWith('/Pipeliner.app') || executable !== join(bundle, 'Contents/MacOS/Pipeliner') || resolve(executable) !== executable
       || typeof directory !== 'string' || resolve(directory) !== directory || directory === bundle
       || directory.startsWith(bundle + '/') || bundle.startsWith(directory + '/')) throw Error();
-    const paths = [bundle, dirname(bundle), join(bundle, 'Contents'), join(bundle, 'Contents/Resources'), executable, join(bundle, 'Contents/Resources', buildIdentityName)];
-    const stable = (a, b) => ['dev', 'ino', 'uid', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs'].every(key => a[key] === b[key]);
+    const paths = bundlePaths(bundle);
+    const stable = (a, b) => custodyKeys.every(key => a[key] === b[key]);
     function inspect(path, index) {
       const value = lstatSync(path, { bigint: true });
       if (realpathSync(path) !== path || value.isSymbolicLink() || ![0n, BigInt(process.getuid())].includes(value.uid) || value.mode & 0o022n
-        || (index < 4 ? !value.isDirectory() : !value.isFile() || value.nlink !== 1n) || index === 4 && !(value.mode & 0o111n)) throw Error();
+        || (index < 5 ? !value.isDirectory() : !value.isFile() || value.nlink !== 1n) || index === 5 && !(value.mode & 0o111n)) throw Error();
       return value;
     }
     const original = paths.map(inspect), root = lstatSync(directory, { bigint: true });
     function service() { const value = background.inspect(); canonicalJSON(value); record(value, ['qualified', 'status']);
       if (value.qualified !== true || !['not-registered', 'enabled', 'requires-approval', 'not-found'].includes(value.status)) throw Error(); return immutable(value); }
-    function records() {
-      const inventory = inspectManagedData(directory).filter(value => ['policy', 'workspaces', 'development', 'execution', 'extensions', 'privacy', 'artifacts', 'archives', 'migration'].includes(value.id));
-      if (inventory.some(value => value.state === 'unavailable')) throw Error();
-      return createHash('sha256').update(canonicalJSON(inventory.map(({ id, count, bytes, state }) => ({ id, count, bytes, state })))).digest('hex');
-    }
-    const capturedService = service(), capturedCredentials = vault.previewCredentialRemoval(), capturedRecords = records();
+    const capturedService = service(), capturedCredentials = vault.previewCredentialRemoval(), capturedRecords = recordInventory(directory);
     function check() {
       checkpoint(activeCheckpoint); signal.throwIfAborted();
       const current = lstatSync(directory, { bigint: true });
@@ -88,7 +90,7 @@ export async function captureMacUninstallPlan(options, { run = runMacUpdateComma
         || !['dev', 'ino', 'uid', 'mode'].every(key => root[key] === current[key])
         || paths.some((path, index) => !stable(original[index], inspect(path, index)))
         || canonicalJSON(service()) !== canonicalJSON(capturedService) || canonicalJSON(vault.previewCredentialRemoval()) !== canonicalJSON(capturedCredentials)
-        || records() !== capturedRecords) throw Error();
+        || recordInventory(directory) !== capturedRecords) throw Error();
     }
     check(); const identity = await readBuildIdentity(bundle, { signal }); check();
     const details = (await run('/usr/bin/codesign', ['--display', '--verbose=4', bundle], signal)).stderr; check();
@@ -231,4 +233,66 @@ export async function completeUninstall(options) {
     return immutable(current);
   } catch { throw Error('uninstall-recovery-required'); }
   finally { if (held) consumers.delete(held); }
+}
+
+// Host-only native consumer. Exact PM/token/idle authority and managed account readback belong to the caller.
+export async function completeMacUninstall(options, { run = runMacUpdateCommand } = {}) {
+  try {
+    record(options, ['app', 'background', 'directory', 'vault', 'journal', 'token', 'checkpoint', 'settle', 'logout', 'verifyLogout', 'shell'], ['signal']);
+    if (Object.getOwnPropertySymbols(options).length || Object.values(Object.getOwnPropertyDescriptors(options)).some(value => value.get || value.set)
+      || ['checkpoint', 'settle', 'logout', 'verifyLogout'].some(name => typeof options[name] !== 'function')
+      || typeof options.background?.unregister !== 'function' || typeof options.shell?.trashItem !== 'function'
+      || options.signal !== undefined && !(options.signal instanceof AbortSignal)) throw Error();
+    const { app, background, directory, vault, journal, token, checkpoint: activeCheckpoint, settle, logout, verifyLogout, shell } = options;
+    const signal = options.signal ?? new AbortController().signal, executable = process.execPath;
+    checkpoint(activeCheckpoint); signal.throwIfAborted();
+    if (app.isPackaged !== true || process.platform !== 'darwin' || process.arch !== 'arm64' || process.argv.includes('--background-helper')
+      || journal.read()?.phase !== 'logout-pending' || journal.owned(token) !== true) throw Error();
+    const root = lstatSync(directory, { bigint: true }), paths = bundlePaths(journal.read().plan.bundle), original = paths.map(path => lstatSync(path, { bigint: true }));
+    const trashItem = shell.trashItem.bind(shell), unregister = background.unregister.bind(background); let moved = false, trashing = false;
+    function check() {
+      checkpoint(activeCheckpoint); signal.throwIfAborted();
+      const current = lstatSync(directory, { bigint: true });
+      if (app.isPackaged !== true || process.execPath !== executable || process.platform !== 'darwin' || process.arch !== 'arm64' || process.argv.includes('--background-helper')
+        || realpathSync(directory) !== directory || !current.isDirectory() || current.isSymbolicLink() || current.uid !== BigInt(process.getuid())
+        || (current.mode & 0o777n) !== 0o700n || !['dev', 'ino', 'uid', 'mode'].every(key => root[key] === current[key])) throw Error();
+      if (!moved && !trashing && paths.some((path, index) => { const current = lstatSync(path, { bigint: true });
+        return !custodyKeys.every(key => current[key] === original[index][key]); })) throw Error();
+    }
+    function retained(saved) {
+      check(); const service = background.inspect();
+      canonicalJSON(service); record(service, ['qualified', 'status']);
+      if (service.qualified !== true || service.status !== 'not-registered'
+        || canonicalJSON(vault.connectionInventory()) !== canonicalJSON(saved.credentials.after)
+        || recordInventory(directory) !== saved.recordInventorySha256) throw Error();
+    }
+    function absent(bundle) { try { lstatSync(bundle); } catch (error) { if (error.code === 'ENOENT') return; throw error; } throw Error(); }
+    async function verify(intent, stage) {
+      check(); const saved = intent.plan;
+      if (moved) {
+        if (intent.phase !== 'trash-pending' || stage !== 'after') throw Error();
+        absent(saved.bundle); retained(saved); return true;
+      }
+      const afterCredentials = intent.phase === 'trash-pending' || intent.phase === 'credentials-pending' && stage === 'after';
+      const afterService = afterCredentials || intent.phase === 'credentials-pending' || intent.phase === 'service-pending' && stage === 'after';
+      if ((intent.phase !== 'logout-pending' || stage === 'after') && await verifyLogout(signal) !== true) throw Error(); check();
+      const current = await captureMacUninstallPlan({ app, background, directory, vault, checkpoint: check, signal }, { run }); check();
+      if (['bundle', 'identity', 'team', 'custody', 'recordInventorySha256'].some(key => canonicalJSON(current[key]) !== canonicalJSON(saved[key]))
+        || canonicalJSON(current.service) !== canonicalJSON(afterService ? { qualified: true, status: 'not-registered' } : saved.service)
+        || canonicalJSON(current.credentials.before) !== canonicalJSON(afterCredentials ? saved.credentials.after : saved.credentials.before)) throw Error();
+      return true;
+    }
+    // Interrupted effects require a separate explicit recovery consumer; this path never infers their completion.
+    return await completeUninstall({ journal, vault, token, checkpoint: check, settle,
+      async logout() { await verify(journal.read(), 'before'); check(); await logout(signal); check(); return await verifyLogout(signal) === true; },
+      async removeService() { await verify(journal.read(), 'before'); check(); await unregister(); check(); const service = background.inspect(); return service.qualified === true && service.status === 'not-registered'; },
+      async trash(saved) {
+        await verify(journal.read(), 'before'); check();
+        trashing = true;
+        try {
+          if (await trashItem(saved.bundle) !== undefined) throw Error(); check();
+          absent(saved.bundle); retained(saved); moved = true; return true;
+        } finally { trashing = false; }
+      }, verify });
+  } catch { throw Error('uninstall-recovery-required'); }
 }

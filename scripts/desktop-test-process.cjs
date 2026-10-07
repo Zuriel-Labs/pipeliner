@@ -55,7 +55,8 @@ exports.activate = function activate({ run = process.env.TEST_ARTIFACT_RUN, node
     || !/^\/Volumes\/TESTING\/TestArtifacts\/projects\/pipeliner\/issues\/54\/runs\/[A-Za-z0-9-]+$/.test(run)) throw Error('test-process-context-required');
   const manifest = () => JSON.parse(owned(path.join(run, 'manifest.json'), 65536));
   const initial = manifest(), chromium = initial.diagnostic_context?.route === 'quality-explicit-closed-groups-inventory-chromium';
-  const typedNegatives = initial.diagnostic_context?.route === 'quality-explicit-closed-groups-inventory-stable-context-rpc-native-failure-operands-typed-negatives-v3';
+  const initialKnownClosure = initial.diagnostic_context?.route === 'quality-explicit-closed-groups-inventory-stable-context-rpc-native-failure-operands-typed-negatives-v3-initial-known-closure';
+  const typedNegatives = initialKnownClosure || initial.diagnostic_context?.route === 'quality-explicit-closed-groups-inventory-stable-context-rpc-native-failure-operands-typed-negatives-v3';
   const negativeHome = "/Users/chris/.local/share/eaglepro-test-storage-candidates/pipeliner-54-typed-negatives-d35dfab36c87d67f";
   const negativeRecipeHash = "0527b96423bc6d60b5329d16f28884d73362f751a81bd2cfbebbeed145997455";
   const negativeRecord = initial.negative_fixture_rpc;
@@ -76,6 +77,24 @@ exports.activate = function activate({ run = process.env.TEST_ARTIFACT_RUN, node
     || negativeRecord.context_client_path !== negativeHome + '/context-read-diagnostic.py' || negativeRecord.context_client_sha256 !== negativePins[negativeRecord.context_client_path]
     || negativeRecord.publication_path !== negativeHome + '/receipt-publication.py' || negativeRecord.publication_sha256 !== negativePins[negativeRecord.publication_path]
     || negativeRecord.recipe_sha256 !== negativeRecipeHash || negativeRecord.paired_original_rpc !== true)) throw Error('test-process-negative-fixture-unverified');
+  const initialKnownPins = initialKnownClosure ? {
+    ["/Users/chris/.local/share/eaglepro-test-storage-candidates/pipeliner-54-initial-known-closure-4ea53cc55f05ecec/entry.py"]: "4ea53cc55f05ecec0a89cd3cbe8507a56d3c035536940df44efda02f6132ef59",
+    ["/Users/chris/.local/share/eaglepro-test-storage-candidates/pipeliner-54-initial-known-closure-4ea53cc55f05ecec/closure.py"]: "48c1e3d409895c2e9b4713136ab6cfa1affbb800afaba5f3ef4d543a8c0b6007",
+  } : {};
+  if (initialKnownClosure && (initial.initial_known_closure_contract?.version !== 1
+    || initial.initial_known_closure_contract.source_path !== "/Users/chris/.local/share/eaglepro-test-storage-candidates/pipeliner-54-initial-known-closure-4ea53cc55f05ecec/entry.py"
+    || initial.initial_known_closure_contract.source_sha256 !== "4ea53cc55f05ecec0a89cd3cbe8507a56d3c035536940df44efda02f6132ef59"
+    || initial.initial_known_closure_contract.closure_path !== "/Users/chris/.local/share/eaglepro-test-storage-candidates/pipeliner-54-initial-known-closure-4ea53cc55f05ecec/closure.py"
+    || initial.initial_known_closure_contract.closure_sha256 !== "48c1e3d409895c2e9b4713136ab6cfa1affbb800afaba5f3ef4d543a8c0b6007"
+    || initial.initial_known_closure_contract.original_group_source_sha256 !== pins[home + '/groups.py']
+    || initial.initial_known_closure_contract.earlier_native_pin_required !== true
+    || initial.initial_known_closure_contract.unknown_exit_refusal_unchanged !== true
+    || initial.initial_known_closure_contract.maximum_refresh_count !== 1
+    || initial.initial_known_closure_contract.maximum_closure_seconds !== 1
+    || initial.initial_known_closure_contract.maximum_pause_seconds !== 12
+    || initial.initial_known_closure_contract.only_initial_captured_view !== true
+    || initial.initial_known_closure_contract.activated_by_default !== false
+    || hash(owned("/Users/chris/.local/bin/test-artifacts-pipeliner54-initial-known-4ea53cc55f05ecec")) !== "83c797becac12016b8c0a895ac2dd6c873afa6f7be4c33b63a3d4bedaacd2598")) throw Error('test-process-initial-closure-unverified');
   const nativeDiagnostic = typedNegatives || initial.diagnostic_context?.route === 'quality-explicit-closed-groups-inventory-stable-context-rpc-native-failure-operands';
   const diagnosticPath = path.join(path.dirname(contextHome), 'pipeliner-54-context-native-diagnostic-6a806b00dd6e5038', 'entry.py');
   const diagnosticHash = '6a806b00dd6e50386cec25ecdb94866be684ea16a8d865c4ed60c2c473e48e86';
@@ -85,12 +104,12 @@ exports.activate = function activate({ run = process.env.TEST_ARTIFACT_RUN, node
     [chromiumHome + '/chromium_singleton.py']: 'ca4cf859353eb6889a58c36ba1d478aa9544a9f7ac9d1e3a9c2e6b4ee28ec10d',
   } : { '/Users/chris/.local/share/eaglepro-test-storage/storage.py': 'e4a75d6c2ff4ca1cd1135da2bba1a3e72b649127ab29c2a9aef1dc161b9426d6' }),
     ...(contextRpc ? { [contextEntry]: '450ff384b4807c618df4d2ca051522e8265daf23fac22753e229897f18cdcb4a' } : {}),
-    ...(nativeDiagnostic ? { [diagnosticPath]: diagnosticHash } : {}), ...negativePins };
+    ...(nativeDiagnostic ? { [diagnosticPath]: diagnosticHash } : {}), ...negativePins, ...initialKnownPins };
   function verify() {
     const value = manifest();
     if (value.status !== 'running' || value.managed_by !== 'eaglepro-test-storage' || value.project !== 'pipeliner' || value.issue !== '54'
       || value.owner_uid !== process.getuid() || value.run_path !== run || value.volume_uuid !== '3F381C66-C7CC-4F8F-B3BE-E46151ACF674'
-      || value.diagnostic_context?.route !== 'quality-explicit-closed-groups-inventory-' + (chromium ? 'chromium' : 'stable') + (contextRpc ? '-context-rpc' : '') + (nativeDiagnostic ? '-native-failure-operands' : '') + (typedNegatives ? '-typed-negatives-v3' : '')
+      || value.diagnostic_context?.route !== 'quality-explicit-closed-groups-inventory-' + (chromium ? 'chromium' : 'stable') + (contextRpc ? '-context-rpc' : '') + (nativeDiagnostic ? '-native-failure-operands' : '') + (typedNegatives ? '-typed-negatives-v3' : '') + (initialKnownClosure ? '-initial-known-closure' : '')
       || value.quality_groups?.version !== 1 || Object.keys(value.diagnostic_context.source_sha256).length !== Object.keys(expected).length
       || (contextRpc && (value.quality_context_rpc?.version !== 1 || value.quality_context_rpc.repo !== root
         || value.quality_context_rpc.source_path !== contextEntry || value.quality_context_rpc.source_sha256 !== expected[contextEntry]

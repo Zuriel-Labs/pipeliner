@@ -10,9 +10,20 @@ export function runMacUpdateCommand(file, args, signal, input) {
   if (input !== undefined && (typeof input !== 'string' || Buffer.byteLength(input) > 32768)) throw Error('update-native-trust-unverified');
   const env = { PATH: '/usr/bin:/bin', LC_ALL: 'C', ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}) };
   return new Promise((resolve, reject) => {
-    let inputFailed = false;
+    let inputFailed = false, closed = false, output;
+    function finish() {
+      if (!closed || !output) return;
+      const { error, stdout, stderr } = output;
+      if (!error && !inputFailed && !signal.aborted) { resolve({ stdout, stderr }); return; }
+      const failure = Error('update-native-trust-unverified');
+      if (!inputFailed && !signal.aborted && Number.isInteger(error?.code) && error.code > 0 && error.code <= 255
+        && error.killed === false && error.signal === null && child.killed === false && child.signalCode === null
+        && child.exitCode === error.code) Object.defineProperty(failure, 'nativeExitCode', { value: error.code });
+      reject(failure);
+    }
     const child = execFile(file, args, { env, signal, killSignal: 'SIGKILL', timeout: 15000, maxBuffer: 32768 },
-      (error, stdout, stderr) => error || inputFailed ? reject(Error('update-native-trust-unverified')) : resolve({ stdout, stderr }));
+      (error, stdout, stderr) => { output = { error, stdout, stderr }; finish(); });
+    child.once('close', () => { closed = true; finish(); });
     child.stdin.on('error', () => { inputFailed = true; child.kill('SIGKILL'); }); child.stdin.end(input);
   });
 }

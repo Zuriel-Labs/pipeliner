@@ -26,12 +26,16 @@ const started = performance.now(), controller = new AbortController(), clock = (
 const abort = () => controller.abort(), timer = setTimeout(abort, 120000);
 process.once('SIGTERM', abort); process.once('SIGINT', abort);
 const counts = { created: 0, attached: 0, readonly: 0, signatureRefused: 0, detached: 0, consumed: 0 };
-let owner, vault, history, clean = false, result, failure;
+let owner, vault, history, clean = false, result, failure, signatureExitCode;
 const same = (a, b) => ['dev', 'ino', 'uid', 'mode'].every(key => a[key] === b[key]);
 async function native(command, args, signal, input) {
   let output;
   try { output = await runMacUpdateCommand(command, args, signal, input); }
-  catch (error) { if (command === '/usr/bin/codesign' && args.includes('--verify')) counts.signatureRefused++; throw error; }
+  catch (error) {
+    if (command === '/usr/bin/codesign' && args.includes('--verify') && Number.isInteger(error.nativeExitCode)
+      && error.nativeExitCode > 0 && error.nativeExitCode <= 255) { counts.signatureRefused++; signatureExitCode = error.nativeExitCode; }
+    throw error;
+  }
   if (command === '/usr/bin/hdiutil' && args[0] === 'create') counts.created++;
   if (command === '/usr/bin/hdiutil' && args[0] === 'attach') counts.attached++;
   if (command === '/usr/bin/hdiutil' && args[0] === 'detach') counts.detached++;
@@ -103,6 +107,7 @@ try {
   assert.equal(createHash('sha256').update(await readFile(file)).digest('hex'), sha256);
   assert.deepEqual(await readdir(directory), [file.split('/').at(-1)]); await imagesAbsent();
   clean = true; result = { kind: 'pipeliner-native-update-image-refusal', schemaVersion: 1, counts,
+    signatureExitCode,
     imageBytes: bytes.length, imageSha256: sha256, elapsedMs: Math.round(performance.now() - started),
     syntheticPublisher: true, syntheticOSWrapping: true, fixtureExecutableNeverRun: true,
     developerIdAcceptance: 'not-run', internalNativeScratch: 'unverified' };

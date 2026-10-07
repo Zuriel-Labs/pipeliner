@@ -9,11 +9,13 @@ import { openTestVault } from '../connections/test-vault.mjs';
 import { verifyProtectedBackup } from '../privacy/backup.mjs';
 import { openWorkspaceStore } from './store.mjs';
 import { legacyWorkspace } from './legacy-fixture.mjs';
+import testStorage from '../test-storage.cjs';
 
 async function fixture(t) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-54-protected-workspace-'))), vault = await openTestVault(root);
-  t.after(() => { vault.close(); rmSync(root, { recursive: true }); assert.equal(existsSync(root), false); });
-  return { root, vault };
+  const f = { root, vault, lease:null };
+  t.after(() => { f.lease?.closing(); vault.close(); rmSync(root, { recursive: true }); assert.equal(existsSync(root), false); f.lease?.release(); });
+  return f;
 }
 const workspace = (root, id = 'first') => ({ id, repositoryId: 'R_' + id, slug: 'fixture/' + id, localKey: '1:2', path: root, project: { id: 'P1' }, name: 'Private workspace marker' });
 test('sensitive workspace storage refuses missing or closed protection before creating a file', async t => {
@@ -62,9 +64,11 @@ test('historical compatible snapshots become verified encrypted originals; linke
   const backups = readdirSync(f.root).filter(name => name.endsWith('.pipeliner-backup'));
   assert.equal(backups.length, 2); for (const name of backups) assert.equal(verifyProtectedBackup(join(f.root, name), { vault: f.vault, store: 'workspaces', version: 3 }).sourceHash, hash);
   // A hard-linked legacy snapshot is never adopted or removed.
-  writeFileSync(snapshot, 'Private linked marker', { mode: 0o600 }); const alias = join(f.root, 'neighbor'); linkSync(snapshot, alias);
+  writeFileSync(snapshot, 'Private linked marker', { mode: 0o600 }); const alias = join(f.root, 'neighbor');
+  if (process.env.TEST_ARTIFACT_RUN) f.lease = testStorage.negativeFixtureLease({ kind:'workspace', root:f.root }, import.meta.url);
+  linkSync(snapshot, alias); f.lease?.confirm();
   assert.throws(() => openWorkspaceStore(f.root, { vault: f.vault }), /backup-recovery-required/);
-  assert.equal(readFileSync(snapshot, 'utf8'), 'Private linked marker'); assert.equal(readFileSync(alias, 'utf8'), 'Private linked marker'); unlinkSync(alias);
+  assert.equal(readFileSync(snapshot, 'utf8'), 'Private linked marker'); assert.equal(readFileSync(alias, 'utf8'), 'Private linked marker'); f.lease?.closing(); unlinkSync(alias); f.lease?.release(); f.lease = null;
 });
 test('corrupt legacy workspace migration preserves the original schema and verified encrypted backup', async t => {
   const f = await fixture(t); legacyWorkspace(f.root, 4, { workspaces: [workspace(f.root)] });

@@ -8,6 +8,7 @@ import { openVault } from '../connections/vault.mjs';
 import { createRecordCodec } from './records.mjs';
 import { createProtectedBackup, verifyProtectedBackup } from './backup.mjs';
 import { migrateProtectedStore, finishProtectedMigration } from './migration.mjs';
+import testStorage from '../test-storage.cjs';
 
 const wrapping = { available: async () => true, encrypt: async text => Buffer.from(text.split('').reverse().join('')),
   decrypt: async bytes => ({ result: bytes.toString().split('').reverse().join(''), shouldReEncrypt: false }) };
@@ -97,17 +98,18 @@ test('failed sealing removes only the newly created archive and preserves legacy
   } finally { db.close(); f.close(); }
 });
 test('backup refuses aliases, hard links, live sidecars and missing protection without replacing any data', async () => {
-  const f = await fixture(), { source, db } = database(f);
+  const f = await fixture(), { source, db } = database(f); let lease;
   try {
     const before = readFileSync(source);
     assert.throws(() => createProtectedBackup(source, { vault: null, store: 'workspaces', version: 4 }), /protected-backup/);
-    symlinkSync(source, join(f.root, 'alias.sqlite')); assert.throws(() => createProtectedBackup(join(f.root, 'alias.sqlite'), { vault: f.vault, store: 'alias', version: 4 }), /protected-backup/);
+    if (process.env.TEST_ARTIFACT_RUN) lease = testStorage.negativeFixtureLease({ kind:'pipeliner-54-sqlite-negative-v2', root:f.root }, import.meta.url);
+    symlinkSync(source, join(f.root, 'alias.sqlite')); lease?.aliasReady(); assert.throws(() => createProtectedBackup(join(f.root, 'alias.sqlite'), { vault: f.vault, store: 'alias', version: 4 }), /protected-backup/);
     writeFileSync(source + '-wal', 'synthetic live sidecar', { mode: 0o600 });
     assert.throws(() => createProtectedBackup(source, { vault: f.vault, store: 'workspaces', version: 4 }), /protected-backup/);
-    rmSync(source + '-wal'); linkSync(source, join(f.root, 'linked.sqlite'));
+    rmSync(source + '-wal'); lease?.prepareHardlink(); linkSync(source, join(f.root, 'linked.sqlite')); lease?.hardlinkReady();
     assert.throws(() => createProtectedBackup(source, { vault: f.vault, store: 'workspaces', version: 4 }), /protected-backup/);
     assert.deepEqual(readFileSync(source), before); assert.equal(readdirSync(f.root).some(name => name.endsWith('.pipeliner-backup')), false);
-  } finally { db.close(); f.close(); }
+  } finally { lease?.closing(); db.close(); f.close(); lease?.release(); }
 });
 test('protected migration commits preserved data, a sealed compatible original and verified compaction together', async () => {
   const f = await fixture(), { source, db } = database(f);

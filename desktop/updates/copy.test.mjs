@@ -16,6 +16,7 @@ import { openDevelopmentStore } from '../development/state.mjs';
 import { openArtifactStore } from '../delivery/artifacts.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { dataCompatibilityForBuild } from '../package/build.mjs';
+import testStorage from '../test-storage.cjs';
 
 async function checkCopy(unsafe, journaled = false, replacement = null, recovery = null) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'pipeliner-54-update-copy-'))), directory = join(root, 'updates');
@@ -42,7 +43,7 @@ async function checkCopy(unsafe, journaled = false, replacement = null, recovery
   const release = { kind: 'pipeliner-desktop-update', schemaVersion: 1, source: trust.id, ...current, version: to.version, sequence: 1,
     issuedAt: 900, expiresAt: 2000, url: trust.origin + trust.path + 'Pipeliner.dmg', bytes: bytes.length,
     sha256: createHash('sha256').update(bytes).digest('hex'), sourceCommit: to.sourceCommit, gitTree: to.gitTree };
-  let mode, mount, attached, copied, detached, authorized, controller, destination, vault, history, journal, journalToken, workspaces, development, artifacts, db, custodyFailure, exchanges = 0;
+  let mode, mount, attached, copied, detached, authorized, controller, destination, vault, history, journal, journalToken, workspaces, development, artifacts, db, custodyFailure, lease, exchanges = 0;
   const quarantine = '0081;00000000;PipelinerSynthetic54;';
   const entities = () => [{ 'dev-entry': '/dev/disk999' }, { 'dev-entry': '/dev/disk999s1', 'mount-point': mount }];
   const run = async (command, args, signal, input) => {
@@ -56,15 +57,18 @@ async function checkCopy(unsafe, journaled = false, replacement = null, recovery
         const framework = join(bundle, 'Contents/Frameworks/Synthetic.framework/Versions/A'); await mkdir(framework, { recursive: true, mode: 0o700 });
         await writeFile(join(framework, 'Synthetic'), 'Synthetic framework bytes', { mode: 0o600 });
         await symlink('A', join(framework, '../Current'));
+        if (process.env.TEST_ARTIFACT_RUN && ['external-link', 'hardlink'].includes(mode))
+          lease = testStorage.negativeFixtureLease({ kind:'pipeliner-54-update-copy-negative-v1', root, mount, variant:mode }, import.meta.url);
         if (mode === 'external-link') await symlink(installed, join(bundle, 'outside'));
         if (mode === 'hardlink') await link(join(framework, 'Synthetic'), join(framework, 'linked'));
+        lease?.confirm();
         await runMacUpdateCommand('/usr/bin/xattr', ['-w', 'com.apple.quarantine', quarantine, bundle], signal);
         return { stdout: JSON.stringify({ 'system-entities': entities() }), stderr: '' };
       }
       assert.deepEqual(args, ['detach', '/dev/disk999']); assert.equal(signal.aborted, false);
       if (mode === 'detach') throw Error('Synthetic detach refusal');
       if (mode === 'detach-tamper') await writeFile(join(destination, 'Contents/Resources/pipeliner-build.json'), canonicalJSON({ ...to, gitTree: 'd'.repeat(40) }) + '\n');
-      await rm(join(mount, 'Pipeliner.app'), { recursive: true }); attached = false; detached++;
+      lease?.closing(); await rm(join(mount, 'Pipeliner.app'), { recursive: true }); lease?.release(); lease = undefined; attached = false; detached++;
       return { stdout: '', stderr: '' };
     }
     if (command === '/usr/sbin/diskutil') return { stdout: JSON.stringify({ DeviceNode: '/dev/disk999s1', MountPoint: mount,
@@ -337,7 +341,7 @@ async function checkCopy(unsafe, journaled = false, replacement = null, recovery
     await assert.rejects(invoke('detach'), /^Error: update-bundle-copy-recovery-required$/);
     assert.equal(attached, true); assert((await readdir(directory)).some(name => name.startsWith('candidate-')));
     assert.deepEqual(await readFile(file), bytes); assert.deepEqual(JSON.parse(await readFile(join(installed, 'Contents/Resources/pipeliner-build.json'), 'utf8')), from);
-  } finally { custodyFailure?.mock.restore(); db?.close(); journal?.close(); await artifacts?.close(); development?.close(); workspaces?.close(); history?.close(); vault?.close(); await rm(root, { recursive: true }); await assert.rejects(lstat(root), error => error.code === 'ENOENT'); }
+  } finally { lease?.closing(); custodyFailure?.mock.restore(); db?.close(); journal?.close(); await artifacts?.close(); development?.close(); workspaces?.close(); history?.close(); vault?.close(); await rm(root, { recursive: true }); await assert.rejects(lstat(root), error => error.code === 'ENOENT'); lease?.release(); }
 }
 test('verified image copying preserves native metadata and links, rejects stale trust and returns only after detach', () => checkCopy(false));
 test('copy tree guards refuse absolute external aliases and hard-linked files before native copying', () => checkCopy(true));

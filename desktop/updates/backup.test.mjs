@@ -11,12 +11,13 @@ import { openArtifactStore } from '../delivery/artifacts.mjs';
 import { verifyProtectedBackup, materializeProtectedBackup } from '../privacy/backup.mjs';
 import { captureUpdateBackups } from './backup.mjs';
 import { openUpdateMaintenance } from './maintenance.mjs';
+import testStorage from '../test-storage.cjs';
 
 test('update capture seals current compatible stores under real read locks and preserves authority on refusal', async () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-54-update-backup-')));
   const build = { kind: 'pipeliner-desktop-build', schemaVersion: 1, sourceCommit: 'a'.repeat(40), gitTree: 'b'.repeat(40),
     version: '0.1.0', platform: 'darwin', architecture: 'arm64' };
-  const stores = ['workspaces', 'development', 'artifacts']; let vault, workspaces, development, artifacts, writer, journal;
+  const stores = ['workspaces', 'development', 'artifacts']; let vault, workspaces, development, artifacts, writer, journal, lease;
   try {
     // Authenticated installation encryption is real; only the OS wrapping of its key is synthetic.
     vault = await openVault(root, { available: async () => true, encrypt: async text => Buffer.from(text),
@@ -107,9 +108,11 @@ test('update capture seals current compatible stores under real read locks and p
     assert.throws(() => captureUpdateBackups({ directory: root, vault, build: { ...build, architecture: 'x64' }, checkpoint() {} }));
     assert.throws(() => captureUpdateBackups({ directory: root, vault, build, checkpoint() { throw Error('stale admission'); } }));
     assert.equal(archives().length, 3); assert.deepEqual(readFileSync(authority), bytes);
-    const sidecar = join(root, 'workspaces.sqlite-journal'); symlinkSync(join(root, 'absent'), sidecar);
+    const sidecar = join(root, 'workspaces.sqlite-journal');
+    if (process.env.TEST_ARTIFACT_RUN) lease = testStorage.negativeFixtureLease({ kind:'backup', root }, import.meta.url);
+    symlinkSync(join(root, 'absent'), sidecar); lease?.aliasReady();
     assert.throws(() => captureUpdateBackups({ directory: root, vault, build, checkpoint() {} }));
-    assert.equal(archives().length, 3); unlinkSync(sidecar);
+    assert.equal(archives().length, 3); lease?.closing(); unlinkSync(sidecar); lease?.release(); lease = undefined;
     // Non-SQLite mutation by the owning account is detected, preserved, and never accepted as a capture.
     const source = join(root, 'workspaces.sqlite'), beforeMutation = readFileSync(source); let mutated = false;
     assert.throws(() => captureUpdateBackups({ directory: root, vault, build, checkpoint() {
@@ -125,7 +128,8 @@ test('update capture seals current compatible stores under real read locks and p
     assert.equal(archives().length, 4); writer.exec('BEGIN EXCLUSIVE; ROLLBACK;');
     for (const store of stores) assert.deepEqual(readFileSync(join(root, store + '.sqlite')), beforeLate[store]);
   } finally {
+    lease?.closing();
     journal?.close(); writer?.close(); await artifacts?.close(); development?.close(); workspaces?.close(); vault?.close();
-    rmSync(root, { recursive: true }); assert.equal(existsSync(root), false);
+    rmSync(root, { recursive: true }); assert.equal(existsSync(root), false); lease?.release();
   }
 });

@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { createConfigurationExport } from './model.mjs';
 import { writeExportFile, readConfigurationFile } from './files.mjs';
+import testStorage from '../test-storage.cjs';
 
 const configuration = () => createConfigurationExport({ scope: 'repository', target: 'first', revision: 1, hash: 'a'.repeat(64), settings: { 'privacy.logDays': 12 } }, 1000);
 const fixture = () => realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-privacy-files-')));
@@ -24,16 +25,20 @@ test('exclusive local export reads back exact bytes, private mode and scoped con
 });
 test('aliases, linked input and app-managed destinations are denied while preserving existing contents', async () => {
   const root = fixture(), path = join(root, 'original.json');
+  let lease, directoryLease;
   try {
-    await writeExportFile(path, configuration()); symlinkSync(path, join(root, 'alias.json')); linkSync(path, join(root, 'linked.json'));
+    await writeExportFile(path, configuration());
+    if (process.env.TEST_ARTIFACT_RUN) lease = testStorage.negativeFixtureLease({ kind:'privacy-files', root }, import.meta.url);
+    symlinkSync(path, join(root, 'alias.json')); linkSync(path, join(root, 'linked.json')); lease?.confirm();
     for (const name of ['alias.json', 'linked.json']) await assert.rejects(readConfigurationFile(join(root, name), { scope: 'repository', target: 'first' }), /Privacy import/);
     await assert.rejects(writeExportFile(join(root, 'alias.json'), configuration()), /Privacy export/);
     mkdirSync(join(root, 'managed'), { mode: 0o700 });
     await assert.rejects(writeExportFile(join(root, 'managed', 'new.json'), configuration(), { protectedPaths: [join(root, 'managed')] }), /Privacy export/);
-    symlinkSync(join(root, 'managed'), join(root, 'directory-alias'));
+    if (process.env.TEST_ARTIFACT_RUN) directoryLease = testStorage.negativeFixtureLease({ kind:'privacy-directory', root }, import.meta.url);
+    symlinkSync(join(root, 'managed'), join(root, 'directory-alias')); directoryLease?.aliasReady();
     await assert.rejects(writeExportFile(join(root, 'directory-alias', 'new.json'), configuration()), /Privacy export/);
     assert.equal(existsSync(join(root, 'managed', 'new.json')), false); assert.deepEqual(JSON.parse(readFileSync(path)), configuration());
-  } finally { cleanup(root); }
+  } finally { lease?.closing(); directoryLease?.closing(); cleanup(root); lease?.release(); directoryLease?.release(); }
 });
 test('malformed, oversized or raw diagnostic content cannot create an export or enter restore', async () => {
   const root = fixture(), path = join(root, 'invalid.json');

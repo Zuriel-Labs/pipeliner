@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { writeLeasedRestore } from './desktop-macos-restore.mjs';
+import testStorage from '../desktop/test-storage.cjs';
 
 test('Mac qualification refuses foreign ownership and aliases without deleting their contents', { skip: process.platform !== 'darwin' || process.arch !== 'arm64' }, () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-54-macos-worker-'))), alias = root + '-alias';
@@ -15,17 +16,19 @@ test('Mac qualification refuses foreign ownership and aliases without deleting t
   const marker = join(root, 'preserve.txt'); writeFileSync(marker, 'unrelated synthetic content', { mode: 0o600 });
   const ownership = { root, issue:54, owner:'other-owner', bytes:26637307067, sha256:'2f016638293c3e641b8b25391a76fbc16563b3711915a5551cf8aa0f5598a5c1' };
   const invoke = path => spawnSync(process.execPath, [fileURLToPath(new URL('./desktop-macos-vm.mjs', import.meta.url)), '--owned-root', path], { encoding:'utf8', timeout:10000 });
+  let lease;
   try {
     writeFileSync(join(root,'ownership.json'), JSON.stringify(ownership), { mode:0o600 });
     const foreign = invoke(root);
     assert.equal(foreign.status,1); assert.match(foreign.stderr,/macos-vm-root-unverified/);
     assert.equal(readFileSync(marker,'utf8'),'unrelated synthetic content');
     writeFileSync(join(root,'ownership.json'), JSON.stringify({ ...ownership, owner:'brimdor' }));
-    symlinkSync(root,alias);
+    if (process.env.TEST_ARTIFACT_RUN) lease = testStorage.negativeFixtureLease({ kind:'vm-root', root }, import.meta.url);
+    symlinkSync(root,alias); lease?.aliasReady();
     const linked = invoke(alias);
     assert.equal(linked.status,1); assert.match(linked.stderr,/macos-vm-root-unverified/);
     assert.equal(readFileSync(marker,'utf8'),'unrelated synthetic content'); assert.equal(existsSync(alias),true);
-  } finally { rmSync(alias,{force:true}); rmSync(root,{recursive:true}); }
+  } finally { lease?.closing(); rmSync(alias,{force:true}); rmSync(root,{recursive:true}); lease?.release(); }
 });
 
 test('Ungated legacy VM setup preserves its supplied root and neighboring data', { skip: process.platform !== 'darwin' || process.arch !== 'arm64' }, () => {

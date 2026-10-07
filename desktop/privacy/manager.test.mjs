@@ -10,6 +10,7 @@ import { openPrivacyStore } from './store.mjs';
 import { createPrivacyManager } from './manager.mjs';
 import { privacyCommand } from './commands.mjs';
 import { createPrivacyControlChannel } from '../core/control.mjs';
+import testStorage from '../test-storage.cjs';
 
 async function fixture({ managedInventory, artifactSummary, recoverySummary } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-privacy-manager-')));
@@ -107,19 +108,21 @@ test('native selection cancellation or context drift creates no export and no re
 });
 test('restore reports linked-file denial and rejects bytes changed after its exact preview', async () => {
   const f = await fixture(), path = join(f.root, 'export.json'), alias = join(f.root, 'alias.json');
+  let lease;
   try {
     await f.manager.dispatch({ operation: 'prepare', changes: { 'privacy.logDays': 17 } }); await f.manager.dispatch({ operation: 'apply' });
     await f.manager.dispatch({ operation: 'export', kind: 'configuration' }); await f.manager.dispatch({ operation: 'apply' });
     await f.manager.dispatch({ operation: 'prepare', changes: { 'privacy.logDays': 19 } }); await f.manager.dispatch({ operation: 'apply' });
     const original = readFileSync(path), revision = f.policy.worker.read('first').revision;
-    linkSync(path, alias); await assert.rejects(f.manager.dispatch({ operation: 'import' }), /another hard link/);
+    if (process.env.TEST_ARTIFACT_RUN) lease = testStorage.negativeFixtureLease({ kind:'privacy-manager', root:f.root }, import.meta.url);
+    linkSync(path, alias); lease?.confirm(); await assert.rejects(f.manager.dispatch({ operation: 'import' }), /another hard link/);
     assert.equal(f.manager.status().errorCode, 'PRIVACY_IMPORT_LINKS'); assert.equal(f.manager.status().preview, null);
     assert.equal(f.policy.worker.read('first').revision, revision); assert.deepEqual(readFileSync(path), original);
-    unlinkSync(alias); await f.manager.dispatch({ operation: 'import' }); const preview = f.manager.status().preview;
+    lease?.closing(); unlinkSync(alias); lease?.release(); lease = undefined; await f.manager.dispatch({ operation: 'import' }); const preview = f.manager.status().preview;
     assert.equal(f.manager.status().errorCode, null); writeFileSync(path, original.toString().replace('17', '18'));
     await assert.rejects(f.manager.dispatch({ operation: 'apply', hash: preview.hash }), /Privacy import failed/);
     assert.equal(f.policy.worker.read('first').revision, revision); assert.equal(f.policy.worker.read('first').values['privacy.logDays'].value, 19);
-  } finally { await f.close(); }
+  } finally { lease?.closing(); await f.close(); lease?.release(); }
 });
 test('old host-issued conversation tokens save only their original scope and stored approval text grants no authority', async () => {
   const f = await fixture();

@@ -9,6 +9,7 @@ import { openTestVault } from '../connections/test-vault.mjs';
 import { openArtifactStore } from './artifacts.mjs';
 import { createRecordCodec } from '../privacy/records.mjs';
 import { verifyProtectedBackup } from '../privacy/backup.mjs';
+import testStorage from '../test-storage.cjs';
 
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 async function fixture() {
@@ -62,15 +63,17 @@ test('retention preserves latest, pins, active and recovery artifacts; exact PM 
   } finally { await f.close(); }
 });
 test('quota and hostile sources reject before artifact allocation; warning counts actual ciphertext and metadata', async () => {
-  const f = await fixture();
+  const f = await fixture(); let lease;
   try {
     f.limit({ warningBytes: 1, capacityBytes: 80 * 1024 }); const input = f.make('large', Buffer.alloc(100 * 1024, 7));
     await assert.rejects(f.store.capture(input), /capacity/); assert.deepEqual(readdirSync(join(f.root, 'artifacts')), []);
-    f.limit({ capacityBytes: 8 * 1024 ** 2 }); const link = f.make('link'); rmSync(join(f.source, link.manifest.name)); symlinkSync(join(f.source, 'large.dmg'), join(f.source, link.manifest.name));
+    f.limit({ capacityBytes: 8 * 1024 ** 2 }); const link = f.make('link'); rmSync(join(f.source, link.manifest.name));
+    if (process.env.TEST_ARTIFACT_RUN) lease = testStorage.negativeFixtureLease({ kind: 'artifacts', root: f.source }, import.meta.url);
+    symlinkSync(join(f.source, 'large.dmg'), join(f.source, link.manifest.name)); lease?.aliasReady();
     await assert.rejects(f.store.capture(link)); assert.equal(f.store.inventory('repo_one').items.length, 0);
     const receipt = await f.store.capture(f.make('small')); const view = f.store.inventory('repo_one'); assert.equal(view.warning, true); assert.ok(view.usedBytes > receipt.manifest.bytes);
     assert.throws(() => f.store.prepare('repo_two', { action: 'pin', id: receipt.id }));
-  } finally { await f.close(); }
+  } finally { lease?.closing(); await f.close(); lease?.release(); }
 });
 test('tampered bytes and authenticated metadata fail closed without deleting unrelated files', async () => {
   const f = await fixture();

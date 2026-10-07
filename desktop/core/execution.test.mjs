@@ -9,6 +9,7 @@ import { restrictedWorkerArgs, workerVMConfiguration } from './worker.mjs';
 import { createExecutionControlChannel } from './control.mjs';
 import { guardForegroundClose } from './control.mjs';
 import { EventEmitter } from 'node:events';
+import testStorage from '../test-storage.cjs';
 
 test('exclusive execution owner survives contention and releases after a real process crash', async () => {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-execution-test-')));
@@ -77,10 +78,13 @@ test('restricted worker parameters bind ownership and enforce finite guest-only 
 
 test('execution ownership rejects linked storage and does not overwrite its target', () => {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-execution-test-')));
+  let lease;
   try {
     const target = join(directory, 'protected'); writeFileSync(target, 'unchanged', { mode: 0o600 });
+    if (process.env.TEST_ARTIFACT_RUN) lease = testStorage.negativeFixtureLease({ kind: 'execution', root: directory }, import.meta.url);
     symlinkSync(target, join(directory, 'owner.sqlite'));
+    lease?.aliasReady();
     assert.throws(() => acquireExecutionOwner(directory), /Invalid protected file/);
     assert.equal(execFileSync(process.execPath, ['-e', 'process.stdout.write(require("node:fs").readFileSync(process.argv[1]))', target], { encoding: 'utf8' }), 'unchanged');
-  } finally { rmSync(directory, { recursive: true }); assert.equal(existsSync(directory), false); }
+  } finally { lease?.closing(); rmSync(directory, { recursive: true }); assert.equal(existsSync(directory), false); lease?.release(); }
 });

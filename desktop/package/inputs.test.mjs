@@ -7,6 +7,7 @@ import { posix } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { runtimeInputs, readPackageInput, packagedCodexPath } from './inputs.mjs';
+import testStorage from '../test-storage.cjs';
 
 test('Packaged host modules contain their complete repository-owned static import closure',async()=>{
   const root=fileURLToPath(new URL('../../',import.meta.url));
@@ -32,18 +33,23 @@ test('Package selection requires its runtime entry and excludes roadmap, fixture
 
 test('Package input reads refuse linked and altered source while preserving neighboring data', async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(),'pipeliner-54-package-input-')));
+  let lease;
   try {
     await mkdir(join(root,'desktop')); await mkdir(join(root,'desktop/app'));
     const file = join(root,'desktop/app/main.cjs'), neighbor = join(root,'preserve');
     await writeFile(file,'reviewed bytes'); await writeFile(neighbor,'synthetic unrelated bytes');
     assert.equal((await readPackageInput(root,'desktop/app/main.cjs',Buffer.from('reviewed bytes'))).toString(),'reviewed bytes');
     await assert.rejects(readPackageInput(root,'desktop/app/main.cjs',Buffer.from('other candidate')),/package-input/);
-    await rm(file); await symlink(neighbor,file);
+    await rm(file);
+    if (process.env.TEST_ARTIFACT_RUN) lease = testStorage.negativeFixtureLease({ kind:'package-file', root }, import.meta.url);
+    await symlink(neighbor,file); lease?.aliasReady();
     await assert.rejects(readPackageInput(root,'desktop/app/main.cjs',Buffer.from('synthetic unrelated bytes')),/package-input/);
-    await rm(file); await rm(join(root,'desktop/app'),{recursive:true}); await symlink(root,join(root,'desktop/app'));
+    lease?.closing(); await rm(file); lease?.release(); lease = undefined; await rm(join(root,'desktop/app'),{recursive:true});
+    if (process.env.TEST_ARTIFACT_RUN) lease = testStorage.negativeFixtureLease({ kind:'package-parent', root }, import.meta.url);
+    await symlink(root,join(root,'desktop/app')); lease?.aliasReady();
     await assert.rejects(readPackageInput(root,'desktop/app/preserve',Buffer.from('synthetic unrelated bytes')),/package-input/);
     assert.equal(await readFile(neighbor,'utf8'),'synthetic unrelated bytes');
-  } finally { await rm(root,{recursive:true}); }
+  } finally { lease?.closing(); await rm(root,{recursive:true}); lease?.release(); }
 });
 
 test('Packaged Codex executable uses the bundled helper; source mode keeps its qualified development CLI', () => {

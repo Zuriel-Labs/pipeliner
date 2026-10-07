@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { canonicalJSON } from '../core/settings.mjs';
 import { buildIdentity, readBuildIdentity } from '../package/build.mjs';
 import { verifyMacUpdateBundle } from './mac.mjs';
+import testStorage from '../test-storage.cjs';
 
 test('Mac update trust binds signed build identity, pinned Developer ID and distribution checks without execution', async () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-54-native-update-'))), bundle = join(root, 'Pipeliner.app');
@@ -16,7 +17,7 @@ test('Mac update trust binds signed build identity, pinned Developer ID and dist
   writeFileSync(executable, 'Synthetic non-executable fixture\n', { mode: 0o700 });
   writeFileSync(join(bundle, 'Contents/Info.plist'), 'Synthetic native plist fixture\n', { mode: 0o600 });
   const original = canonicalJSON(identity) + '\n', save = text => { writeFileSync(file, text, { mode: 0o600 }); chmodSync(file, 0o600); };
-  let calls, mode, controller;
+  let calls, mode, controller, lease;
   const run = async (command, args, signal) => {
     signal.throwIfAborted(); calls.push({ command, args });
     assert(['/usr/bin/codesign', '/usr/bin/plutil', '/usr/bin/lipo', '/usr/bin/syspolicy_check'].includes(command));
@@ -65,13 +66,17 @@ test('Mac update trust binds signed build identity, pinned Developer ID and dist
       ...['1.02.3', '1.2.3-01', 'version-1', ''].map(version => canonicalJSON({ ...identity, version }) + '\n')]) {
       save(text); await assert.rejects(readBuildIdentity(bundle)); assert.equal(readFileSync(file, 'utf8'), text);
     }
-    save(original); const other = join(root, 'linked.json'); linkSync(file, other); await assert.rejects(readBuildIdentity(bundle)); unlinkSync(other);
-    unlinkSync(file); writeFileSync(other, original, { mode: 0o600 }); symlinkSync(other, file); await assert.rejects(readBuildIdentity(bundle)); unlinkSync(file); unlinkSync(other);
+    save(original); const other = join(root, 'linked.json');
+    if (process.env.TEST_ARTIFACT_RUN) lease = testStorage.negativeFixtureLease({ kind:'mac-hardlink', root }, import.meta.url);
+    linkSync(file, other); lease?.confirm(); await assert.rejects(readBuildIdentity(bundle)); lease?.closing(); unlinkSync(other); lease?.release(); lease = undefined;
+    unlinkSync(file); writeFileSync(other, original, { mode: 0o600 });
+    if (process.env.TEST_ARTIFACT_RUN) lease = testStorage.negativeFixtureLease({ kind:'mac-alias', root }, import.meta.url);
+    symlinkSync(other, file); lease?.aliasReady(); await assert.rejects(readBuildIdentity(bundle)); lease?.closing(); unlinkSync(file); unlinkSync(other); lease?.release(); lease = undefined;
     save(original); chmodSync(file, 0o666); await assert.rejects(readBuildIdentity(bundle)); chmodSync(file, 0o600);
     mode = 'valid'; controller = new AbortController();
     for (const changed of [{ ...identity, sourceCommit: 'c'.repeat(40) }, { ...identity, version: '0.3.0' }]) {
       await assert.rejects(verifyMacUpdateBundle({ bundle, team, identity: changed }, { run }), /^Error: update-native-trust-unverified$/);
     }
     calls = []; await assert.rejects(verifyMacUpdateBundle({ bundle, team: 'bad" requirement', identity }, { run })); assert.equal(calls.length, 0);
-  } finally { rmSync(root, { recursive: true }); assert.equal(existsSync(root), false); }
+  } finally { lease?.closing(); rmSync(root, { recursive: true }); assert.equal(existsSync(root), false); lease?.release(); }
 });

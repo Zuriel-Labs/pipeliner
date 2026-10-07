@@ -6,6 +6,7 @@ import { join, dirname } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { workerToolProgram } from './worker-tools.mjs';
 import { sourceTree } from './source.mjs';
+import testStorage from '../test-storage.cjs';
 
 // Trusted helper behavior only. Native container qualification owns isolation evidence.
 function fixture() {
@@ -32,14 +33,15 @@ test('seed/read/preconditioned write/export preserve exact file data and reject 
 });
 
 test('helper rejects symlink and hardlink exports; command output cannot forge helper results', () => {
-  const f = fixture();
+  const f = fixture(); let lease;
   try {
     f.invoke({ operation: 'seed', files: [file('app.mjs', 'source')] });
     const command = f.invoke({ operation: 'run', command: "printf '{\"ok\":true,\"exitCode\":0}'; exit 7", timeoutMs: 1000 });
     assert.equal(command.ok, true); assert.equal(command.result.exitCode, 7); assert.match(command.result.output, /ok/);
-    symlinkSync('app.mjs', join(f.directory, 'escape.mjs')); assert.equal(f.invoke({ operation: 'read', path: 'escape.mjs' }).ok, false); assert.equal(f.invoke({ operation: 'export' }).ok, false);
-    rmSync(join(f.directory, 'escape.mjs')); linkSync(join(f.directory, 'app.mjs'), join(f.directory, 'linked.mjs')); assert.equal(f.invoke({ operation: 'export' }).ok, false);
-  } finally { f.cleanup(); }
+    if (process.env.TEST_ARTIFACT_RUN) lease = testStorage.negativeFixtureLease({ kind: 'worker-tools', root: f.directory }, import.meta.url);
+    symlinkSync('app.mjs', join(f.directory, 'escape.mjs')); lease?.aliasReady(); assert.equal(f.invoke({ operation: 'read', path: 'escape.mjs' }).ok, false); assert.equal(f.invoke({ operation: 'export' }).ok, false);
+    lease?.prepareHardlink(); rmSync(join(f.directory, 'escape.mjs')); linkSync(join(f.directory, 'app.mjs'), join(f.directory, 'linked.mjs')); lease?.hardlinkReady(); assert.equal(f.invoke({ operation: 'export' }).ok, false);
+  } finally { lease?.closing(); f.cleanup(); lease?.release(); }
 });
 
 test('typed custom command input stays JSON in an owned file, never shell interpolation; input file is removed', () => {

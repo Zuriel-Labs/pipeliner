@@ -753,6 +753,7 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
       }
     });
     if (process.argv.includes('--qualify-issues')) await check('issues-native-protected-25-workspace-10000-item-cache-and-warm-navigation', async () => {
+      const phase = name => require('./qualification-progress.cjs').phase(name, performance.now() - started);
       await wait(() => js("Boolean(document.getElementById('connection-list').children.length)"));
       const { openWorkspaceStore } = await moduleAt('../repositories/store.mjs'), { issueFixture } = await moduleAt('../issues/fixture.mjs');
       const original = workspaces.status().selected, store = openWorkspaceStore(directory, { vault }), saved = new Map(), coldMs = [], warmMs = [], seeded = [];
@@ -778,14 +779,18 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
       try {
         const writes = [...issueFixtures.values()].reduce((count, fixture) => count + fixture.writes.length, 0), coldReads = catalogReads;
         for (const target of targets) {
+          phase('workload-selection-started');
           const started = performance.now(); workspaces.dispatch({ operation: 'select', workspace: target.id });
+          phase('workload-selection-finished'); phase('workload-catalog-started');
           await issues.dispatch({ operation: 'refresh' }); await issues.idle();
+          phase('workload-catalog-finished');
           assert.equal(issues.status().error, null); assert.equal(issues.status().catalog.repositoryId, target.repositoryId); assert.equal(issues.status().catalog.issues.length, 400);
           coldMs.push(performance.now() - started);
         }
         assert.equal(catalogReads - coldReads, 25); const reads = catalogReads, turns = providerTurns;
         await wait(() => js("document.querySelectorAll('#workspace-list>article').length===25"));
         for (const target of targets) {
+          phase('workload-navigation-started');
           const label = JSON.stringify(target.name), began = await js(`(()=>{document.getElementById('repositories-nav').click();const card=[...document.querySelectorAll('#workspace-list>article')].find(node=>node.querySelector('h2').textContent===${label});const began=performance.now();card.querySelector('button').click();return began})()`);
           await wait(() => js(`document.getElementById('chat-title').textContent===${label}&&document.getElementById('workspace-context').textContent===${label}`));
           await js('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
@@ -793,6 +798,7 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
           assert.equal(issues.status().workspaceId, target.id); assert.equal(issues.status().catalog.repositoryId, target.repositoryId);
           await js("document.getElementById('issues-nav').click()");
           assert.equal(await js("document.querySelectorAll('#issue-list>article').length===50&&document.getElementById('issue-list-count').textContent.includes('400 matching')"), true);
+          phase('workload-navigation-finished');
         }
         const sorted = [...warmMs].sort((a, b) => a - b), warmP95Ms = sorted[Math.ceil(sorted.length * .95) - 1];
         assert(warmP95Ms < 2000); assert.equal(catalogReads, reads); assert.equal(providerTurns, turns);

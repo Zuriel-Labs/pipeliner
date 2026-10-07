@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 
 test('native qualification progress forwards only finite phases and numeric checks without child payloads', () => {
   const { progress } = createRequire(import.meta.url)('./qualification-progress.cjs');
-  for (const value of [{ desktopPhase: 'window-load-started', milliseconds: 7 }, { desktopCheck: 1, stage: 'started' },
+  for (const value of [{ desktopPhase: 'window-load-started', milliseconds: 7 }, { desktopPhase: 'workload-selection-finished', milliseconds: 7 }, { desktopCheck: 1, stage: 'started' },
     { desktopCheck: 1, stage: 'passed' }, { desktopCheck: 256, stage: 'failed' }]) assert.deepEqual(progress(JSON.stringify(value)), value);
   for (const value of [{ desktopPhase: 'provider-secret', milliseconds: 7 }, { desktopPhase: 'window-load-started', milliseconds: -1 },
     { desktopPhase: 'window-load-started', milliseconds: 600001 }, { desktopPhase: 'window-load-started', milliseconds: 1.5 },

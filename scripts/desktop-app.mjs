@@ -5,6 +5,7 @@ import { tmpdir, homedir } from 'node:os';
 import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { nativeDeadline } from './native-deadline.mjs';
 
 const exec = promisify(execFile), root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const qualificationFlags = ['--qualify', '--qualify-issues', '--qualify-pipelines', '--qualify-development', '--qualify-scheduling', '--qualify-background', '--qualify-skills', '--qualify-tools', '--qualify-privacy', '--qualify-appearance', '--qualify-delivery', '--qualify-permissions'];
@@ -47,7 +48,7 @@ let storage, chromiumEnvironment, processAdmission;
 const temporary = await realpath(await mkdtemp(join(tmpdir(), 'pipeliner-app-'))), helper = join(temporary, 'secure-entry');
 const temporaryInfo = await lstat(temporary);
 const calendar = join(temporary, 'calendar');
-let child, timer, privacyExport, privacyExportInfo, nativeRoot, nativeRootInfo, code = 1, report = '', errors = 0, delivered = 0;
+let child, cancelDeadline, privacyExport, privacyExportInfo, nativeRoot, nativeRootInfo, code = 1, report = '', errors = 0, delivered = 0;
 try {
   if (qualifying) {
     nativeRoot = await realpath(await mkdtemp(join(tmpdir(), 'pipeliner-native-workspace-')));
@@ -67,7 +68,7 @@ try {
   child = spawn(electron, [join(root, 'desktop/app/main.cjs'), `--key-helper=${helper}`, `--calendar-helper=${calendar}`, ...(qualifying ? ['--qualify', ...process.argv.filter(arg => qualificationFlags.includes(arg) && arg !== '--qualify'), `--test-data-directory=${temporary}`] : [])], {
     env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: homedir(), TMPDIR: temporary, LANG: 'en_US.UTF-8', ...chromiumEnvironment, ...(storage ? { TEST_ARTIFACT_RUN: storage.run_path, ...Object.fromEntries(['tmp','logs','recordings','outputs'].map(name => ['TEST_ARTIFACT_' + name.toUpperCase(), storage.paths[name]])) } : {}), ...(processAdmission ? { PIPELINER_TEST_NODE: process.execPath } : {}), ...(nativeRoot ? { PIPELINER_NATIVE_WORKSPACE_ROOT: nativeRoot } : {}), ...(privacyExport ? { PIPELINER_PRIVACY_EXPORT_DIRECTORY: privacyExport } : {}) }, stdio: ['ignore', 'pipe', 'pipe'],
   });
-  if (qualifying) timer = setTimeout(() => child.kill('SIGTERM'), 180000);
+  if (qualifying) cancelDeadline = nativeDeadline(child);
   child.stdout.setEncoding('utf8'); child.stdout.on('data', bytes => {
     report += bytes; if (Buffer.byteLength(report) > 262144) child.kill('SIGTERM');
     // Only exact fixture progress and panel stages are streamed; arbitrary child output stays suppressed.
@@ -97,7 +98,8 @@ try {
     console.log(JSON.stringify(result));
   }
 } finally {
-  clearTimeout(timer); if (child && child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await new Promise(resolveClose => child.once('close', resolveClose)); }
+  if (child && child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await new Promise(resolveClose => child.once('close', resolveClose)); }
+  cancelDeadline?.();
   try {
     const record = JSON.parse(await readFile(join(temporary, 'native-ownership.json'), 'utf8'));
     const expected = join(nativeRoot, 'repository'), info = await lstat(expected);

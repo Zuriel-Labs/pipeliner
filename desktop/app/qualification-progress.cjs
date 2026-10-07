@@ -3,7 +3,8 @@
 const phases = new Set(['helper-build-started', 'helper-build-finished', 'app-launch-started', 'main-ready', 'host-modules-ready',
   'window-created', 'window-load-started', 'window-load-finished', 'window-ready-to-show', 'window-load-failed',
   'vault-started', 'vault-ready', 'protected-state-ready', 'protected-state-unavailable', 'qualification-started', 'qualification-finished',
-  'shutdown-started', 'shutdown-finished', 'main-failed']);
+  'shutdown-started', 'shutdown-finished', 'main-failed', 'workload-selection-started', 'workload-selection-finished',
+  'workload-catalog-started', 'workload-catalog-finished', 'workload-navigation-started', 'workload-navigation-finished']);
 function progress(text) {
   try {
     if (typeof text !== 'string' || Buffer.byteLength(text) > 512) return null;

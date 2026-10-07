@@ -395,10 +395,13 @@ app.whenReady().then(async () => {
     toolStore = openToolStore(directory, { occupiedNames: () => skillStore.names() });
     toolConnections = createToolConnections({ vault, entry: (endpoint, signal) => nativeMCPEntry(helper, directory, endpoint, signal, qualifying && process.argv.includes('--qualify-tools')),
       ...(qualifying && process.argv.includes('--qualify-tools') ? require('./qualify.cjs').toolConnectionOptions() : {}), onChange: () => { tools?.sync(); development?.sync(); } });
-    policy = openPolicyStore(directory, { catalog: () => ({ repositories: workspaceStore.workspaces().map(workspace => workspace.id), capabilities: hostCapabilities,
+    policy = openPolicyStore(directory, { catalog: () => {
+      const workspaces = workspaceStore.workspaces();
+      return { repositories: workspaces.map(workspace => workspace.id), capabilities: hostCapabilities,
       maxConcurrency: 1, background: backgroundNative.inspect().qualified, connections: manager.status().connections.map(connection => ({ id: connection.id, provider: connection.id.startsWith('github') ? 'github' : connection.id,
-        repositories: workspaceStore.workspaces().filter(workspace => !connection.id.startsWith('github') || connection.repositories.some(repo => repo.id === workspace.repositoryId)).map(workspace => workspace.id),
-        healthy: ['connected', 'limited'].includes(connection.health) })), developers: manager.developers(), extensions: skillStore.catalog(), tools: toolStore.catalog(), updateSources: trustedUpdateSources.map(source => source.id) }),
+        repositories: workspaces.filter(workspace => !connection.id.startsWith('github') || connection.repositories.some(repo => repo.id === workspace.repositoryId)).map(workspace => workspace.id),
+        healthy: ['connected', 'limited'].includes(connection.health) })), developers: manager.developers(), extensions: skillStore.catalog(), tools: toolStore.catalog(), updateSources: trustedUpdateSources.map(source => source.id) };
+    },
       inspectors: { repository: input => development.observe(input), worker: binding => supervisor.inspectWorker(binding),
         continuity: input => development.inspectContinuity(input),
         effect: action => action.operation === 'github.pr.merge' ? development.inspectIntegration(action) : supervisor.inspectEffect(action) } });

@@ -1,11 +1,14 @@
 import { lstatSync, realpathSync, openSync, closeSync, fsyncSync, constants } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
-import { randomUUID } from 'node:crypto';
-import { resolve } from 'node:path';
+import { randomUUID, createHash } from 'node:crypto';
+import { resolve, dirname, join } from 'node:path';
 import { protectedFile } from '../core/storage.mjs';
 import { canonicalJSON, immutable, record } from '../core/settings.mjs';
 import { createRecordCodec } from '../privacy/records.mjs';
-import { buildIdentity } from '../package/build.mjs';
+import { buildIdentity, buildIdentityName, readBuildIdentity } from '../package/build.mjs';
+import { inspectManagedData } from '../privacy/inventory.mjs';
+import { runMacUpdateCommand } from './mac.mjs';
+import { backgroundBundleId } from '../background/native.mjs';
 
 const phases = ['logout-pending', 'service-pending', 'credentials-pending', 'trash-pending', 'removed'];
 const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
@@ -41,6 +44,66 @@ function credentials(vault, value, phase, recovery = false) {
   const allowed = ['logout-pending', 'service-pending', 'credentials-pending'].includes(phase) ? [expected.before] : [expected.after];
   if (recovery && phase === 'credentials-pending') allowed.push(expected.after);
   if (!allowed.some(snapshot => canonicalJSON(snapshot) === current)) throw Error();
+}
+function checkpoint(work) {
+  const result = work(); if (result instanceof Promise) result.catch(() => {});
+  if (result !== undefined) throw Error();
+}
+
+// Read-only host capture. Signature/custody evidence does not grant PM authority or qualify any removal effect.
+export async function captureMacUninstallPlan(options, { run = runMacUpdateCommand } = {}) {
+  try {
+    record(options, ['app', 'background', 'directory', 'vault', 'checkpoint'], ['signal']);
+    if (Object.getOwnPropertySymbols(options).length || Object.values(Object.getOwnPropertyDescriptors(options)).some(value => value.get || value.set)
+      || process.platform !== 'darwin' || process.arch !== 'arm64' || options.app.isPackaged !== true || process.argv.includes('--background-helper')
+      || typeof options.checkpoint !== 'function' || typeof run !== 'function' || options.signal !== undefined && !(options.signal instanceof AbortSignal)) throw Error();
+    const { app, background, directory, vault, checkpoint: activeCheckpoint } = options, signal = options.signal ?? new AbortController().signal;
+    checkpoint(activeCheckpoint); signal.throwIfAborted();
+    const executable = process.execPath, bundle = dirname(dirname(dirname(executable)));
+    if (!bundle.endsWith('/Pipeliner.app') || executable !== join(bundle, 'Contents/MacOS/Pipeliner') || resolve(executable) !== executable
+      || typeof directory !== 'string' || resolve(directory) !== directory || directory === bundle
+      || directory.startsWith(bundle + '/') || bundle.startsWith(directory + '/')) throw Error();
+    const paths = [bundle, dirname(bundle), join(bundle, 'Contents'), join(bundle, 'Contents/Resources'), executable, join(bundle, 'Contents/Resources', buildIdentityName)];
+    const stable = (a, b) => ['dev', 'ino', 'uid', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs'].every(key => a[key] === b[key]);
+    function inspect(path, index) {
+      const value = lstatSync(path, { bigint: true });
+      if (realpathSync(path) !== path || value.isSymbolicLink() || ![0n, BigInt(process.getuid())].includes(value.uid) || value.mode & 0o022n
+        || (index < 4 ? !value.isDirectory() : !value.isFile() || value.nlink !== 1n) || index === 4 && !(value.mode & 0o111n)) throw Error();
+      return value;
+    }
+    const original = paths.map(inspect), root = lstatSync(directory, { bigint: true });
+    function service() { const value = background.inspect(); canonicalJSON(value); record(value, ['qualified', 'status']);
+      if (value.qualified !== true || !['not-registered', 'enabled', 'requires-approval', 'not-found'].includes(value.status)) throw Error(); return immutable(value); }
+    function records() {
+      const inventory = inspectManagedData(directory).filter(value => ['policy', 'workspaces', 'development', 'execution', 'extensions', 'privacy', 'artifacts', 'archives', 'migration'].includes(value.id));
+      if (inventory.some(value => value.state === 'unavailable')) throw Error();
+      return createHash('sha256').update(canonicalJSON(inventory.map(({ id, count, bytes, state }) => ({ id, count, bytes, state })))).digest('hex');
+    }
+    const capturedService = service(), capturedCredentials = vault.previewCredentialRemoval(), capturedRecords = records();
+    function check() {
+      checkpoint(activeCheckpoint); signal.throwIfAborted();
+      const current = lstatSync(directory, { bigint: true });
+      if (app.isPackaged !== true || process.execPath !== executable || process.argv.includes('--background-helper') || realpathSync(directory) !== directory
+        || !current.isDirectory() || current.isSymbolicLink() || current.uid !== BigInt(process.getuid()) || (current.mode & 0o777n) !== 0o700n
+        || !['dev', 'ino', 'uid', 'mode'].every(key => root[key] === current[key])
+        || paths.some((path, index) => !stable(original[index], inspect(path, index)))
+        || canonicalJSON(service()) !== canonicalJSON(capturedService) || canonicalJSON(vault.previewCredentialRemoval()) !== canonicalJSON(capturedCredentials)
+        || records() !== capturedRecords) throw Error();
+    }
+    check(); const identity = await readBuildIdentity(bundle, { signal }); check();
+    const details = (await run('/usr/bin/codesign', ['--display', '--verbose=4', bundle], signal)).stderr; check();
+    if (typeof details !== 'string' || Buffer.byteLength(details) > 32768) throw Error();
+    const field = name => { const values = [...details.matchAll(new RegExp('^' + name + '=([^\\r\\n]+)$', 'gm'))]; if (values.length !== 1) throw Error(); return values[0][1]; };
+    const team = field('TeamIdentifier'), flags = [...details.matchAll(/^CodeDirectory .* flags=0x([a-fA-F0-9]{1,8})\([^\r\n)]*\)/gm)];
+    if (!/^[A-Z0-9]{10}$/.test(team) || field('Identifier') !== backgroundBundleId || flags.length !== 1 || !(parseInt(flags[0][1], 16) & 0x10000)) throw Error();
+    const requirement = '=anchor apple generic and identifier "' + backgroundBundleId + '" and certificate leaf[subject.OU] = "' + team + '"';
+    await run('/usr/bin/codesign', ['--verify', '--deep', '--strict', '-R', requirement, bundle], signal); check();
+    if (canonicalJSON(await readBuildIdentity(bundle, { signal })) !== canonicalJSON(identity)) throw Error(); check();
+    await run('/usr/bin/codesign', ['--verify', '--deep', '--strict', '-R', requirement, bundle], signal); check();
+    const value = { bundle, identity, team, custody: { device: original[0].dev.toString(), inode: original[0].ino.toString() },
+      credentials: capturedCredentials, service: capturedService, recordInventorySha256: capturedRecords };
+    plan(value); return immutable(value);
+  } catch { throw Error('uninstall-plan-unavailable'); }
 }
 
 // Host-only journal. Native effects and PM authority must be verified by the idle coordinator, never inferred from a phase.
@@ -145,12 +208,11 @@ export async function completeUninstall(options) {
     record(options, ['journal', 'vault', 'token', 'checkpoint', 'settle', 'logout', 'removeService', 'trash', 'verify']);
     if (Object.getOwnPropertySymbols(options).length || Object.values(Object.getOwnPropertyDescriptors(options)).some(value => value.get || value.set)
       || ['checkpoint', 'settle', 'logout', 'removeService', 'trash', 'verify'].some(name => typeof options[name] !== 'function')) throw Error();
-    const { journal, vault, token, checkpoint, settle, logout, removeService, trash, verify } = options;
+    const { journal, vault, token, checkpoint: activeCheckpoint, settle, logout, removeService, trash, verify } = options;
     let current = journal.read();
     function check() {
-      const result = checkpoint();
-      if (result instanceof Promise) result.catch(() => {});
-      if (result !== undefined || !journal.owned(token) || canonicalJSON(journal.read()) !== canonicalJSON(current)) throw Error();
+      checkpoint(activeCheckpoint);
+      if (!journal.owned(token) || canonicalJSON(journal.read()) !== canonicalJSON(current)) throw Error();
       credentials(vault, current, current.phase, true);
     }
     async function verified(stage) { check(); if (await verify(current, stage) !== true) throw Error(); check(); }

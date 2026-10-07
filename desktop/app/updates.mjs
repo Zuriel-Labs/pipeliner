@@ -33,19 +33,20 @@ export async function initUpdates({ el, message, show }) {
       const card = el('article', undefined, 'connection-card'); card.id = 'update-recovery'; card.append(el('h3', 'Desktop maintenance needs recovery'));
       const saved = state.maintenance;
       if (saved) {
-        const phase = { preparing: 'Preparation recorded', staged: 'Installer staging recorded', verified: 'Candidate verification recorded',
+        const phase = { preparing: 'Preparation recorded', staged: 'Installer preparation recorded', verified: 'App verification recorded',
           replacing: 'Replacement outcome needs inspection', relaunching: 'Updated startup needs verification', 'repair-required': 'Repair required' }[saved.phase];
         const data = el('dl', undefined, 'connection-data');
         for (const [name, value] of [['Recorded state', phase], ['Previous version', saved.fromVersion], ['Target version', saved.toVersion],
-          ['Installer custody', saved.installerRecorded ? 'Recorded' : 'Not recorded'], ['Protected backup custody', saved.backupsRecorded + ' records'],
-          ['Candidate custody', saved.candidateRecorded ? 'Recorded' : 'Not recorded'], ['Replacement custody', saved.replacementRecorded ? 'Recorded' : 'Not recorded']]) data.append(el('dt', name), el('dd', value));
+          ['Installer record', saved.installerRecorded ? 'Recorded' : 'Not recorded'], ['Backup records', saved.backupsRecorded + ' records'],
+          ['Prepared app record', saved.candidateRecorded ? 'Recorded' : 'Not recorded'], ['Replacement record', saved.replacementRecorded ? 'Recorded' : 'Not recorded']]) data.append(el('dt', name), el('dd', value));
         card.append(data, el('p', 'These protected records do not freshly verify the files or a successful recovery.', 'small'));
       } else card.append(el('p', 'Protected maintenance details could not be read. Existing app files and data stay preserved.', 'availability'));
       card.append(el('p', 'Keep the installed app and saved data. Work and changing settings stay blocked until recovery is verified. Restart does not replay the interrupted update.', 'availability'),
-        el('p', 'Automatic repair, rollback and removal are not qualified in this installation. No recovery action runs from this view.', 'small'), button('Refresh recovery', 'status', {}, 'update-recovery-refresh'));
+        el('p', 'Repair, rollback and removal are unavailable in this installation. This view only reads saved records.', 'small'), button('Refresh recovery', 'status', {}, 'update-recovery-refresh'));
       nodes.push(card);
     }
-    if (!state.storageAvailable) nodes.push(el('p', 'Protected configuration is loading or unavailable. Reopen after unlocking macOS Keychain; saved settings are preserved.', 'availability'));
+    if (!state.storageAvailable) nodes.push(el('p', state.recoveryRequired ? 'Saved settings are preserved. They reopen after maintenance recovery is verified.'
+      : 'Protected configuration is loading or unavailable. Reopen after unlocking macOS Keychain; saved settings are preserved.', 'availability'));
     else {
       const form = el('form', undefined, 'connection-card'); form.id = 'update-form'; form.append(el('h3', 'Update channel'));
       const row = el('div', undefined, 'setup-field'), label = el('label', 'Desktop update channel'), select = el('select');

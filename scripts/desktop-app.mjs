@@ -8,7 +8,7 @@ import { createRequire } from 'node:module';
 import { nativeDeadline } from './native-deadline.mjs';
 
 const exec = promisify(execFile), root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const qualificationFlags = ['--qualify', '--qualify-issues', '--qualify-pipelines', '--qualify-development', '--qualify-scheduling', '--qualify-background', '--qualify-skills', '--qualify-tools', '--qualify-privacy', '--qualify-appearance', '--qualify-delivery', '--qualify-permissions'];
+const qualificationFlags = ['--qualify', '--qualify-issues', '--qualify-workload-profile', '--qualify-pipelines', '--qualify-development', '--qualify-scheduling', '--qualify-background', '--qualify-skills', '--qualify-tools', '--qualify-privacy', '--qualify-appearance', '--qualify-delivery', '--qualify-permissions'];
 const storageFixture = process.argv.includes('--storage-fixture');
 if (storageFixture && process.argv.some(arg => qualificationFlags.includes(arg) || arg === '--retain-owned-capture')) {
   throw new Error('storage-fixture-native-option-conflict');
@@ -17,6 +17,7 @@ const qualifying = storageFixture || process.argv.some(arg => qualificationFlags
 const started = performance.now(), progress = createRequire(import.meta.url)('../desktop/app/qualification-progress.cjs');
 const phase = name => { if (qualifying && !storageFixture) progress.phase(name, performance.now() - started); };
 if (process.argv.slice(2).some(arg => ![...qualificationFlags, '--retain-owned-capture', '--storage-fixture'].includes(arg))) throw new Error('argument-denied');
+if (process.argv.includes('--qualify-workload-profile') && !process.argv.includes('--qualify-issues')) throw new Error('argument-denied');
 if (process.platform !== 'darwin' || process.arch !== 'arm64') throw new Error('host-unqualified');
 const { validateContext, nativeTestEnvironment, nativeTestLauncher } = createRequire(import.meta.url)('../desktop/test-storage.cjs');
 let storage, chromiumEnvironment, processAdmission;

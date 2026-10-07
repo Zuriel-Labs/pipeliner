@@ -757,7 +757,7 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
       await wait(() => js("Boolean(document.getElementById('connection-list').children.length)"));
       const { openWorkspaceStore } = await moduleAt('../repositories/store.mjs'), { issueFixture } = await moduleAt('../issues/fixture.mjs');
       const original = workspaces.status().selected, store = openWorkspaceStore(directory, { vault }), saved = new Map(), coldMs = [], warmMs = [], seeded = [];
-      let targets;
+      let targets, profiler, post;
       try {
       try {
         const present = store.workspaces(), first = present[0]; assert.equal(present.length, 2);
@@ -777,6 +777,11 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
         }
       } finally { store.close(); }
       try {
+        if (process.argv.includes('--qualify-workload-profile')) {
+          profiler = new (require('node:inspector').Session)(); profiler.connect();
+          post = method => new Promise((resolve, reject) => profiler.post(method, (error, result) => error ? reject(error) : resolve(result)));
+          await post('Profiler.enable'); await post('Profiler.start');
+        }
         const writes = [...issueFixtures.values()].reduce((count, fixture) => count + fixture.writes.length, 0), coldReads = catalogReads;
         for (const target of targets) {
           phase('workload-selection-started');
@@ -801,15 +806,30 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
           phase('workload-navigation-finished');
         }
         const sorted = [...warmMs].sort((a, b) => a - b), warmP95Ms = sorted[Math.ceil(sorted.length * .95) - 1];
-        assert(warmP95Ms < 2000); assert.equal(catalogReads, reads); assert.equal(providerTurns, turns);
-        assert.equal([...issueFixtures.values()].reduce((count, fixture) => count + fixture.writes.length, 0), writes);
-        const reopened = openWorkspaceStore(directory, { vault }); try { assert.equal(reopened.workspaces().length, 25); } finally { reopened.close(); }
         measurements.push({ interaction: 'synthetic-protected-25-repository-10000-total-item-workload', repositories: 25, totalItems: 10000, itemsPerRepository: 400,
           transport: 'synthetic-no-network', coldLoadMs: coldMs, warmNavigationMs: warmMs, warmNavigationP95Ms: warmP95Ms,
           warmCatalogRequests: catalogReads - reads, warmFixtureProviderTurns: providerTurns - turns, memory: process.memoryUsage(), actualWorkers: 0 });
+        assert(warmP95Ms < 2000);
+        assert.equal(catalogReads, reads);
+        assert.equal(providerTurns, turns);
+        assert.equal([...issueFixtures.values()].reduce((count, fixture) => count + fixture.writes.length, 0), writes);
+        const reopened = openWorkspaceStore(directory, { vault }); try { assert.equal(reopened.workspaces().length, 25); } finally { reopened.close(); }
       } finally {
-        for (const [id, rows] of saved) { const fixture = issueFixtures.get(id); fixture.issues.splice(0, fixture.issues.length, ...rows); }
-        workspaces.dispatch({ operation: 'select', workspace: original }); await issues.dispatch({ operation: 'refresh' }); await issues.idle();
+        try {
+          if (profiler) {
+            try {
+              const { profile } = await post('Profiler.stop'), bytes = Buffer.from(JSON.stringify(profile)), output = path.join(process.env.TEST_ARTIFACT_RUN, 'outputs');
+              assert(bytes.length <= 8 * 1024 ** 2); assert.equal(output, process.env.TEST_ARTIFACT_OUTPUTS);
+              const info = lstatSync(output); assert(info.isDirectory() && !info.isSymbolicLink() && info.uid === process.getuid()
+                && (info.mode & 0o777) === 0o700 && realpathSync(output) === output);
+              writeFileSync(path.join(output, 'workload-host-' + process.pid + '.cpuprofile'), bytes, { flag: 'wx', mode: 0o600 });
+              measurements.push({ interaction: 'qualification-only-cpu-profile', bytes: bytes.length, sha256: require('node:crypto').createHash('sha256').update(bytes).digest('hex') });
+            } finally { profiler.disconnect(); }
+          }
+        } finally {
+          for (const [id, rows] of saved) { const fixture = issueFixtures.get(id); fixture.issues.splice(0, fixture.issues.length, ...rows); }
+          workspaces.dispatch({ operation: 'select', workspace: original }); await issues.dispatch({ operation: 'refresh' }); await issues.idle();
+        }
       }
       } finally {
         for (const { folder, info } of seeded) {

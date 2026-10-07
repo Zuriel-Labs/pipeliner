@@ -32,6 +32,46 @@ function fixture() {
     close() { manager.close(); policy.close(); rmSync(root, { recursive: true }); assert.equal(existsSync(root), false); } };
 }
 
+test('maintenance recovery view stays authenticated and read-only when normal policy storage is unopened', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-54-update-recovery-')));
+  const from = { kind: 'pipeliner-desktop-build', schemaVersion: 1, sourceCommit: 'a'.repeat(40), gitTree: 'b'.repeat(40),
+    version: '0.1.0', platform: 'darwin', architecture: 'arm64' };
+  let vault, journal, update, malformed = false;
+  try {
+    vault = await openVault(root, { available: async () => true, encrypt: async text => Buffer.from(text), decrypt: async bytes => ({ result: bytes.toString(), shouldReEncrypt: false }) });
+    journal = openUpdateMaintenance(root, { vault, clock: () => 1000 });
+    const token = journal.begin({ from, to: { ...from, version: '0.2.0', sourceCommit: 'c'.repeat(40), gitTree: 'd'.repeat(40) }, sha256: 'e'.repeat(64), bytes: 1000 });
+    const details = () => { const saved = journal.read(); return { phase: saved.phase, fromVersion: saved.from.version, toVersion: saved.to.version,
+      installerRecorded: Boolean(saved.installer), backupsRecorded: saved.backups?.databases.length ?? 0,
+      candidateRecorded: Boolean(saved.copy?.receipt), replacementRecorded: Boolean(saved.replacement) }; };
+    update = createUpdateManager({ version: from.version, recovery: () => !journal.clear(), recoveryDetails: () => malformed ? { ...details(), path: root } : details() });
+    const url = 'pipeliner://app/index.html', frame = { url, parent: null }, contents = { mainFrame: frame, isDestroyed: () => false }, event = { sender: contents, senderFrame: frame };
+    const channel = createUpdateControlChannel(update, { contents, url, context: () => ({ revision: update.status().revision }) });
+    const gate = createMaintenanceGate({ ready: () => false, verify: async () => assert.fail('No maintenance work admitted'), recovery: () => !journal.clear() });
+    const view = await gate.control(() => channel.dispatch(event, { operation: 'view', contextRevision: update.status().revision }), { passive: true });
+    assert.equal(view.snapshot.storageAvailable, false); assert.equal(view.snapshot.recoveryRequired, true); assert.deepEqual(view.snapshot.maintenance, details());
+    const before = journal.read();
+    await gate.control(() => channel.dispatch(event, { operation: 'chat', text: 'Show Desktop updates', contextRevision: update.status().revision }), { passive: true });
+    assert.deepEqual(channel.dispatch(event, { operation: 'status' }).maintenance, details());
+    for (const operation of ['prepare', 'source', 'reset', 'apply', 'cancel', 'check', 'install']) await assert.rejects(update.dispatch({ operation,
+      ...(operation === 'prepare' ? { changes: { 'updates.channel': 'beta' } } : operation === 'source' ? { name: null } : {}) }));
+    assert.throws(() => channel.dispatch({ ...event, sender: {} }, { operation: 'status' }));
+    assert.throws(() => channel.dispatch({ ...event, senderFrame: { url, parent: frame } }, { operation: 'status' }));
+    assert.throws(() => channel.dispatch(event, { operation: 'view', contextRevision: 0 }));
+    assert.throws(() => channel.dispatch(event, { operation: 'view', contextRevision: update.status().revision, approved: true }));
+    assert.deepEqual(journal.read(), before); assert.deepEqual(journal.completed(), []);
+    assert.doesNotMatch(JSON.stringify(view.snapshot), new RegExp(root));
+    assert.equal(existsSync(join(root, 'policy.sqlite')), false); assert.equal(existsSync(join(root, 'updates')), false);
+    journal.advance(token, 'staged'); assert.equal(update.status().maintenance.phase, 'staged');
+    journal.advance(token, 'repair-required'); assert.equal(update.status().maintenance.phase, 'repair-required');
+    for (const invalid of [true, 'throws']) {
+      malformed = invalid; if (invalid === 'throws') journal.close();
+      assert.equal(update.status().maintenance, null); assert.equal(update.status().recoveryRequired, true);
+    }
+    await update.close(); await assert.rejects(update.dispatch({ operation: 'view' }));
+  } finally { await update?.close(); journal?.close(); vault?.close(); rmSync(root, { recursive: true }); assert.equal(existsSync(root), false); }
+});
+
 test('Desktop update channel is host-only, exact, persisted and independent of unqualified delivery', async () => {
   const f = fixture();
   try {
@@ -252,6 +292,6 @@ test('Desktop update controls reject stale, expired and untrusted input without 
     f.manager.close(); await assert.rejects(f.manager.dispatch({ operation: 'apply' }));
     assert.equal(f.manager.status().storageAvailable, false);
     const unavailable = createUpdateManager({ version: '0.1.0' });
-    assert.equal(unavailable.status().storageAvailable, false); await assert.rejects(unavailable.dispatch({ operation: 'view' })); unavailable.close();
+    assert.equal(unavailable.status().storageAvailable, false); assert.equal((await unavailable.dispatch({ operation: 'view' })).snapshot.storageAvailable, false); unavailable.close();
   } finally { f.close(); }
 });

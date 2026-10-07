@@ -63,7 +63,9 @@ test('host update preparation captures only the running packaged build and binds
     let held = true, nativeCalls = 0, prepared = 0, captured;
     const build = Object.freeze({ kind: 'synthetic-build' }), checkpoint = () => { if (mode === 'cancelled') throw Error('Synthetic cancelled host'); }, onIntent = () => {};
     const context = { policy: {}, updateHistory: {}, trustedUpdateSources: [], maintenance: { active: () => held },
-      maintenanceStore: { owned: candidate => candidate === token, async prepare(options) {
+      maintenanceStore: { owned: candidate => candidate === token,
+        read: () => ({ phase: 'repair-required', from: { version: '0.1.0' }, to: { version: '0.2.0' }, installer: { file: '/private/retained.dmg' },
+          backups: { databases: [{}, {}, {}] }, copy: { receipt: { bundle: '/private/candidate.app' } }, replacement: {} }), async prepare(options) {
         prepared++; assert.deepEqual(JSON.parse(JSON.stringify(options.installed)), { bundle: '/private/Pipeliner.app', identity: build, team: 'ABCDEFGHIJ' });
         assert.equal(options.history, context.updateHistory); assert.equal(options.trust, trust); assert.equal(options.current, current);
         assert.equal(options.signal, signal); assert.equal(options.onIntent, onIntent); assert.equal(options.checkpoint, checkpoint);
@@ -81,6 +83,8 @@ test('host update preparation captures only the running packaged build and binds
       }, path: require('node:path'), process: { execPath: '/private/Pipeliner.app/Contents/MacOS/Pipeliner' },
       createUpdateManager(options) { captured = options; return {}; }, maintenanceRecovery: () => false, publishUpdates() {} };
     runInNewContext(`${source.slice(start, end)}\nmakeUpdates(1);`, context, { timeout: 1000 });
+    assert.deepEqual(JSON.parse(JSON.stringify(captured.recoveryDetails())), { phase: 'repair-required', fromVersion: '0.1.0', toVersion: '0.2.0',
+      installerRecorded: true, backupsRecorded: 3, candidateRecorded: true, replacementRecorded: true });
     assert.equal(captured.ownsIntent(token), true); assert.equal(captured.ownsIntent({}), false); held = false; assert.equal(captured.ownsIntent(token), false); held = true;
     const invoke = () => captured.prepareInstaller({ trust, current, checkpoint, signal, onIntent });
     if (mode === 'normal') assert.equal(await invoke(), token); else await assert.rejects(invoke());

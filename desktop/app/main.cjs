@@ -281,6 +281,12 @@ app.whenReady().then(async () => {
   delivery = makeDelivery(1);
   const publishUpdates = snapshot => { if (window && !window.isDestroyed()) window.webContents.send('updates:status', snapshot); };
   const makeUpdates = initialRevision => createUpdateManager({ policy, history: updateHistory, sources: () => trustedUpdateSources,
+    recoveryDetails: () => {
+      const saved = maintenanceStore?.read();
+      return saved ? { phase: saved.phase, fromVersion: saved.from.version, toVersion: saved.to.version,
+        installerRecorded: Boolean(saved.installer), backupsRecorded: saved.backups?.databases.length ?? 0,
+        candidateRecorded: Boolean(saved.copy?.receipt), replacementRecorded: Boolean(saved.replacement) } : null;
+    },
     ownsIntent: token => maintenance.active() && maintenanceStore?.owned(token) === true,
     prepareInstaller: async ({ trust, current, checkpoint, signal, onIntent }) => {
       if (!app.isPackaged || backgroundLaunch || !maintenanceStore) throw Error('maintenance-state-unavailable');

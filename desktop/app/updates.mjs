@@ -8,7 +8,7 @@ export async function initUpdates({ el, message, show }) {
   const chatPreview = el('section'); chatPreview.id = 'update-chat-preview'; chatPreview.setAttribute('aria-label', 'Current Desktop update preview'); $('composer').before(chatPreview);
   function button(text, operation, extra = {}, id) {
     const node = el('button', text, operation === 'apply' ? 'primary' : 'secondary'); node.type = 'button'; if (id) node.id = id;
-    node.disabled = !state.storageAvailable || operation !== 'stop' && (requests > 0 || state.busy || state.recoveryRequired); node.addEventListener('click', () => request({ operation, ...extra })); return node;
+    node.disabled = operation === 'status' ? requests > 0 : !state.storageAvailable || operation !== 'stop' && (requests > 0 || state.busy || state.recoveryRequired); node.addEventListener('click', () => request({ operation, ...extra })); return node;
   }
   function preview(p, suffix = '') {
     const card = el('article', undefined, 'setup-preview'); card.id = 'update-preview' + suffix;
@@ -29,6 +29,22 @@ export async function initUpdates({ el, message, show }) {
     const head = el('article', undefined, 'connection-card'); head.append(el('p', 'A deliberate update, with a way back', 'kicker'), el('h2', 'Desktop Updates'),
       el('p', 'This Mac only. Repository selection does not change the Desktop update channel.', 'small'));
     const nodes = [head];
+    if (state.recoveryRequired) {
+      const card = el('article', undefined, 'connection-card'); card.id = 'update-recovery'; card.append(el('h3', 'Desktop maintenance needs recovery'));
+      const saved = state.maintenance;
+      if (saved) {
+        const phase = { preparing: 'Preparation recorded', staged: 'Installer staging recorded', verified: 'Candidate verification recorded',
+          replacing: 'Replacement outcome needs inspection', relaunching: 'Updated startup needs verification', 'repair-required': 'Repair required' }[saved.phase];
+        const data = el('dl', undefined, 'connection-data');
+        for (const [name, value] of [['Recorded state', phase], ['Previous version', saved.fromVersion], ['Target version', saved.toVersion],
+          ['Installer custody', saved.installerRecorded ? 'Recorded' : 'Not recorded'], ['Protected backup custody', saved.backupsRecorded + ' records'],
+          ['Candidate custody', saved.candidateRecorded ? 'Recorded' : 'Not recorded'], ['Replacement custody', saved.replacementRecorded ? 'Recorded' : 'Not recorded']]) data.append(el('dt', name), el('dd', value));
+        card.append(data, el('p', 'These protected records do not freshly verify the files or a successful recovery.', 'small'));
+      } else card.append(el('p', 'Protected maintenance details could not be read. Existing app files and data stay preserved.', 'availability'));
+      card.append(el('p', 'Keep the installed app and saved data. Work and changing settings stay blocked until recovery is verified. Restart does not replay the interrupted update.', 'availability'),
+        el('p', 'Automatic repair, rollback and removal are not qualified in this installation. No recovery action runs from this view.', 'small'), button('Refresh recovery', 'status', {}, 'update-recovery-refresh'));
+      nodes.push(card);
+    }
     if (!state.storageAvailable) nodes.push(el('p', 'Protected configuration is loading or unavailable. Reopen after unlocking macOS Keychain; saved settings are preserved.', 'availability'));
     else {
       const form = el('form', undefined, 'connection-card'); form.id = 'update-form'; form.append(el('h3', 'Update channel'));
@@ -71,13 +87,18 @@ export async function initUpdates({ el, message, show }) {
     if (state.preview) nodes.push(preview(state.preview)); chatPreview.replaceChildren(...(state.preview ? [preview(state.preview, '-chat')] : []));
     if (state.message) nodes.push(el('p', state.message, 'protected-state')); section.replaceChildren(...nodes);
     if (focused && $(focused) && !$(focused).disabled) $(focused).focus({ preventScroll: true });
-    else if (!section.hidden && focused?.startsWith('update-')) $('update-channel')?.focus({ preventScroll: true });
+    else if (!section.hidden && focused?.startsWith('update-')) {
+      const channel = $('update-channel'); (channel && !channel.disabled ? channel : $('update-recovery-refresh'))?.focus({ preventScroll: true });
+    }
     if (state.message && state.message !== lastMessage) { message(state.message); $('announcement').textContent = state.message; lastMessage = state.message; }
   }
   async function request(payload, text) {
     if (!state || requests && payload.operation !== 'stop') return; requests++;
     if (text) message(text, true); if (text && updateCommand(text)?.operation === 'view') show();
-    try { const result = await window.pipeliner.updateRequest({ ...payload, contextRevision: state.revision }); requests--; render(result.snapshot ?? state); }
+    try {
+      const result = await window.pipeliner.updateRequest(payload.operation === 'status' ? payload : { ...payload, contextRevision: state.revision }); requests--; render(result.snapshot ?? result);
+      if (payload.operation === 'status' && state.recoveryRequired) $('announcement').textContent = 'Maintenance recovery refreshed. ' + (state.maintenance ? 'Recorded state: ' + state.maintenance.phase.replaceAll('-', ' ') + '.' : 'Protected maintenance details are unavailable.');
+    }
     catch { requests--; render(await window.pipeliner.updateRequest({ operation: 'status' })); message('Update action could not finish. Inspect saved settings and create a fresh preview.'); }
     if (!$('chat-view').hidden) $('prompt').focus({ preventScroll: true });
   }

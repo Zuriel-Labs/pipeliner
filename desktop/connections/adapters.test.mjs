@@ -2,7 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { inspectGitHub, githubApp, githubAdapter } from './github.mjs';
 import { appPermissions } from '../github/transport.mjs';
-import { ollamaAdapter, codexModels } from './providers.mjs';
+import { ollamaAdapter, codexModels, codexAdapter, protectedCodexHome } from './providers.mjs';
+import { mkdtempSync, realpathSync, rmSync, existsSync, readFileSync, writeFileSync, lstatSync, utimesSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 test('GitHub complete scoped discovery rejects missing/duplicate resources and reports limited Projects', async () => {
   const credential = { accessToken: 'ghu_syntheticFixtureOnly123', expiresAt: 200000, refreshToken: 'ghr_syntheticRefresh123', refreshExpiresAt: 300000 };
@@ -84,4 +87,50 @@ test('Cloud turns keep historical qualification, enforce model/output bounds and
   mode = 'truncated'; await assert.rejects(adapter.turn(request), /output-truncated/);
   mode = 'removed'; const removed = await adapter.refresh({ value, signal }); assert.equal(removed.view.health, 'limited'); assert.equal(removed.view.capability, null);
   await assert.rejects(adapter.turn({ ...request, value: removed }), /capability-unverified/); assert.equal(calls, 3);
+});
+
+test('managed Codex logout and independent readback require positive account absence and settled unchanged storage', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-54-managed-logout-'))), home = join(root, 'codex'), config = join(home, 'config.toml');
+  let mode = 'valid', starts = 0, closes = 0, logouts = 0, reads = 0, controller = new AbortController(), release, pending;
+  try {
+    const adapter = codexAdapter({ directory: root, openBrowser: async () => assert.fail('No login browser'),
+      async initialize(path) {
+        starts++; assert.equal(path, home);
+        return { async request(method, params) {
+          if (method === 'account/logout') { logouts++; assert.equal(params, undefined); return {}; }
+          assert.equal(method, 'account/read'); assert.deepEqual(params, { refreshToken: false }); reads++;
+          if (mode === 'cancelled') controller.abort();
+          if (mode === 'metadata') { const bytes = readFileSync(config); writeFileSync(config, bytes); const stat = lstatSync(config); utimesSync(config, stat.atime, new Date(stat.mtimeMs + 2000)); }
+          if (mode === 'file') writeFileSync(join(home, 'auth.json'), 'Synthetic unexpected file', { mode: 0o600 });
+          if (mode === 'close-metadata') mode = 'change-on-close';
+          return mode === 'missing' ? { requiresOpenaiAuth: true } : mode === 'account' ? { account: { type: 'chatgpt' }, requiresOpenaiAuth: true }
+            : mode === 'shape' ? { account: null, requiresOpenaiAuth: 'yes' } : { account: null, requiresOpenaiAuth: true };
+        }, async close() {
+          closes++;
+          if (mode === 'change-on-close') { const bytes = readFileSync(config); writeFileSync(config, bytes); const stat = lstatSync(config); utimesSync(config, stat.atime, new Date(stat.mtimeMs + 2000)); }
+        } };
+      } });
+    assert.equal(typeof adapter.verifyDisconnected, 'function');
+    await assert.rejects(adapter.verifyDisconnected({ signal: controller.signal }), /provider-storage-blocked/);
+    assert.equal(existsSync(home), false); assert.equal(starts, 0);
+    await protectedCodexHome(root); const bytes = readFileSync(config);
+    assert.equal(await adapter.verifyDisconnected({ signal: controller.signal }), true); assert.equal(logouts, 0); assert.equal(reads, 1); assert.equal(closes, starts);
+    await adapter.disconnect({ signal: controller.signal }); assert.equal(logouts, 1); assert.equal(reads, 2); assert.equal(closes, starts);
+    for (mode of ['missing', 'account', 'shape', 'metadata', 'file', 'close-metadata', 'cancelled']) {
+      for (const operation of ['verifyDisconnected', 'disconnect']) {
+        controller = new AbortController(); const selected = mode, before = { starts, closes, logouts }, privateConfig = readFileSync(config);
+        await assert.rejects(adapter[operation]({ signal: controller.signal }), /provider-storage-blocked|AbortError|aborted/);
+        assert.equal(starts, before.starts + 1); assert.equal(closes, before.closes + 1);
+        assert.equal(logouts, before.logouts + (operation === 'disconnect' ? 1 : 0)); assert.deepEqual(readFileSync(config), privateConfig);
+        rmSync(join(home, 'auth.json'), { force: true }); mode = selected;
+      }
+    }
+    mode = 'valid'; controller = new AbortController();
+    let finished = false, entered; const closing = new Promise(resolve => { entered = resolve; }), hold = new Promise(resolve => { release = resolve; });
+    const held = codexAdapter({ directory: root, openBrowser: async () => {}, async initialize() { starts++;
+      return { async request() { return { account: null, requiresOpenaiAuth: false }; }, async close() { entered(); await hold; closes++; } }; } });
+    pending = held.verifyDisconnected({ signal: controller.signal }).then(value => { finished = true; return value; });
+    await closing; await new Promise(setImmediate); assert.equal(finished, false); release(); assert.equal(await pending, true); assert.equal(closes, starts);
+    assert.deepEqual(readFileSync(config), bytes); assert.equal(existsSync(join(home, 'auth.json')), false);
+  } finally { controller.abort(); release?.(); await Promise.allSettled(pending ? [pending] : []); rmSync(root, { recursive: true }); assert.equal(existsSync(root), false); }
 });

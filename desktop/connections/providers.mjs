@@ -1,27 +1,35 @@
-import { mkdir, writeFile, readFile, lstat, realpath, access, rm } from 'node:fs/promises';
+import { mkdir, writeFile, readFile, lstat, realpath, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { AppServer, CLI, isolatedEnv, isAllowedAuthUrl } from '../codex/client.mjs';
 import { catalog, chat, broker } from '../ollama/client.mjs';
+import { canonicalJSON, record } from '../core/settings.mjs';
 
 export const codexVersion = 'codex-cli 0.160.0';
 const exec = promisify(execFile);
 const modelId = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,159}$/.test(value);
 const config = 'cli_auth_credentials_store = "keyring"\nforced_login_method = "chatgpt"\n';
-const present = async path => { try { await access(path); return true; } catch (error) { if (error.code === 'ENOENT') return false; throw error; } };
+const present = async path => { try { await lstat(path); return true; } catch (error) { if (error.code === 'ENOENT') return false; throw error; } };
 
 export async function protectedCodexHome(directory) {
-  const home = join(directory, 'codex');
-  await mkdir(home, { mode: 0o700 }).catch(error => { if (error.code !== 'EEXIST') throw error; });
-  const info = await lstat(home);
-  if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o777) !== 0o700 || info.uid !== process.getuid() || await realpath(home) !== resolve(home)) throw new Error('provider-storage-blocked');
-  const path = join(home, 'config.toml');
-  await writeFile(path, config, { flag: 'wx', mode: 0o600 }).catch(error => { if (error.code !== 'EEXIST') throw error; });
-  const file = await lstat(path);
-  if (!file.isFile() || file.isSymbolicLink() || file.nlink !== 1 || (file.mode & 0o777) !== 0o600 || file.uid !== process.getuid() || await readFile(path, 'utf8') !== config || await present(join(home, 'auth.json'))) throw new Error('provider-storage-blocked');
-  return home;
+  return codexHome(directory, true);
+}
+async function codexHome(directory, create) {
+  try {
+    const root = await lstat(directory), home = join(directory, 'codex');
+    if (!root.isDirectory() || root.isSymbolicLink() || root.uid !== process.getuid() || (root.mode & 0o777) !== 0o700 || await realpath(directory) !== resolve(directory)) throw Error();
+    if (create) await mkdir(home, { mode: 0o700 }).catch(error => { if (error.code !== 'EEXIST') throw error; });
+    const info = await lstat(home);
+    if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o777) !== 0o700 || info.uid !== process.getuid() || await realpath(home) !== home) throw Error();
+    const path = join(home, 'config.toml');
+    if (create) await writeFile(path, config, { flag: 'wx', mode: 0o600 }).catch(error => { if (error.code !== 'EEXIST') throw error; });
+    const file = await lstat(path);
+    if (!file.isFile() || file.isSymbolicLink() || file.nlink !== 1 || file.size !== Buffer.byteLength(config) || (file.mode & 0o777) !== 0o600
+      || file.uid !== process.getuid() || await realpath(path) !== path || await readFile(path, 'utf8') !== config || await present(join(home, 'auth.json'))) throw Error();
+    return home;
+  } catch { throw Error('provider-storage-blocked'); }
 }
 
 async function initializeCodex(home, context) {
@@ -52,7 +60,31 @@ export async function codexModels(server, signal) {
   throw new Error('catalog-invalid');
 }
 
-export function codexAdapter({ directory, openBrowser }) {
+export function codexAdapter({ directory, openBrowser, initialize = initializeCodex }) {
+  if (typeof initialize !== 'function') throw Error('provider-unavailable');
+  async function disconnected(signal, logout) {
+    if (signal !== undefined && !(signal instanceof AbortSignal)) throw Error('provider-storage-blocked');
+    signal?.throwIfAborted();
+    const home = await codexHome(directory, logout), paths = [directory, home, join(home, 'config.toml')];
+    const original = await Promise.all(paths.map(path => lstat(path, { bigint: true })));
+    async function check() {
+      signal?.throwIfAborted(); await codexHome(directory, false);
+      const current = await Promise.all(paths.map(path => lstat(path, { bigint: true })));
+      if (current.some((value, index) => (index === 2 ? ['dev', 'ino', 'uid', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs'] : ['dev', 'ino', 'uid', 'mode'])
+        .some(key => value[key] !== original[index][key]))) throw Error('provider-storage-blocked');
+      signal?.throwIfAborted();
+    }
+    let server;
+    try {
+      await check(); server = await initialize(home); await check();
+      if (logout) { await server.request('account/logout'); await check(); }
+      const state = await server.request('account/read', { refreshToken: false }); await check();
+      canonicalJSON(state); record(state, ['account', 'requiresOpenaiAuth']);
+      if (state.account !== null || typeof state.requiresOpenaiAuth !== 'boolean') throw Error('provider-storage-blocked');
+    } catch { throw Error('provider-storage-blocked'); }
+    finally { if (server) { await server.close(); await check(); } }
+    return true;
+  }
   async function inspect(server, home, signal, before) {
     signal?.throwIfAborted();
     const response = await server.request('account/read', { refreshToken: true }, 30000), account = response.account;
@@ -112,12 +144,8 @@ export function codexAdapter({ directory, openBrowser }) {
         return { ...verified, view: { ...verified.view, selectedModel: model, capability: { model, testedAt: Date.now(), toolLoop: true, stream: true, resumed: true, usage: null, scope: 'Synthetic provider path only; each execution step still needs preflight.' } } };
       } finally { if (server) await server.close(); await rm(workspace, { recursive: true, force: true }); }
     },
-    async disconnect() {
-      const home = await protectedCodexHome(directory), server = await initializeCodex(home);
-      try { await server.request('account/logout'); const state = await server.request('account/read', { refreshToken: false });
-        if (state.account || await present(join(home, 'auth.json'))) throw new Error('provider-storage-blocked'); }
-      finally { await server.close(); }
-    },
+    async disconnect({ signal } = {}) { await disconnected(signal, true); },
+    verifyDisconnected({ signal } = {}) { return disconnected(signal, false); },
   };
 }
 

@@ -10,12 +10,13 @@ import { openDevelopmentStore } from '../development/state.mjs';
 import { openArtifactStore } from '../delivery/artifacts.mjs';
 import { verifyProtectedBackup, materializeProtectedBackup } from '../privacy/backup.mjs';
 import { captureUpdateBackups } from './backup.mjs';
+import { openUpdateMaintenance } from './maintenance.mjs';
 
 test('update capture seals current compatible stores under real read locks and preserves authority on refusal', async () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-54-update-backup-')));
   const build = { kind: 'pipeliner-desktop-build', schemaVersion: 1, sourceCommit: 'a'.repeat(40), gitTree: 'b'.repeat(40),
     version: '0.1.0', platform: 'darwin', architecture: 'arm64' };
-  const stores = ['workspaces', 'development', 'artifacts']; let vault, workspaces, development, artifacts, writer;
+  const stores = ['workspaces', 'development', 'artifacts']; let vault, workspaces, development, artifacts, writer, journal;
   try {
     // Authenticated installation encryption is real; only the OS wrapping of its key is synthetic.
     vault = await openVault(root, { available: async () => true, encrypt: async text => Buffer.from(text),
@@ -40,6 +41,25 @@ test('update capture seals current compatible stores under real read locks and p
       assert.deepEqual(readFileSync(join(root, receipt.store + '.sqlite')), originals[receipt.store]);
     }
     assert.deepEqual(readFileSync(authority), bytes);
+    journal = openUpdateMaintenance(root, { vault });
+    const intent = journal.begin({ from: build, to: { ...build, version: '0.2.0', sourceCommit: 'c'.repeat(40), gitTree: 'd'.repeat(40) }, sha256: 'e'.repeat(64), bytes: 1000 });
+    journal.advance(intent, 'staged'); const beforeBinding = journal.read();
+    assert.throws(() => journal.advance(intent, 'verified'));
+    assert.throws(() => journal.bindBackups({}, captured));
+    assert.throws(() => journal.bindBackups(intent, { ...captured, build: { ...build, gitTree: 'f'.repeat(40) } }));
+    for (const databases of [captured.databases.slice(1), [...captured.databases].reverse(),
+      captured.databases.map((receipt, index) => index ? receipt : { ...receipt, path: join(root, 'foreign.pipeliner-backup') }),
+      captured.databases.map((receipt, index) => index ? receipt : { ...receipt, sourceHash: 'f'.repeat(64) })]) {
+      assert.throws(() => journal.bindBackups(intent, { ...captured, databases })); assert.deepEqual(journal.read(), beforeBinding);
+    }
+    const damagedPath = captured.databases[0].path, intact = readFileSync(damagedPath), damaged = Buffer.from(intact);
+    damaged[damaged.length - 1] ^= 1; writeFileSync(damagedPath, damaged);
+    assert.throws(() => journal.bindBackups(intent, captured)); assert.deepEqual(journal.read(), beforeBinding); writeFileSync(damagedPath, intact);
+    journal.bindBackups(intent, captured); assert.deepEqual(journal.read().backups, captured);
+    assert.equal(readFileSync(join(root, 'maintenance.sqlite')).includes(Buffer.from(damagedPath)), false);
+    assert.throws(() => journal.bindBackups(intent, captured)); journal.advance(intent, 'verified'); journal.advance(intent, 'replacing');
+    const replacement = journal.read(); assert.throws(() => journal.cancel(intent)); journal.close(); journal = openUpdateMaintenance(root, { vault });
+    assert.deepEqual(journal.read(), replacement); assert.equal(journal.owned(), false); assert.throws(() => journal.advance(intent, 'relaunching'));
     const recovery = realpathSync(mkdtempSync(join(root, 'recovery-'))), restored = [];
     for (const receipt of captured.databases) {
       const value = materializeProtectedBackup(receipt.path, { directory: recovery, vault, store: receipt.store, version: receipt.schemaVersion, checkpoint() {} });
@@ -105,7 +125,7 @@ test('update capture seals current compatible stores under real read locks and p
     assert.equal(archives().length, 4); writer.exec('BEGIN EXCLUSIVE; ROLLBACK;');
     for (const store of stores) assert.deepEqual(readFileSync(join(root, store + '.sqlite')), beforeLate[store]);
   } finally {
-    writer?.close(); await artifacts?.close(); development?.close(); workspaces?.close(); vault?.close();
+    journal?.close(); writer?.close(); await artifacts?.close(); development?.close(); workspaces?.close(); vault?.close();
     rmSync(root, { recursive: true }); assert.equal(existsSync(root), false);
   }
 });

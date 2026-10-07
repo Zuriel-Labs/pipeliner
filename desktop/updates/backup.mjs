@@ -1,12 +1,40 @@
 import { constants, lstatSync, realpathSync, openSync, fstatSync, closeSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { buildIdentity } from '../package/build.mjs';
-import { immutable, record } from '../core/settings.mjs';
+import { canonicalJSON, immutable, record } from '../core/settings.mjs';
 import { createProtectedBackup, verifyProtectedBackup } from '../privacy/backup.mjs';
 
 const stores = [['workspaces', 5], ['development', 2], ['artifacts', 2]];
 const same = (a, b) => ['dev', 'ino', 'mode', 'uid', 'nlink', 'size', 'mtimeMs', 'ctimeMs'].every(key => a[key] === b[key]);
+
+// Shape checks on journal read do not authenticate files; verifyUpdateBackups does that before consumption.
+export function updateBackups(value, { directory, build }) {
+  canonicalJSON(value); record(value, ['kind', 'schemaVersion', 'build', 'databases']); buildIdentity(value.build); buildIdentity(build);
+  if (typeof directory !== 'string' || resolve(directory) !== directory || /[\x00-\x1f\x7f]/.test(directory)
+    || value.kind !== 'pipeliner-update-backups' || value.schemaVersion !== 1 || canonicalJSON(value.build) !== canonicalJSON(build)
+    || !Array.isArray(value.databases) || value.databases.length !== stores.length) throw Error('update-backup-unverified');
+  for (const [index, [store, version]] of stores.entries()) {
+    const receipt = value.databases[index]; record(receipt, ['path', 'version', 'id', 'store', 'schemaVersion', 'sourceBytes', 'sourceHash', 'chunks', 'sha256']);
+    if (receipt.version !== 1 || receipt.store !== store || receipt.schemaVersion !== version
+      || typeof receipt.id !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(receipt.id)
+      || receipt.path !== join(directory, `${store}-v${version}-${receipt.id}.pipeliner-backup`)
+      || !Number.isSafeInteger(receipt.sourceBytes) || receipt.sourceBytes < 100 || receipt.sourceBytes > 512 * 1024 ** 2
+      || receipt.chunks !== Math.ceil(receipt.sourceBytes / 65536)
+      || ![receipt.sourceHash, receipt.sha256].every(hash => typeof hash === 'string' && /^[a-f0-9]{64}$/.test(hash))) throw Error('update-backup-unverified');
+  }
+  return immutable(value);
+}
+
+export function verifyUpdateBackups({ capture, directory, build, vault, checkpoint = () => {} }) {
+  const result = updateBackups(capture, { directory, build });
+  if (typeof checkpoint !== 'function') throw Error('update-backup-unverified');
+  for (const receipt of result.databases) {
+    const verified = verifyProtectedBackup(receipt.path, { vault, store: receipt.store, version: receipt.schemaVersion, checkpoint });
+    if (canonicalJSON(verified) !== canonicalJSON(receipt)) throw Error('update-backup-unverified');
+  }
+  checkpoint(); return result;
+}
 
 // Host-only capture under the maintenance fence. No restoration, authority rollback or worker replay.
 export function captureUpdateBackups(options) {

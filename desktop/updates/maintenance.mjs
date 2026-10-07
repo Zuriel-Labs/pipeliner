@@ -6,6 +6,7 @@ import { canonicalJSON, immutable, record } from '../core/settings.mjs';
 import { createRecordCodec } from '../privacy/records.mjs';
 import { buildIdentity } from '../package/build.mjs';
 import { isNewerUpdateVersion } from './manifest.mjs';
+import { updateBackups, verifyUpdateBackups } from './backup.mjs';
 
 const phases = ['preparing', 'staged', 'verified', 'replacing', 'relaunching', 'repair-required'];
 const time = value => Number.isSafeInteger(value) && value >= 0;
@@ -54,8 +55,9 @@ export function openUpdateMaintenance(directory, { vault, clock = Date.now }) {
       if (!row || !time(row.revision) || !time(row.clock) || !time(now) || now < row.clock) throw Error();
       const value = codec.decode(identity, row.payload, { revision: row.revision, clock: row.clock });
       if (value !== null) {
-        record(value, ['schemaVersion', 'id', 'phase', 'from', 'to', 'sha256', 'bytes', 'createdAt', 'updatedAt', 'revision']);
+        record(value, ['schemaVersion', 'id', 'phase', 'from', 'to', 'sha256', 'bytes', 'createdAt', 'updatedAt', 'revision'], ['backups']);
         plan({ from: value.from, to: value.to, sha256: value.sha256, bytes: value.bytes });
+        if (value.backups !== undefined) updateBackups(value.backups, { directory, build: value.from });
         if (value.schemaVersion !== 1 || typeof value.id !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value.id)
           || !phases.includes(value.phase) || !time(value.createdAt) || value.createdAt > value.updatedAt
           || value.updatedAt !== row.clock || value.revision !== row.revision) throw Error();
@@ -94,8 +96,21 @@ export function openUpdateMaintenance(directory, { vault, clock = Date.now }) {
       advance(token, phase) {
         const revision = transaction(state => {
           if (!owned(state) || token !== active.token || !phases.includes(phase) || state.value.phase === 'repair-required'
+            || ['verified', 'replacing', 'relaunching'].includes(phase) && !state.value.backups
             || phase !== 'repair-required' && phases.indexOf(phase) !== phases.indexOf(state.value.phase) + 1) throw Error();
           return save(state, { ...state.value, phase });
+        });
+        active.revision = revision;
+      },
+      bindBackups(token, capture) {
+        const backups = guarded(() => {
+          const state = readState();
+          if (!owned(state) || token !== active.token || state.value.backups || !['preparing', 'staged'].includes(state.value.phase)) throw Error();
+          return verifyUpdateBackups({ capture, directory, build: state.value.from, vault });
+        });
+        const revision = transaction(state => {
+          if (!owned(state) || token !== active.token || state.value.backups || !['preparing', 'staged'].includes(state.value.phase)) throw Error();
+          return save(state, { ...state.value, backups });
         });
         active.revision = revision;
       },

@@ -48,12 +48,12 @@ test('durable update intent fences stale owners and preserves interrupted or alt
     assert.equal(await gate.control(() => 'ready'), 'ready');
     assert.throws(() => store.cancel(token));
     const next = store.begin(plan); assert.equal(store.read().revision, 4);
-    store.advance(next, 'staged'); store.advance(next, 'verified'); store.advance(next, 'replacing');
-    const replacing = store.read(); assert.throws(() => store.cancel(next)); assert.deepEqual(store.read(), replacing);
-    store.close(); store = open(); assert.deepEqual(store.read(), replacing); assert.equal(store.clear(), false);
+    store.advance(next, 'staged'); assert.throws(() => store.advance(next, 'verified')); store.advance(next, 'repair-required');
+    const pending = store.read(); assert.throws(() => store.cancel(next)); assert.deepEqual(store.read(), pending);
+    store.close(); store = open(); assert.deepEqual(store.read(), pending); assert.equal(store.clear(), false);
     assert.equal(store.owned(), false); await assert.rejects(gate.control(() => assert.fail('restart replay')), /maintenance-recovery-required/);
     assert.throws(() => store.advance(next, 'relaunching')); assert.throws(() => store.begin(plan));
-    now = replacing.updatedAt - 1; assert.throws(() => store.read()); assert.equal(store.clear(), false); now = replacing.updatedAt;
+    now = pending.updatedAt - 1; assert.throws(() => store.read()); assert.equal(store.clear(), false); now = pending.updatedAt;
     db = new DatabaseSync(file); db.exec('PRAGMA user_version=2'); store.close(); assert.throws(open);
     db.exec('PRAGMA user_version=1'); store = open();
     const row = db.prepare('SELECT payload FROM maintenance_state WHERE id=1').get(), changed = Buffer.from(row.payload); changed[changed.length - 1] ^= 1;

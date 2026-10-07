@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { runtimeInputs, readPackageInput } from '../desktop/package/inputs.mjs';
 import { sourceCandidate, committedInput } from '../desktop/package/source.mjs';
 import { embedIntegrityDigest } from '../desktop/package/integrity.mjs';
-import { buildIdentity, buildIdentityName, readBuildIdentity } from '../desktop/package/build.mjs';
+import { buildIdentity, buildIdentityName, readBuildIdentity, dataCompatibilityName, dataCompatibilityForBuild, readDataCompatibility } from '../desktop/package/build.mjs';
 import { canonicalJSON } from '../desktop/core/settings.mjs';
 import { backgroundPlist, backgroundBundleId } from '../desktop/background/native.mjs';
 import { createPackageWithOptions, getRawHeader, extractFile, listPackage, statFile } from '../desktop/package/node_modules/@electron/asar/lib/asar.js';
@@ -79,6 +79,8 @@ try {
   const identity=buildIdentity({kind:'pipeliner-desktop-build',schemaVersion:1,sourceCommit:candidate.sourceCommit,gitTree:candidate.gitTree,
     version:manifest.version,platform:process.platform,architecture:process.arch});
   const identityBytes=Buffer.from(canonicalJSON(identity)+'\n');await writeFile(join(resources,buildIdentityName),identityBytes,{flag:'wx',mode:0o600});
+  const dataSupport=dataCompatibilityForBuild(identity,codex.version),dataSupportBytes=Buffer.from(canonicalJSON(dataSupport)+'\n');
+  await writeFile(join(resources,dataCompatibilityName),dataSupportBytes,{flag:'wx',mode:0o600});
   for(const name of ['LICENSE','LICENSES.chromium.html']){await access(join(runtime,name));await writeFile(join(resources,name),await readFile(join(runtime,name)),{flag:'wx',mode:0o600});}
   await createPackageWithOptions(stage,archive,{});
   const headerSha256=hash(getRawHeader(archive).headerString), archiveFiles=listPackage(archive).map(file=>file.slice(1)).filter(file=>!('files' in statFile(archive,file,false))).sort();
@@ -138,6 +140,7 @@ try {
   await sign(app,true);await command('/usr/bin/codesign',['--verify','--deep','--strict',app]);
   await command('/usr/bin/codesign',['--verify','--deep','--strict','-R','=anchor apple generic and identifier "'+backgroundBundleId+'"',app]);
   if(canonicalJSON(await readBuildIdentity(app))!==canonicalJSON(identity))throw new Error('package-build-identity-unverified');
+  if(canonicalJSON(await readDataCompatibility(app,identity))!==canonicalJSON(dataSupport))throw new Error('package-data-support-unverified');
   for(const option of ['--qualify','--data-directory=/synthetic-denied','--key-helper=/synthetic-denied','--calendar-helper=/synthetic-denied']){
     try{await command(join(contents,'MacOS/Pipeliner'),[option],{timeout:10000,maxBuffer:8192});throw new Error('package-startup-guard-failed');}
     catch(error){if(error.code!==2||error.stdout||!error.stderr?.includes('Pipeliner rejected an unsupported packaged startup option.'))throw new Error('package-startup-guard-failed');}
@@ -146,7 +149,7 @@ try {
   const dmg=join(temporary,'Pipeliner-0.1.0-mac-arm64-review.dmg');
   await command('/usr/bin/hdiutil',['create','-volname','Pipeliner Review','-srcfolder',distribution,'-format','UDZO','-ov',dmg],{timeout:180000});
   await command('/usr/bin/hdiutil',['verify',dmg],{timeout:180000});
-  const report={kind:'local-mac-review',...candidate,files:undefined,buildRoot:temporary,app,dmg,sourceInputs:inputs,nativeInputs,electron,codex,buildIdentity:{resource:buildIdentityName,sha256:hash(identityBytes),identity},archive:{sha256:await fileHash(archive),headerSha256},fuses,dmgSha256:await fileHash(dmg),signing:'Apple-Development-local-only',pending:['Developer ID and notarization','actual packaged native QA','Human PM acceptance','Windows/Linux'],retained:{owner:'Issue #54',trigger:'replace candidate or finish PM testing'},versions:{node:process.versions.node,os:(await command('/usr/bin/sw_vers',['-productVersion'])).stdout.trim(),architecture:process.arch}};
+  const report={kind:'local-mac-review',...candidate,files:undefined,buildRoot:temporary,app,dmg,sourceInputs:inputs,nativeInputs,electron,codex,buildIdentity:{resource:buildIdentityName,sha256:hash(identityBytes),identity},dataSupport:{resource:dataCompatibilityName,sha256:hash(dataSupportBytes),declaration:dataSupport},archive:{sha256:await fileHash(archive),headerSha256},fuses,dmgSha256:await fileHash(dmg),signing:'Apple-Development-local-only',pending:['Developer ID and notarization','actual packaged native QA','Human PM acceptance','Windows/Linux'],retained:{owner:'Issue #54',trigger:'replace candidate or finish PM testing'},versions:{node:process.versions.node,os:(await command('/usr/bin/sw_vers',['-productVersion'])).stdout.trim(),architecture:process.arch}};
   await writeFile(join(temporary,'build.json'),JSON.stringify(report,null,2)+'\n',{flag:'wx',mode:0o600});
   for(const path of [stage,nativeRoot,runtime,electronZip,codexTar,license,entitlements,userConfig,globalConfig,join(temporary,'npm-cache'),join(temporary,'node-compile-cache')])await rm(path,{recursive:true,force:true});
   retained=true;console.log(JSON.stringify({built:true,sourceCommit:candidate.sourceCommit,gitTree:candidate.gitTree,app,dmg,dmgSha256:report.dmgSha256,buildRecord:join(temporary,'build.json'),signing:report.signing,pending:report.pending}));

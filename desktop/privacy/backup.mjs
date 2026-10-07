@@ -31,17 +31,18 @@ function stable(path, fd, before, parent) {
     || !same(parent.info, lstatSync(parent.path)) || realpathSync(parent.path) !== parent.path) throw Error();
 }
 const binding = (id, part) => ({ purpose: 'migration', repository: null, id: id + '.' + part });
-function hashFile(fd, size) {
+function hashFile(fd, size, checkpoint = () => {}) {
   const hash = createHash('sha256');
-  for (let offset = 0; offset < size; offset += chunkSize) { const bytes = read(fd, Math.min(chunkSize, size - offset), offset); try { hash.update(bytes); } finally { bytes.fill(0); } }
+  for (let offset = 0; offset < size; offset += chunkSize) { checkpoint(); const bytes = read(fd, Math.min(chunkSize, size - offset), offset); try { hash.update(bytes); } finally { bytes.fill(0); } }
   return hash.digest('hex');
 }
 
 // Host-only. The store caller must hold its exclusive writer fence and use checkpointed DELETE journaling.
 // Verification reads encrypted archives only; it never restores a database, grants authority or replays work.
-export function createProtectedBackup(source, { vault, store, version }) {
+export function createProtectedBackup(source, { vault, store, version, checkpoint = () => {} }) {
   let input, output, path, owned, written = 0, parent; const outputHash = createHash('sha256');
   try {
+    if (typeof checkpoint !== 'function') throw Error(); checkpoint();
     protection(vault); expected(store, version); parent = location(source);
     const legacyName = new RegExp(`^${store}-v${version}-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\\.sqlite$`);
     if (basename(source) !== store + '.sqlite' && !legacyName.test(basename(source)) || ['-wal', '-journal'].some(suffix => existsSync(source + suffix) && lstatSync(source + suffix).size > 0)) throw Error();
@@ -50,7 +51,7 @@ export function createProtectedBackup(source, { vault, store, version }) {
     const originalHeader = read(input, 100, 0);
     try { if (!originalHeader.subarray(0, 16).equals(Buffer.from('SQLite format 3\0')) || originalHeader.readUInt32BE(60) !== version) throw Error(); } finally { originalHeader.fill(0); }
     const id = randomUUID(), manifest = { version: 1, id, store, schemaVersion: version, sourceBytes: before.size,
-      sourceHash: hashFile(input, before.size), chunks: Math.ceil(before.size / chunkSize) };
+      sourceHash: hashFile(input, before.size, checkpoint), chunks: Math.ceil(before.size / chunkSize) };
     stable(source, input, before, parent);
     path = join(parent.path, `${store}-v${version}-${id}.pipeliner-backup`);
     output = openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW, 0o600); owned = fstatSync(output);
@@ -63,16 +64,17 @@ export function createProtectedBackup(source, { vault, store, version }) {
     try { sealed = vault.sealPayload(binding(id, 'manifest'), plain); } finally { plain.fill(0); }
     const header = Buffer.alloc(headerSize); magic.copy(header); header.write(id, 8, 36, 'ascii'); header.writeUInt32BE(sealed.length, 44); write(header); write(sealed);
     for (let index = 0; index < manifest.chunks; index++) {
+      checkpoint();
       plain = read(input, Math.min(chunkSize, before.size - index * chunkSize), index * chunkSize);
       try { sealed = vault.sealPayload(binding(id, 'chunk.' + index), plain); } finally { plain.fill(0); }
       const length = Buffer.alloc(4); length.writeUInt32BE(sealed.length); write(length); write(sealed);
     }
     fsyncSync(output); stable(source, input, before, parent);
-    const result = verifyProtectedBackup(path, { vault, store, version });
+    const result = verifyProtectedBackup(path, { vault, store, version, checkpoint });
     if (result.sourceHash !== manifest.sourceHash || result.sha256 !== outputHash.copy().digest('hex')) throw Error();
     const directory = openSync(parent.path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
     try { if (!same(parent.info, fstatSync(directory))) throw Error(); fsyncSync(directory); } finally { closeSync(directory); }
-    return { path, ...result };
+    checkpoint(); return { path, ...result };
   } catch {
     let preserved = false;
     if (output !== undefined && owned) try {
@@ -118,9 +120,10 @@ export function protectLegacyBackups(directory, store, { vault, currentVersion }
   return results;
 }
 
-export function verifyProtectedBackup(path, { vault, store, version }) {
+export function verifyProtectedBackup(path, { vault, store, version, checkpoint = () => {} }) {
   let fd, plain;
   try {
+    if (typeof checkpoint !== 'function') throw Error(); checkpoint();
     expected(store, version); const parent = location(path);
     if (!new RegExp(`^${store}-v${version}-[a-f0-9-]{36}\\.pipeliner-backup$`).test(basename(path))) throw Error();
     fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); const before = fstatSync(fd);
@@ -134,6 +137,7 @@ export function verifyProtectedBackup(path, { vault, store, version }) {
       || manifest.sourceBytes < 100 || manifest.sourceBytes > maximum || !/^[a-f0-9]{64}$/.test(manifest.sourceHash) || manifest.chunks !== Math.ceil(manifest.sourceBytes / chunkSize)) throw Error();
     let position = headerSize + length; const hash = createHash('sha256');
     for (let index = 0; index < manifest.chunks; index++) {
+      checkpoint();
       const count = read(fd, 4, position).readUInt32BE(0), expected = Math.min(chunkSize, manifest.sourceBytes - index * chunkSize);
       if (count !== expected + 28) throw Error(); position += 4;
       plain = vault.openPayload(binding(id, 'chunk.' + index), read(fd, count, position));
@@ -141,7 +145,7 @@ export function verifyProtectedBackup(path, { vault, store, version }) {
       position += count;
     }
     if (position !== before.size || hash.digest('hex') !== manifest.sourceHash) throw Error();
-    const sha256 = hashFile(fd, before.size); stable(path, fd, before, parent);
+    const sha256 = hashFile(fd, before.size, checkpoint); stable(path, fd, before, parent); checkpoint();
     return { path, ...manifest, sha256 };
   } catch { throw Error('protected-backup-invalid'); }
   finally { plain?.fill(0); if (fd !== undefined) closeSync(fd); }

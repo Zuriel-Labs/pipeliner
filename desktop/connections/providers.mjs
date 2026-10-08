@@ -79,7 +79,7 @@ export function codexAdapter({ directory, openBrowser, initialize = initializeCo
       await check(); server = await initialize(home); await check();
       if (logout) { await server.request('account/logout'); await check(); }
       const state = await server.request('account/read', { refreshToken: false }); await check();
-      canonicalJSON(state); record(state, ['account', 'requiresOpenaiAuth']);
+      canonicalJSON(state); record(state, ['account', 'requiresOpenaiAuth'], Object.keys(state));
       if (state.account !== null || typeof state.requiresOpenaiAuth !== 'boolean') throw Error('provider-storage-blocked');
     } catch { throw Error('provider-storage-blocked'); }
     finally { if (server) { await server.close(); await check(); } }

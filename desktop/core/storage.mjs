@@ -85,7 +85,7 @@ export function captureRecoveryDatabase(directory, name, { scratch, checkpoint, 
     privateRoot(temporary, temporaryOwner); rmdirSync(temporary); temporary = undefined;
   }
   try {
-    if (!['execution.sqlite', 'policy.sqlite', 'development.sqlite', 'workspaces.sqlite'].includes(name)
+    if (!['execution.sqlite', 'policy.sqlite', 'development.sqlite', 'workspaces.sqlite', 'skills.sqlite', 'tools.sqlite', 'privacy.sqlite', 'artifacts.sqlite'].includes(name)
       || typeof checkpoint !== 'function' || typeof read !== 'function') throw Error('recovery-snapshot-unverified');
     root = privateRoot(directory); scratchRoot = privateRoot(scratch);
     if (readdirSync(scratch).length) throw Error('recovery-snapshot-cleanup-required');

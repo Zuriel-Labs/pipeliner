@@ -6,7 +6,7 @@ import { protectedFile } from '../core/storage.mjs';
 import { canonicalJSON, immutable, record } from '../core/settings.mjs';
 import { createRecordCodec } from '../privacy/records.mjs';
 import { buildIdentity, buildIdentityName, readBuildIdentity } from '../package/build.mjs';
-import { inspectManagedData } from '../privacy/inventory.mjs';
+import { inspectManagedData, captureRetainedRecords } from '../privacy/inventory.mjs';
 import { runMacUpdateCommand } from './mac.mjs';
 import { backgroundBundleId } from '../background/native.mjs';
 
@@ -24,7 +24,7 @@ function snapshot(value) {
     || value.stored < 0 || value.stored > value.count || !digest(value.sha256)) throw Error();
 }
 export function checkUninstallPlan(value) {
-  canonicalJSON(value); record(value, ['bundle', 'identity', 'team', 'custody', 'credentials', 'service', 'recordInventorySha256']);
+  canonicalJSON(value); record(value, ['bundle', 'identity', 'team', 'custody', 'credentials', 'service', 'recordInventorySha256'], ['recordInventoryVersion']);
   buildIdentity(value.identity); record(value.custody, ['device', 'inode']); record(value.credentials, ['before', 'after']);
   snapshot(value.credentials.before); snapshot(value.credentials.after); record(value.service, ['qualified', 'status']);
   if (typeof value.bundle !== 'string' || value.bundle.length > 512 || resolve(value.bundle) !== value.bundle
@@ -33,6 +33,7 @@ export function checkUninstallPlan(value) {
     || Object.values(value.custody).some(item => typeof item !== 'string' || !/^[1-9][0-9]{0,19}$/.test(item))
     || value.credentials.before.count !== value.credentials.after.count || value.credentials.after.stored !== 0
     || value.service.qualified !== true || !['not-registered', 'enabled', 'requires-approval', 'not-found'].includes(value.service.status)
+    || value.recordInventoryVersion !== undefined && value.recordInventoryVersion !== 2
     || !digest(value.recordInventorySha256)) throw Error();
 }
 function intent(value, row) {
@@ -51,7 +52,8 @@ function checkpoint(work) {
   const result = work(); if (result instanceof Promise) result.catch(() => {});
   if (result !== undefined) throw Error();
 }
-function recordInventory(directory) {
+function recordInventory(directory, version, checkpoint) {
+  if (version === 2) { const captured = captureRetainedRecords(directory, checkpoint); try { return captured.value; } finally { captured.close(); } }
   const inventory = inspectManagedData(directory).filter(value => ['policy', 'workspaces', 'development', 'execution', 'extensions', 'privacy', 'artifacts', 'archives', 'migration'].includes(value.id));
   if (inventory.some(value => value.state === 'unavailable')) throw Error();
   return createHash('sha256').update(canonicalJSON(inventory.map(({ id, count, bytes, state }) => ({ id, count, bytes, state })))).digest('hex');
@@ -59,12 +61,15 @@ function recordInventory(directory) {
 
 // Read-only host capture. Signature/custody evidence does not grant PM authority or qualify any removal effect.
 export async function captureMacUninstallPlan(options, { run = runMacUpdateCommand } = {}) {
+  let retainedRecords;
   try {
-    record(options, ['app', 'background', 'directory', 'vault', 'checkpoint'], ['signal']);
+    record(options, ['app', 'background', 'directory', 'vault', 'checkpoint'], ['signal', 'recordInventoryVersion']);
     if (Object.getOwnPropertySymbols(options).length || Object.values(Object.getOwnPropertyDescriptors(options)).some(value => value.get || value.set)
       || process.platform !== 'darwin' || process.arch !== 'arm64' || options.app.isPackaged !== true || process.argv.includes('--background-helper')
-      || typeof options.checkpoint !== 'function' || typeof run !== 'function' || options.signal !== undefined && !(options.signal instanceof AbortSignal)) throw Error();
+      || typeof options.checkpoint !== 'function' || typeof run !== 'function' || options.signal !== undefined && !(options.signal instanceof AbortSignal)
+      || options.recordInventoryVersion !== undefined && ![1, 2].includes(options.recordInventoryVersion)) throw Error();
     const { app, background, directory, vault, checkpoint: activeCheckpoint } = options, signal = options.signal ?? new AbortController().signal;
+    const inventoryVersion = options.recordInventoryVersion ?? 2;
     checkpoint(activeCheckpoint); signal.throwIfAborted();
     const executable = process.execPath, bundle = dirname(dirname(dirname(executable)));
     if (!bundle.endsWith('/Pipeliner.app') || executable !== join(bundle, 'Contents/MacOS/Pipeliner') || resolve(executable) !== executable
@@ -81,7 +86,9 @@ export async function captureMacUninstallPlan(options, { run = runMacUpdateComma
     const original = paths.map(inspect), root = lstatSync(directory, { bigint: true });
     function service() { const value = background.inspect(); canonicalJSON(value); record(value, ['qualified', 'status']);
       if (value.qualified !== true || !['not-registered', 'enabled', 'requires-approval', 'not-found'].includes(value.status)) throw Error(); return immutable(value); }
-    const capturedService = service(), capturedCredentials = vault.previewCredentialRemoval(), capturedRecords = recordInventory(directory);
+    const capturedService = service(), capturedCredentials = vault.previewCredentialRemoval();
+    if (inventoryVersion === 2) retainedRecords = captureRetainedRecords(directory, activeCheckpoint);
+    const capturedRecords = retainedRecords?.value ?? recordInventory(directory, inventoryVersion, activeCheckpoint);
     function check() {
       checkpoint(activeCheckpoint); signal.throwIfAborted();
       const current = lstatSync(directory, { bigint: true });
@@ -90,7 +97,7 @@ export async function captureMacUninstallPlan(options, { run = runMacUpdateComma
         || !['dev', 'ino', 'uid', 'mode'].every(key => root[key] === current[key])
         || paths.some((path, index) => !stable(original[index], inspect(path, index)))
         || canonicalJSON(service()) !== canonicalJSON(capturedService) || canonicalJSON(vault.previewCredentialRemoval()) !== canonicalJSON(capturedCredentials)
-        || recordInventory(directory) !== capturedRecords) throw Error();
+        || (retainedRecords ? !retainedRecords.verify() : recordInventory(directory, inventoryVersion, activeCheckpoint) !== capturedRecords)) throw Error();
     }
     check(); const identity = await readBuildIdentity(bundle, { signal }); check();
     const details = (await run('/usr/bin/codesign', ['--display', '--verbose=4', bundle], signal)).stderr; check();
@@ -103,9 +110,10 @@ export async function captureMacUninstallPlan(options, { run = runMacUpdateComma
     if (canonicalJSON(await readBuildIdentity(bundle, { signal })) !== canonicalJSON(identity)) throw Error(); check();
     await run('/usr/bin/codesign', ['--verify', '--deep', '--strict', '-R', requirement, bundle], signal); check();
     const value = { bundle, identity, team, custody: { device: original[0].dev.toString(), inode: original[0].ino.toString() },
-      credentials: capturedCredentials, service: capturedService, recordInventorySha256: capturedRecords };
+      credentials: capturedCredentials, service: capturedService, recordInventorySha256: capturedRecords, ...(inventoryVersion === 2 ? { recordInventoryVersion: 2 } : {}) };
     checkUninstallPlan(value); return immutable(value);
   } catch { throw Error('uninstall-plan-unavailable'); }
+  finally { try { retainedRecords?.close(); } catch { throw Error('uninstall-plan-unavailable'); } }
 }
 
 // Host-only journal. Native effects and PM authority must be verified by the idle coordinator, never inferred from a phase.
@@ -294,7 +302,7 @@ async function consumeMacUninstall(options, run, recovering) {
       canonicalJSON(service); record(service, ['qualified', 'status']);
       if (service.qualified !== true || service.status !== 'not-registered'
         || canonicalJSON(vault.connectionInventory()) !== canonicalJSON(saved.credentials.after)
-        || recordInventory(directory) !== saved.recordInventorySha256) throw Error();
+        || recordInventory(directory, saved.recordInventoryVersion, activeCheckpoint) !== saved.recordInventorySha256) throw Error();
     }
     function absent(bundle) { try { lstatSync(bundle); } catch (error) { if (error.code === 'ENOENT') return; throw error; } throw Error(); }
     async function verify(intent, stage) {
@@ -306,7 +314,7 @@ async function consumeMacUninstall(options, run, recovering) {
       const afterCredentials = intent.phase === 'trash-pending' || intent.phase === 'credentials-pending' && stage === 'after';
       const afterService = afterCredentials || intent.phase === 'credentials-pending' || intent.phase === 'service-pending' && stage === 'after';
       if ((intent.phase !== 'logout-pending' || stage === 'after') && await verifyLogout(signal) !== true) throw Error(); check();
-      const current = await captureMacUninstallPlan({ app, background, directory, vault, checkpoint: check, signal }, { run }); check();
+      const current = await captureMacUninstallPlan({ app, background, directory, vault, checkpoint: check, signal, recordInventoryVersion: saved.recordInventoryVersion ?? 1 }, { run }); check();
       const services = [afterService ? { qualified: true, status: 'not-registered' } : saved.service];
       const inventories = [afterCredentials ? saved.credentials.after : saved.credentials.before];
       if (recovering && stage === 'before' && intent.phase === 'service-pending') services.push({ qualified: true, status: 'not-registered' });

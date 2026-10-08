@@ -299,9 +299,9 @@ test('explicit Mac removal recovery reconciles only captured effects under a fre
   assert.equal(typeof recoverMacUninstall, 'function');
   const original = Object.getOwnPropertyDescriptor(process, 'execPath');
   for (const mode of ['logout', 'service-before', 'service-after', 'credentials-before', 'credentials-after', 'trash', 'ordinary-token', 'recovery-token-normal',
-    'stale-token', 'restart-token', 'changed-credentials', 'reconnected', 'foreign-build', 'missing-bundle', 'service-refused', 'trash-uncertain', 'cancelled']) {
+    'stale-token', 'restart-token', 'changed-credentials', 'reconnected', 'foreign-build', 'missing-bundle', 'service-refused', 'trash-uncertain', 'cancelled', 'wal-close', 'wal-record-change']) {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-54-uninstall-recovery-'))), bundle = join(root, 'Pipeliner.app'), data = join(root, 'data'), destination = join(root, 'fixture-trash/Pipeliner.app');
-    let vault, journal;
+    let vault, journal, records;
     try {
       mkdirSync(join(bundle, 'Contents/MacOS'), { recursive: true, mode: 0o755 }); mkdirSync(join(bundle, 'Contents/Resources'), { mode: 0o755 });
       mkdirSync(data, { mode: 0o700 }); mkdirSync(join(root, 'fixture-trash'), { mode: 0o700 });
@@ -320,9 +320,19 @@ test('explicit Mac removal recovery reconciles only captured effects under a fre
       const background = { inspect: () => ({ qualified: true, status }), async unregister() { events.push('service'); status = mode === 'service-refused' ? 'requires-approval' : 'not-registered'; } };
       const checkpoint = () => { controller.signal.throwIfAborted(); assert.equal(journal.owned(token), true); };
       journal = openUninstallJournal(data, { vault });
+      if (mode.startsWith('wal-')) {
+        const file = join(data, 'privacy.sqlite'); writeFileSync(file, '', { mode: 0o600 }); records = new DatabaseSync(file);
+        records.exec("PRAGMA journal_mode=WAL; CREATE TABLE retained(id INTEGER PRIMARY KEY,payload TEXT); INSERT INTO retained VALUES(1,'kept'); PRAGMA user_version=1;");
+      }
       const plan = await captureMacUninstallPlan({ app, background, directory: data, vault, checkpoint() {} }, { run });
+      if (mode.startsWith('wal-')) {
+        const before = inspectManagedData(data).find(row => row.id === 'privacy');
+        if (mode === 'wal-record-change') records.exec("UPDATE retained SET payload='lost'");
+        records.close(); records = null;
+        assert.notDeepEqual(inspectManagedData(data).find(row => row.id === 'privacy'), before);
+      }
       let token = journal.begin(plan); assert.equal(journal.recoveryOwned(token), false);
-      const initial = ['logout', 'ordinary-token', 'recovery-token-normal', 'stale-token', 'restart-token', 'foreign-build', 'cancelled'].includes(mode) ? 'logout-pending'
+      const initial = ['logout', 'ordinary-token', 'recovery-token-normal', 'stale-token', 'restart-token', 'foreign-build', 'cancelled', 'wal-close', 'wal-record-change'].includes(mode) ? 'logout-pending'
         : ['service-before', 'service-after', 'reconnected', 'service-refused'].includes(mode) ? 'service-pending'
           : ['credentials-before', 'credentials-after', 'changed-credentials'].includes(mode) ? 'credentials-pending' : 'trash-pending';
       if (initial !== 'logout-pending') { loggedOut = true; journal.advance(token, 'service-pending'); }
@@ -349,11 +359,11 @@ test('explicit Mac removal recovery reconciles only captured effects under a fre
           assert.deepEqual(vault.connectionInventory(), plan.credentials.after); renameSync(bundle, destination);
           if (mode === 'trash-uncertain') throw Error('Synthetic uncertain native move'); } } };
       const consume = mode === 'recovery-token-normal' ? completeMacUninstall : recoverMacUninstall;
-      if (['logout', 'service-before', 'service-after', 'credentials-before', 'credentials-after', 'trash'].includes(mode)) {
+      if (['logout', 'service-before', 'service-after', 'credentials-before', 'credentials-after', 'trash', 'wal-close'].includes(mode)) {
         const result = await consume(options, { run }); assert.equal(result.phase, 'removed'); assert.equal(journal.clear(), true);
         assert.deepEqual(vault.connectionInventory(), plan.credentials.after); assert.equal(existsSync(bundle), false); assert.equal(existsSync(destination), true);
         assert.deepEqual(events, ['settle', ...(initial === 'logout-pending' ? ['logout'] : []),
-          ...(['logout', 'service-before'].includes(mode) ? ['service'] : []), 'trash']);
+          ...(['logout', 'service-before', 'wal-close'].includes(mode) ? ['service'] : []), 'trash']);
         assert.equal(erasures, ['credentials-after', 'trash'].includes(mode) ? 0 : 1);
         assert.equal(journal.recoveryOwned(token), false);
       } else {
@@ -364,7 +374,7 @@ test('explicit Mac removal recovery reconciles only captured effects under a fre
           assert.deepEqual(events, mode === 'service-refused' ? ['settle', 'service'] : mode === 'cancelled' ? ['settle'] : []); }
       }
       assert.deepEqual(vault.openPayload(binding, encrypted), plain);
-    } finally { Object.defineProperty(process, 'execPath', original); journal?.close(); vault?.close(); rmSync(root, { recursive: true }); assert.equal(existsSync(root), false); }
+    } finally { Object.defineProperty(process, 'execPath', original); records?.close(); journal?.close(); vault?.close(); rmSync(root, { recursive: true }); assert.equal(existsSync(root), false); }
   }
 });
 test('removal coordination holds exact journal authority through completion and cold recovery', async () => {

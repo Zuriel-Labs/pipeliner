@@ -1,5 +1,8 @@
-import { lstatSync, opendirSync, realpathSync } from 'node:fs';
+import { lstatSync, opendirSync, realpathSync, mkdtempSync, rmdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join, resolve } from 'node:path';
+import { captureRecoveryDatabase } from '../core/storage.mjs';
+import { canonicalJSON } from '../core/settings.mjs';
 
 const definitions = [
   ['connections', 'Connections and installation key', ['connections.sqlite'], 'OS-wrapped key and encrypted credentials', 'Managed through protected Connections', 'connections'],
@@ -61,4 +64,88 @@ export function inspectManagedData(directory) {
     if (realpathSync(directory) !== directory || lstatSync(directory).dev !== root.dev || lstatSync(directory).ino !== root.ino) throw Error();
     return results;
   } catch { throw Error('Installation data inventory unavailable; existing data preserved'); }
+}
+
+// Host-only comparison of retained records; physical WAL placement is not record identity.
+export function captureRetainedRecords(directory, checkpoint) {
+  const ids = ['policy', 'workspaces', 'development', 'execution', 'extensions', 'privacy', 'artifacts', 'archives', 'migration'];
+  const inventory = () => inspectManagedData(directory).filter(row => ids.includes(row.id)).map(({ id, count, bytes, state }) => ({ id, count, bytes, state }));
+  const original = inventory(), snapshots = [], hash = createHash('sha256');
+  if (typeof checkpoint !== 'function' || original.some(row => row.state === 'unavailable')) throw Error('retained-records-unavailable');
+  let scratch, owner, closed = false, value;
+  function close() {
+    if (closed) return; closed = true; let failed = false;
+    for (const snapshot of snapshots) try { snapshot.close(); } catch { failed = true; }
+    if (failed) throw Error('retained-records-close-required');
+  }
+  function verify() {
+    if (closed) throw Error('retained-records-closed');
+    const result = checkpoint(); if (result instanceof Promise) result.catch(() => {});
+    if (result !== undefined) throw Error('retained-records-checkpoint-must-be-synchronous');
+    for (const snapshot of snapshots) snapshot.verify();
+    if (canonicalJSON(inventory()) !== canonicalJSON(original)) throw Error('retained-records-unavailable');
+    return true;
+  }
+  const add = value => hash.update(canonicalJSON(value) + '\n');
+  const quote = name => '"' + name.replaceAll('"', '""') + '"';
+  function read(db) {
+    const result = createHash('sha256'), append = value => result.update(JSON.stringify(value) + '\n');
+    append(db.prepare('PRAGMA user_version').get()); append(db.prepare('PRAGMA application_id').get());
+    const schema = db.prepare('SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name').all(); append(schema);
+    const tables = db.prepare('PRAGMA table_list').all().filter(row => row.schema === 'main' && row.name !== 'sqlite_schema');
+    if (tables.some(row => row.type !== 'table') || tables.length > 512) throw Error('retained-records-unavailable');
+    let count = 0;
+    for (const table of tables.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) {
+      checkpoint();
+      const columns = db.prepare('PRAGMA table_xinfo(' + quote(table.name) + ')').all().map(row => row.name);
+      if (!table.wr) {
+        const rowid = ['_rowid_', 'rowid', 'oid'].find(name => !columns.some(column => column.toLowerCase() === name));
+        if (!rowid) throw Error('retained-records-unavailable'); columns.unshift(rowid);
+      }
+      const statement = db.prepare('SELECT ' + columns.flatMap((name, index) => {
+        const column = quote(name);
+        return ['typeof(' + column + ') AS t' + index, 'CASE WHEN typeof(' + column + ") IN ('text','blob') THEN hex(" + column + ') ELSE ' + column + ' END AS v' + index];
+      }).join(',') + ' FROM ' + quote(table.name));
+      statement.setReadBigInts(true);
+      const rows = [];
+      for (const row of statement.iterate()) {
+        checkpoint(); if (++count > 1000000) throw Error('retained-records-unavailable');
+        const values = columns.map((_, index) => {
+          const type = row['t' + index], value = row['v' + index];
+          if (type === 'real') { const bytes = Buffer.alloc(8); bytes.writeDoubleBE(value); return [type, bytes.toString('hex')]; }
+          return [type, typeof value === 'bigint' ? value.toString() : value];
+        });
+        rows.push(createHash('sha256').update(JSON.stringify(values)).digest('hex'));
+      }
+      append([table.name, columns]); for (const row of rows.sort()) append(row);
+    }
+    return result.digest('hex');
+  }
+  try {
+    verify(); scratch = mkdtempSync(join(directory, 'removal-read-')); owner = lstatSync(scratch);
+    for (const [id, , names] of definitions.filter(([id]) => ids.includes(id))) {
+      for (const name of names) {
+        checkpoint(); const file = optional(join(directory, name), true);
+        if (!file) {
+          if (['-wal', '-shm', '-journal'].some(suffix => optional(join(directory, name + suffix), true))) throw Error('retained-records-unavailable');
+          add([id, name, null]); continue;
+        }
+        if (name === 'owner.sqlite') { add([id, name, fileSet(directory, [name, name + '-journal', name + '-wal', name + '-shm'])]); continue; }
+        const snapshot = captureRecoveryDatabase(directory, name, { scratch, checkpoint, read }); snapshots.push(snapshot);
+        add([id, name, snapshot.value]);
+      }
+    }
+    add(original.filter(row => ['archives', 'migration'].includes(row.id)));
+    verify(); value = hash.digest('hex');
+  } catch (error) { close(); throw error;
+  } finally {
+    try {
+      if (scratch) {
+        const current = lstatSync(scratch);
+        if (current.dev !== owner.dev || current.ino !== owner.ino || !current.isDirectory() || current.isSymbolicLink()) throw Error('retained-records-cleanup-required');
+        rmdirSync(scratch);
+      }
+    } catch (error) { close(); throw error; }
+  }
+  return Object.freeze({ value, verify, close });
 }

@@ -30,6 +30,8 @@ export async function brokerWriteMarker(request, context) {
 
 export class AppServer {
   #child;
+  #exited;
+  #closing;
   #pending = new Map();
   #nextId = 1;
   notifications = [];
@@ -41,17 +43,20 @@ export class AppServer {
     this.brokerContext = brokerContext;
     const env = isolatedEnv(home);
     this.#child = spawn(CLI, ['app-server', '--listen', 'stdio://', '--strict-config'], {
-      env, stdio: ['pipe', 'pipe', 'pipe'],
+      env, detached: process.platform === 'darwin', stdio: ['pipe', 'pipe', 'pipe'],
     });
+    this.#exited = new Promise(resolve => { this.#child.once('exit', resolve); this.#child.once('error', resolve); });
     this.#child.stderr.on('data', () => {}); // Never surface provider logs or credentials.
     this.#child.stdin.on('error', () => {});
     this.#child.on('exit', (code) => {
       for (const pending of this.#pending.values()) { clearTimeout(pending.timer); pending.reject(new Error(`app-server exited ${code}`)); }
       this.#pending.clear();
+      void this.close().catch(() => {}); // Retain failure in the shared close promise for callers.
     });
     this.#child.on('error', () => {
       for (const pending of this.#pending.values()) { clearTimeout(pending.timer); pending.reject(new Error('provider-unavailable')); }
       this.#pending.clear();
+      void this.close().catch(() => {});
     });
     let bytes = 0;
     this.#child.stdout.on('data', chunk => { bytes += chunk.length; if (bytes > 2 * 1024 * 1024) this.#child.kill('SIGTERM'); });
@@ -130,14 +135,24 @@ export class AppServer {
     throw new Error(`${method} timed out`);
   }
 
-  async close() {
+  close() { return this.#closing ??= Promise.resolve().then(() => this.#settle()); }
+
+  async #settle() {
     this.#child.stdin.end();
     this.#child.kill('SIGTERM');
-    await new Promise((resolve) => {
-      if (this.#child.exitCode !== null || this.#child.signalCode !== null) return resolve();
-      const timer = setTimeout(() => { this.#child.kill('SIGKILL'); }, 3000);
-      this.#child.once('exit', () => { clearTimeout(timer); resolve(); });
-    });
+    const timer = setTimeout(() => this.#child.kill('SIGKILL'), 3000);
+    try { await this.#exited; } finally { clearTimeout(timer); }
+    if (process.platform !== 'darwin' || !this.#child.pid) return;
+    const signal = action => {
+      try { process.kill(-this.#child.pid, action); return true; }
+      catch (error) { if (error.code === 'ESRCH') return false; throw Error('provider-cleanup-blocked'); }
+    };
+    for (const action of ['SIGTERM', 'SIGKILL']) {
+      if (!signal(0)) return;
+      signal(action);
+      for (let attempt = 0; attempt < 20 && signal(0); attempt++) await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    if (signal(0)) throw Error('provider-cleanup-blocked');
   }
 }
 

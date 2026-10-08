@@ -173,12 +173,13 @@ export function openUninstallJournal(directory, { vault, clock = Date.now }) {
     }
     function owns(state, token) { return Boolean(token && active?.token === token && state.value?.id === active.id
       && state.row.revision === active.revision && state.value.phase !== 'removed'); }
-    function claim(value) { const token = Object.freeze({}); active = { token, id: value.id, revision: value.revision }; return token; }
+    function claim(value, recovery = false) { const token = Object.freeze({}); active = { token, id: value.id, revision: value.revision, recovery }; return token; }
     readState();
     return Object.freeze({
       read: () => guarded(() => immutable(readState().value)),
       clear() { try { const value = readState().value; return value === null || value.phase === 'removed'; } catch { return false; } },
       owned(token) { try { return owns(readState(), token); } catch { return false; } },
+      recoveryOwned(token) { try { return owns(readState(), token) && active.recovery; } catch { return false; } },
       begin(value) {
         const saved = transaction(state => {
           checkUninstallPlan(value); if (state.value !== null && state.value.phase !== 'removed'
@@ -190,7 +191,7 @@ export function openUninstallJournal(directory, { vault, clock = Date.now }) {
         const saved = transaction(state => {
           canonicalJSON(expected); if (!state.value || state.value.phase === 'removed' || canonicalJSON(expected) !== canonicalJSON(state.value)) throw Error();
           credentials(vault, state.value, state.value.phase, true); return save(state, state.value);
-        }); return claim(saved);
+        }); return claim(saved, true);
       },
       advance(token, phase) {
         const saved = transaction(state => {
@@ -236,7 +237,12 @@ export async function completeUninstall(options) {
 }
 
 // Host-only native consumer. Exact PM/token/idle authority and managed account readback belong to the caller.
-export async function completeMacUninstall(options, { run = runMacUpdateCommand } = {}) {
+export async function completeMacUninstall(options, { run = runMacUpdateCommand } = {}) { return consumeMacUninstall(options, run, false); }
+
+// Explicit host recovery only; a fresh claimed token does not replace exact PM choice or the idle fence.
+export async function recoverMacUninstall(options, { run = runMacUpdateCommand } = {}) { return consumeMacUninstall(options, run, true); }
+
+async function consumeMacUninstall(options, run, recovering) {
   try {
     record(options, ['app', 'background', 'directory', 'vault', 'journal', 'token', 'checkpoint', 'settle', 'logout', 'verifyLogout', 'shell'], ['signal']);
     if (Object.getOwnPropertySymbols(options).length || Object.values(Object.getOwnPropertyDescriptors(options)).some(value => value.get || value.set)
@@ -247,7 +253,7 @@ export async function completeMacUninstall(options, { run = runMacUpdateCommand 
     const signal = options.signal ?? new AbortController().signal, executable = process.execPath;
     checkpoint(activeCheckpoint); signal.throwIfAborted();
     if (app.isPackaged !== true || process.platform !== 'darwin' || process.arch !== 'arm64' || process.argv.includes('--background-helper')
-      || journal.read()?.phase !== 'logout-pending' || journal.owned(token) !== true) throw Error();
+      || (!recovering && journal.read()?.phase !== 'logout-pending') || journal.owned(token) !== true || journal.recoveryOwned(token) !== recovering) throw Error();
     const root = lstatSync(directory, { bigint: true }), paths = bundlePaths(journal.read().plan.bundle), original = paths.map(path => lstatSync(path, { bigint: true }));
     const trashItem = shell.trashItem.bind(shell), unregister = background.unregister.bind(background); let moved = false, trashing = false;
     function check() {
@@ -277,15 +283,20 @@ export async function completeMacUninstall(options, { run = runMacUpdateCommand 
       const afterService = afterCredentials || intent.phase === 'credentials-pending' || intent.phase === 'service-pending' && stage === 'after';
       if ((intent.phase !== 'logout-pending' || stage === 'after') && await verifyLogout(signal) !== true) throw Error(); check();
       const current = await captureMacUninstallPlan({ app, background, directory, vault, checkpoint: check, signal }, { run }); check();
+      const services = [afterService ? { qualified: true, status: 'not-registered' } : saved.service];
+      const inventories = [afterCredentials ? saved.credentials.after : saved.credentials.before];
+      if (recovering && stage === 'before' && intent.phase === 'service-pending') services.push({ qualified: true, status: 'not-registered' });
+      if (recovering && stage === 'before' && intent.phase === 'credentials-pending') inventories.push(saved.credentials.after);
       if (['bundle', 'identity', 'team', 'custody', 'recordInventorySha256'].some(key => canonicalJSON(current[key]) !== canonicalJSON(saved[key]))
-        || canonicalJSON(current.service) !== canonicalJSON(afterService ? { qualified: true, status: 'not-registered' } : saved.service)
-        || canonicalJSON(current.credentials.before) !== canonicalJSON(afterCredentials ? saved.credentials.after : saved.credentials.before)) throw Error();
+        || !services.some(value => canonicalJSON(current.service) === canonicalJSON(value))
+        || !inventories.some(value => canonicalJSON(current.credentials.before) === canonicalJSON(value))) throw Error();
       return true;
     }
-    // Interrupted effects require a separate explicit recovery consumer; this path never infers their completion.
     return await completeUninstall({ journal, vault, token, checkpoint: check, settle,
       async logout() { await verify(journal.read(), 'before'); check(); await logout(signal); check(); return await verifyLogout(signal) === true; },
-      async removeService() { await verify(journal.read(), 'before'); check(); await unregister(); check(); const service = background.inspect(); return service.qualified === true && service.status === 'not-registered'; },
+      async removeService() { await verify(journal.read(), 'before'); check();
+        if (!(recovering && background.inspect().status === 'not-registered')) { await unregister(); check(); }
+        const service = background.inspect(); return service.qualified === true && service.status === 'not-registered'; },
       async trash(saved) {
         await verify(journal.read(), 'before'); check();
         trashing = true;

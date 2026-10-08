@@ -293,3 +293,77 @@ test('Mac uninstall consumer verifies native boundaries and never infers an unce
     } finally { Object.defineProperty(process, 'execPath', original); journal?.close(); vault?.close(); rmSync(root, { recursive: true }); assert.equal(existsSync(root), false); }
   }
 });
+
+test('explicit Mac removal recovery reconciles only captured effects under a freshly claimed token', { skip: process.platform !== 'darwin' || process.arch !== 'arm64' }, async () => {
+  const { captureMacUninstallPlan, completeMacUninstall, recoverMacUninstall, openUninstallJournal } = await import('./uninstall.mjs');
+  assert.equal(typeof recoverMacUninstall, 'function');
+  const original = Object.getOwnPropertyDescriptor(process, 'execPath');
+  for (const mode of ['logout', 'service-before', 'service-after', 'credentials-before', 'credentials-after', 'trash', 'ordinary-token', 'recovery-token-normal',
+    'stale-token', 'restart-token', 'changed-credentials', 'reconnected', 'foreign-build', 'missing-bundle', 'service-refused', 'trash-uncertain', 'cancelled']) {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-54-uninstall-recovery-'))), bundle = join(root, 'Pipeliner.app'), data = join(root, 'data'), destination = join(root, 'fixture-trash/Pipeliner.app');
+    let vault, journal;
+    try {
+      mkdirSync(join(bundle, 'Contents/MacOS'), { recursive: true, mode: 0o755 }); mkdirSync(join(bundle, 'Contents/Resources'), { mode: 0o755 });
+      mkdirSync(data, { mode: 0o700 }); mkdirSync(join(root, 'fixture-trash'), { mode: 0o700 });
+      const executable = join(bundle, 'Contents/MacOS/Pipeliner'), resource = join(bundle, 'Contents/Resources/pipeliner-build.json');
+      const identity = { kind: 'pipeliner-desktop-build', schemaVersion: 1, sourceCommit: 'a'.repeat(40), gitTree: 'b'.repeat(40), version: '0.1.0', platform: 'darwin', architecture: 'arm64' };
+      writeFileSync(executable, 'Synthetic executable; never launched', { mode: 0o755 }); writeFileSync(resource, canonicalJSON(identity) + '\n', { mode: 0o600 });
+      Object.defineProperty(process, 'execPath', { ...original, value: executable });
+      vault = await openVault(data, { available: async () => true, encrypt: async text => Buffer.from(text), decrypt: async bytes => ({ result: bytes.toString(), shouldReEncrypt: false }) });
+      for (const id of ['codex', 'ollama']) vault.save(id, vault.begin(id), { credential: 'Synthetic only' });
+      const binding = { purpose: 'workspace', repository: null, id: 'retained' }, plain = Buffer.from('Retained readable records'), encrypted = vault.sealPayload(binding, plain);
+      const wrappedVault = { ...vault, forgetCredentials(expected) { erasures++; return vault.forgetCredentials(expected); } };
+      let erasures = 0, status = 'enabled', loggedOut = false; const events = [], controller = new AbortController(), app = { isPackaged: true };
+      // Actual protected journal/vault and filesystem; all native boundaries remain synthetic.
+      const run = async (file, args) => { assert.equal(file, '/usr/bin/codesign'); assert.equal(args.at(-1), bundle);
+        return { stdout: '', stderr: args[0] === '--display' ? 'Identifier=com.zuriellabs.pipeliner.desktop\nTeamIdentifier=ABCDEFGHIJ\nCodeDirectory v=20500 size=128 flags=0x10000(runtime)\n' : '' }; };
+      const background = { inspect: () => ({ qualified: true, status }), async unregister() { events.push('service'); status = mode === 'service-refused' ? 'requires-approval' : 'not-registered'; } };
+      const checkpoint = () => { controller.signal.throwIfAborted(); assert.equal(journal.owned(token), true); };
+      journal = openUninstallJournal(data, { vault });
+      const plan = await captureMacUninstallPlan({ app, background, directory: data, vault, checkpoint() {} }, { run });
+      let token = journal.begin(plan); assert.equal(journal.recoveryOwned(token), false);
+      const initial = ['logout', 'ordinary-token', 'recovery-token-normal', 'stale-token', 'restart-token', 'foreign-build', 'cancelled'].includes(mode) ? 'logout-pending'
+        : ['service-before', 'service-after', 'reconnected', 'service-refused'].includes(mode) ? 'service-pending'
+          : ['credentials-before', 'credentials-after', 'changed-credentials'].includes(mode) ? 'credentials-pending' : 'trash-pending';
+      if (initial !== 'logout-pending') { loggedOut = true; journal.advance(token, 'service-pending'); }
+      if (['credentials-pending', 'trash-pending'].includes(initial)) { status = 'not-registered'; journal.advance(token, 'credentials-pending'); }
+      if (initial === 'trash-pending') { vault.forgetCredentials(plan.credentials.before); journal.advance(token, 'trash-pending'); }
+      if (mode === 'service-after') status = 'not-registered';
+      if (mode === 'credentials-after') vault.forgetCredentials(plan.credentials.before);
+      if (mode !== 'ordinary-token') {
+        const expected = journal.read(); journal.close(); journal = openUninstallJournal(data, { vault });
+        assert.equal(journal.owned(token), false); assert.deepEqual(journal.read(), expected);
+        token = journal.claimRecovery(expected); assert.equal(journal.recoveryOwned(token), true);
+      }
+      if (mode === 'stale-token') journal.claimRecovery(journal.read());
+      if (mode === 'restart-token') { journal.close(); journal = openUninstallJournal(data, { vault }); }
+      if (mode === 'changed-credentials') vault.save('ollama', vault.begin('ollama'), { credential: 'Changed synthetic credential' });
+      if (mode === 'reconnected') loggedOut = false;
+      if (mode === 'foreign-build') writeFileSync(resource, canonicalJSON({ ...identity, gitTree: 'c'.repeat(40) }) + '\n');
+      if (mode === 'missing-bundle') renameSync(bundle, destination);
+      const saved = journal.read(), inventory = vault.connectionInventory();
+      const options = { app, background, directory: data, vault: wrappedVault, journal, token, checkpoint, signal: controller.signal,
+        async settle() { events.push('settle'); if (mode === 'cancelled') controller.abort(); return true; },
+        async logout() { events.push('logout'); loggedOut = true; }, async verifyLogout() { return loggedOut; },
+        shell: { async trashItem(path) { events.push('trash'); assert.equal(path, bundle); assert.equal(journal.read().phase, 'trash-pending');
+          assert.deepEqual(vault.connectionInventory(), plan.credentials.after); renameSync(bundle, destination);
+          if (mode === 'trash-uncertain') throw Error('Synthetic uncertain native move'); } } };
+      const consume = mode === 'recovery-token-normal' ? completeMacUninstall : recoverMacUninstall;
+      if (['logout', 'service-before', 'service-after', 'credentials-before', 'credentials-after', 'trash'].includes(mode)) {
+        const result = await consume(options, { run }); assert.equal(result.phase, 'removed'); assert.equal(journal.clear(), true);
+        assert.deepEqual(vault.connectionInventory(), plan.credentials.after); assert.equal(existsSync(bundle), false); assert.equal(existsSync(destination), true);
+        assert.deepEqual(events, ['settle', ...(initial === 'logout-pending' ? ['logout'] : []),
+          ...(['logout', 'service-before'].includes(mode) ? ['service'] : []), 'trash']);
+        assert.equal(erasures, ['credentials-after', 'trash'].includes(mode) ? 0 : 1);
+        assert.equal(journal.recoveryOwned(token), false);
+      } else {
+        await assert.rejects(consume(options, { run }), /uninstall-recovery-required/); assert.equal(journal.clear(), false); assert.deepEqual(journal.read(), saved);
+        if (mode === 'trash-uncertain') { assert.deepEqual(events, ['settle', 'trash']); assert.equal(existsSync(bundle), false); assert.equal(existsSync(destination), true);
+          token = journal.claimRecovery(journal.read()); const before = [...events]; await assert.rejects(recoverMacUninstall({ ...options, token }, { run })); assert.deepEqual(events, before); }
+        else { assert.deepEqual(vault.connectionInventory(), inventory); assert.equal(erasures, 0);
+          assert.deepEqual(events, mode === 'service-refused' ? ['settle', 'service'] : mode === 'cancelled' ? ['settle'] : []); }
+      }
+      assert.deepEqual(vault.openPayload(binding, encrypted), plain);
+    } finally { Object.defineProperty(process, 'execPath', original); journal?.close(); vault?.close(); rmSync(root, { recursive: true }); assert.equal(existsSync(root), false); }
+  }
+});

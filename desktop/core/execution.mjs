@@ -15,8 +15,9 @@ const filename = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._
 const failure = error => typeof error.message === 'string' && /^[A-Za-z][A-Za-z ;,-]{0,159}$/.test(error.message) ? error.message : 'Execution could not be verified; local recovery required';
 
 // ponytail: one trusted broker per local app store; it may supervise several repository slots.
-export function acquireExecutionOwner(directory) {
-  const path = protectedFile(directory, 'owner.sqlite');
+export function acquireExecutionOwner(directory, { existingOnly = false } = {}) {
+  if (typeof existingOnly !== 'boolean') throw new Error('Invalid execution ownership option');
+  const path = protectedFile(directory, 'owner.sqlite', { create: !existingOnly });
   // Qualified local filesystems only. SQLite advisory locks do not qualify network storage.
   if (![26, 17, 1, 0xef53, 0x794c7630].includes(statfsSync(directory).type)) throw new Error('Execution owner requires qualified local storage');
   const db = new DatabaseSync(path, { allowExtension: false, timeout: 0 });

@@ -3,13 +3,14 @@ import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { join, resolve } from 'node:path';
 
-export function protectedFile(directory, name) {
+export function protectedFile(directory, name, { create = true } = {}) {
+  if (typeof create !== 'boolean') throw new Error('Invalid storage creation option');
   const root = lstatSync(directory);
   if (!root.isDirectory() || root.isSymbolicLink() || realpathSync(directory) !== resolve(directory) || (root.mode & 0o777) !== 0o700
     || root.uid !== process.getuid()) throw new Error('Storage directory must be private, owned and canonical');
   if (!/^[a-z]+\.sqlite$/.test(name)) throw new Error('Invalid storage name');
   const path = join(directory, name);
-  if (!existsSync(path)) {
+  if (!existsSync(path) && create) {
     try { closeSync(openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600)); }
     catch (error) { if (error.code !== 'EEXIST') throw error; }
   }

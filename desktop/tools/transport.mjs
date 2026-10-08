@@ -5,7 +5,7 @@ import { isIP } from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { canonicalJSON, record } from '../core/settings.mjs';
 import { sourceSecretPattern } from '../development/source.mjs';
-import { checkSchema, checkedJSON, headerParameters } from './schema.mjs';
+import { checkSchema, checkedJSON, checkContent, headerParameters } from './schema.mjs';
 
 export const protocolVersion = '2026-07-28';
 const localServices = new WeakMap(), toolName = value => typeof value === 'string' && /^[A-Za-z0-9_.-]{1,128}$/.test(value);
@@ -207,7 +207,8 @@ export function createMCPClient({ endpoint, local, credential = null, authorize 
       if (!input || typeof input !== 'object' || Array.isArray(input) || !await checkSchema(tool.inputSchema, input, { signal })) throw failure('input invalid');
       const result = await rpc('tools/call', { name: tool.name, arguments: input }, headerParameters(tool.inputSchema, input), signal, dispatch);
       record(result, ['resultType', 'content'], ['structuredContent', 'isError', '_meta']);
-      if (!Array.isArray(result.content) || result.content.length > 100 || result.isError !== undefined && typeof result.isError !== 'boolean') throw failure('tool result invalid');
+      if (result.isError !== undefined && typeof result.isError !== 'boolean') throw failure('tool result invalid');
+      checkContent(result.content);
       if (tool.outputSchema !== undefined && (!Object.hasOwn(result, 'structuredContent') || !await checkSchema(tool.outputSchema, result.structuredContent, { signal }))) throw failure('output invalid');
       fence(signal); return result;
     }, options); },

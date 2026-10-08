@@ -1,6 +1,6 @@
 import { canonicalJSON, record } from '../core/settings.mjs';
 import { sourceSecretPattern } from '../development/source.mjs';
-import { checkSchema, checkedJSON } from './schema.mjs';
+import { checkSchema, checkedJSON, checkContent } from './schema.mjs';
 import { toolPackage, qualifyToolPackage, toolManifestHash } from './package.mjs';
 
 const safeErrors = new Set(['Tool authority unavailable.', 'Tool run binding unavailable.', 'Tool content integrity failed.',
@@ -57,7 +57,7 @@ export async function invokePinnedTool({ pack, binding, input, supervisor, conne
       if (value.truncated || value.timedOut) throw new Error('Tool command result incomplete; worker and candidate need readback.');
       result = { structuredContent: value, content: [{ type: 'text', text: value.output }], isError: value.exitCode !== 0 };
     }
-    fence(); checkedJSON(result, 'result', 524288); if (sourceSecretPattern.test(canonicalJSON(result))) throw new Error('Tool command result withheld.');
+    fence(); checkedJSON(result, 'result', 524288); checkContent(result.content); if (sourceSecretPattern.test(canonicalJSON(result))) throw new Error('Tool command result withheld.');
     return { ...result, sourceDigest: pack.digest };
   } catch (error) {
     const message = safeErrors.has(error?.message) ? error.message : signal?.aborted ? 'Tool execution interrupted; effect needs readback.' : 'Tool execution failed; inspect its recorded outcome.';

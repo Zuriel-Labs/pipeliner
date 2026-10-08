@@ -12,7 +12,7 @@ function connector(options = {}) {
   return { calls, connect: async pack => ({ endpoint: pack.definition.mcp.endpoint, protocolVersion: '2026-07-28',
     async list() { calls.push('list'); return { tools: [options.changed ? { ...pack.definition.mcp.tool, description: 'changed' } : pack.definition.mcp.tool] }; },
     async call(tool, input) { calls.push({ tool, input }); options.revoke?.(); if (options.error) throw options.error;
-      return { resultType: 'complete', content: [], structuredContent: { count: 1 }, ...(options.isError ? { isError: true } : {}) }; }, close() { calls.push('close'); } }) };
+      return { resultType: 'complete', content: options.content ?? [], structuredContent: { count: 1 }, ...(options.isError ? { isError: true } : {}) }; }, close() { calls.push('close'); } }) };
 }
 test('MCP invocation pins destination and complete catalog; input and authority failures send no effect', async () => {
   const target = connector(), args = { pack: mcp, binding, input: { title: 'Scoped work' }, connectMCP: target.connect, authorize() {} };
@@ -23,6 +23,9 @@ test('MCP invocation pins destination and complete catalog; input and authority 
   await assert.rejects(invokePinnedTool({ ...args, authorize: () => false }), error => /Tool authority/.test(error.message) && !error.dispatched); assert.equal(target.calls.length, before);
   const changed = connector({ changed: true }); await assert.rejects(invokePinnedTool({ ...args, connectMCP: changed.connect }), error => /Tool catalog changed/.test(error.message) && !error.dispatched);
   assert.deepEqual(changed.calls, ['list', 'close']);
+  const malformed = connector({ content: [{ type: 'text', text: null }] });
+  await assert.rejects(invokePinnedTool({ ...args, connectMCP: malformed.connect }), error => error.dispatched === true && error.message === 'Tool execution failed; inspect its recorded outcome.');
+  assert.equal(malformed.calls.filter(value => typeof value === 'object').length, 1); assert.equal(malformed.calls.at(-1), 'close');
 });
 test('revoked authority, lost replies and server errors block with effect uncertainty and no automatic replay', async () => {
   for (const kind of ['revoked', 'lost', 'error-result']) {

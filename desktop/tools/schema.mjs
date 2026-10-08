@@ -18,6 +18,40 @@ export function checkedJSON(value, kind, maximum = 65536) {
   } catch { throw new Error('MCP ' + kind + ' exceeds the safe JSON contract.'); }
 }
 
+// MCP 2026-07-28 ContentBlock fields. Valid data remains untrusted; no URI or media is opened.
+export function checkContent(content) {
+  try {
+    checkedJSON(content, 'content', 1048576);
+    const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+    const optional = (value, name, check) => !Object.hasOwn(value, name) || check(value[name]);
+    const string = value => typeof value === 'string';
+    const uri = value => {
+      if (!string(value) || /[\s\x00-\x1f\x7f]/u.test(value) || !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(value)) return false;
+      try { new URL(value); return true; } catch { return false; }
+    };
+    const bytes = value => string(value) && value.length % 4 === 0 && /^[A-Za-z0-9+/]*={0,2}$/.test(value) && Buffer.from(value, 'base64').toString('base64') === value;
+    const annotations = value => object(value) && optional(value, 'audience', roles => Array.isArray(roles) && roles.every(role => ['user', 'assistant'].includes(role)))
+      && optional(value, 'priority', priority => typeof priority === 'number' && priority >= 0 && priority <= 1) && optional(value, 'lastModified', string);
+    const metadata = value => object(value) && optional(value, '_meta', object);
+    const icon = value => object(value) && uri(value.src) && optional(value, 'mimeType', string)
+      && optional(value, 'sizes', sizes => Array.isArray(sizes) && sizes.every(string)) && optional(value, 'theme', theme => ['dark', 'light'].includes(theme));
+    if (!Array.isArray(content) || content.length > 100) throw Error();
+    for (const item of content) {
+      if (!metadata(item) || !optional(item, 'annotations', annotations)) throw Error();
+      let valid = false;
+      if (item.type === 'text') valid = string(item.text);
+      else if (['image', 'audio'].includes(item.type)) valid = bytes(item.data) && string(item.mimeType);
+      else if (item.type === 'resource_link') valid = uri(item.uri) && string(item.name) && optional(item, 'title', string) && optional(item, 'mimeType', string)
+        && optional(item, 'size', Number.isSafeInteger) && optional(item, 'icons', icons => Array.isArray(icons) && icons.every(icon));
+      else if (item.type === 'resource') {
+        const value = item.resource;
+        valid = metadata(value) && uri(value.uri) && optional(value, 'mimeType', string) && (string(value.text) || bytes(value.blob));
+      }
+      if (!valid) throw Error();
+    }
+  } catch { throw Error('MCP content invalid.'); }
+}
+
 function annotations(schema) {
   checkedJSON(schema, 'schema'); const headers = [], names = new Set();
   function visit(item, path = [], reachable = true) {

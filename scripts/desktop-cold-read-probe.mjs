@@ -8,6 +8,8 @@ import { join } from 'node:path';
 
 assert.ok(process.env.TEST_ARTIFACT_RUN && process.env.TEST_ARTIFACT_TMP, 'Admitted external run required');
 assert.equal(realpathSync(tmpdir()), realpathSync(process.env.TEST_ARTIFACT_TMP));
+assert.ok(process.argv.length === 2 || process.argv.length === 3 && process.argv[2] === '--snapshot', 'Unknown probe mode');
+const snapshotRead = process.argv[2] === '--snapshot';
 const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-54-cold-read-'))), observations = [];
 let writer, reader;
 function snapshot(directory) {
@@ -20,7 +22,7 @@ function snapshot(directory) {
 }
 try {
   for (const mode of ['delete', 'clean-wal', 'pending-wal']) {
-    for (const exclusive of [false, true]) {
+    for (const exclusive of snapshotRead ? [false] : [false, true]) {
       const directory = join(root, `${mode}-${exclusive}`), fixture = join(directory, 'fixture'), source = join(directory, 'source.sqlite');
       mkdirSync(directory, { mode: 0o700 }); mkdirSync(fixture, { mode: 0o700 });
       writeFileSync(source, '', { mode: 0o600, flag: 'wx' });
@@ -36,20 +38,26 @@ try {
       }
       writer.close(); writer = undefined;
       if (mode !== 'pending-wal') copyFileSync(source, path);
-      const before = snapshot(fixture); let value = null, failure = null;
+      const before = snapshot(fixture); let value = null, failure = null, inspectedPath = path;
+      if (snapshotRead) {
+        const inspection = join(directory, 'inspection'); mkdirSync(inspection, { mode: 0o700 });
+        inspectedPath = join(inspection, 'state.sqlite');
+        copyFileSync(path, inspectedPath);
+        if (mode === 'pending-wal') copyFileSync(path + '-wal', inspectedPath + '-wal');
+      }
       try {
-        reader = new DatabaseSync(path, { readOnly: true, allowExtension: false, timeout: 0 });
+        reader = new DatabaseSync(inspectedPath, { readOnly: true, allowExtension: false, timeout: 0 });
         if (exclusive) reader.exec('PRAGMA locking_mode=EXCLUSIVE;');
         reader.exec('PRAGMA trusted_schema=OFF; PRAGMA temp_store=MEMORY; BEGIN;');
         value = reader.prepare('SELECT id,value FROM evidence ORDER BY id').all();
       } catch (error) { failure = { code: error.code ?? null, message: error.message }; }
       finally { reader?.close(); reader = undefined; }
       const after = snapshot(fixture);
-      observations.push({ mode, exclusive, sqliteVersion, value, failure, unchanged: JSON.stringify(before) === JSON.stringify(after), before, after });
+      observations.push({ mode, exclusive, snapshotRead, sqliteVersion, value, failure, unchanged: JSON.stringify(before) === JSON.stringify(after), before, after });
     }
   }
   console.log(JSON.stringify({ kind: 'cold-sqlite-read-probe', node: process.version, observations }));
-  for (const result of observations.filter(value => value.exclusive)) {
+  for (const result of observations.filter(value => snapshotRead || value.exclusive)) {
     assert.equal(result.failure, null, `${result.mode}: read failed`);
     assert.equal(JSON.stringify(result.value), JSON.stringify([{ id: 1, value: 'synthetic committed value' }]), `${result.mode}: committed rows missing`);
     assert.equal(result.unchanged, true, `${result.mode}: inspection changed files`);

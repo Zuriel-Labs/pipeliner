@@ -143,7 +143,8 @@ app.whenReady().then(async () => {
     recoveryReady: () => !closing && app.isPackaged && !backgroundLaunch && !maintenanceUnavailable && Boolean(vault && recoveryWork && uninstallJournal)
       && maintenanceStore?.clear() === true && !workspaceStore && !policy && !developmentStore && !supervisor && !scheduler && !backgroundHost && !privacyRecords,
     verifyRecovery: signal => recoveryWork?.verifyIdle(signal) ?? false });
-  const executionAllowed = () => !closing && !removalFinished && !maintenance.active() && !maintenanceRecovery() && maintenanceStore?.clear() === true && uninstallJournal?.clear() === true && (backgroundHost?.executionAllowed() ?? !backgroundLaunch);
+  const hostMaintenanceBlocked = () => closing || removalFinished || maintenance.active() || maintenanceRecovery();
+  const executionAllowed = () => !hostMaintenanceBlocked() && maintenanceStore?.clear() === true && uninstallJournal?.clear() === true && (backgroundHost?.executionAllowed() ?? !backgroundLaunch);
   const registerControl = (name, channel) => ipcMain.handle(name, (event, payload) => {
     if (closing || removalFinished) throw Error('App closing');
     return maintenance.control(() => channel().dispatch(event, payload), {
@@ -286,7 +287,7 @@ app.whenReady().then(async () => {
   delivery = makeDelivery(1);
   const publishUpdates = snapshot => { if (window && !window.isDestroyed()) window.webContents.send('updates:status', snapshot); };
   const runRemoval = async ({ plan = null, signal, checkpoint }) => {
-    if (!app.isPackaged || backgroundLaunch || closing || maintenanceUnavailable || !vault || !uninstallJournal || maintenanceStore?.clear() !== true) throw Error('uninstall-recovery-required');
+    if (!app.isPackaged || backgroundLaunch || closing || removalFinished || maintenanceUnavailable || !vault || !uninstallJournal || maintenanceStore?.clear() !== true) throw Error('uninstall-recovery-required');
     const expected = plan === null ? uninstallJournal.read() : null;
     const scratch = path.join(directory, 'maintenance-recovery-work'); let scratchInfo, result, active = true;
     const check = () => {
@@ -358,7 +359,7 @@ app.whenReady().then(async () => {
       return maintenanceStore.prepare({ installed: { bundle, identity, team: teams[0][1] }, history: updateHistory, trust, current,
         maxBytes: 8 * 1024 ** 3, reserveBytes: 16 * 1024 ** 3, timeoutMs: 1800000, checkpoint, signal, onIntent });
     },
-    maintenance, recovery: maintenanceRecovery, foreground: () => !closing && !maintenance.active() && Boolean(window && !window.isDestroyed() && window.isVisible() && window.isFocused()),
+    maintenance, recovery: maintenanceRecovery, foreground: () => !hostMaintenanceBlocked() && Boolean(window && !window.isDestroyed() && window.isVisible() && window.isFocused()),
     version: app.isPackaged ? app.getVersion() : null, initialRevision, onChange: publishUpdates,
     onApplied: () => { issues?.sync(); pipelines?.sync(); development?.sync(); scheduling?.sync(); background?.sync(); skills?.sync(); tools?.sync(); appearance?.sync(); privacy?.sync(); delivery?.sync(); } });
   updates = makeUpdates(1);
@@ -435,7 +436,7 @@ app.whenReady().then(async () => {
   const permissionChannel = () => createPermissionControlChannel(permissions, { contents: window.webContents, url, context: () => ({ revision: permissions.status().revision }) });
   registerControl('permissions:control', permissionChannel);
   const suspendHost = () => { scheduler?.suspend(); void updates?.stop().catch(() => {}); void backgroundHost?.suspend().catch(() => {}); };
-  const wakeHost = () => { if (!closing) void (async () => { await backgroundHost?.wake(); if (backgroundHost?.executionAllowed()) await scheduler?.wake(); })().catch(() => {}); };
+  const wakeHost = () => { if (!hostMaintenanceBlocked()) void (async () => { await backgroundHost?.wake(); if (!hostMaintenanceBlocked() && backgroundHost?.executionAllowed()) await scheduler?.wake(); })().catch(() => {}); };
   const endSession = event => { event.preventDefault(); void requestShutdown?.(); };
   powerMonitor.on('suspend', suspendHost); powerMonitor.on('resume', wakeHost); powerMonitor.on('shutdown', endSession);
   requestShutdown = async () => {
@@ -509,7 +510,7 @@ app.whenReady().then(async () => {
     const { openDevelopmentStore } = await moduleAt('../development/state.mjs');
     const { openExecutionSupervisor } = await moduleAt('../core/execution.mjs');
     developmentStore = openDevelopmentStore(directory, { vault });
-    try { supervisor = openExecutionSupervisor(directory, { store: policy, maintenance: () => maintenance.active() || maintenanceRecovery() }); } catch { supervisor = null; }
+    try { supervisor = openExecutionSupervisor(directory, { store: policy, maintenance: hostMaintenanceBlocked }); } catch { supervisor = null; }
     const developmentRevision = development.status().revision + 1; await development.close(); development = makeDevelopment(developmentRevision); publishDevelopment(development.status());
     const permissionRevision = permissions.status().revision + 1; await permissions.close(); permissions = makePermissions(permissionRevision); publishPermissions(permissions.status());
     const pipelineRevision = pipelines.status().revision + 1; pipelines.close(); pipelines = makePipelines(pipelineRevision); publishPipelines(pipelines.status());
@@ -532,11 +533,11 @@ app.whenReady().then(async () => {
     } });
     refreshRecovery(); const privacyRevision = privacy.status().revision + 1; await privacy.close(); privacy = makePrivacy(privacyRevision); publishPrivacy(privacy.status());
     let retentionCursor = null;
-    const retain = () => { if (closing || maintenance.active() || maintenanceRecovery()) return; try { refreshRecovery(); const result = privacyRecords.expire({ after: retentionCursor, limit: 500 }); retentionCursor = result.more ? result.after : null; }
+    const retain = () => { if (hostMaintenanceBlocked()) return; try { refreshRecovery(); const result = privacyRecords.expire({ after: retentionCursor, limit: 500 }); retentionCursor = result.more ? result.after : null; }
       catch { console.error('Pipeliner local retention needs protected recovery; records were preserved.'); } };
     retain(); retentionMonitor = setInterval(retain, 60000); retentionMonitor.unref();
     if (!maintenanceRecovery()) await backgroundHost.refresh();
-    authorizationMonitor = setInterval(() => { if (!closing && !maintenance.active() && !maintenanceRecovery()) void backgroundHost.refresh().catch(() => {}); }, 1000); authorizationMonitor.unref();
+    authorizationMonitor = setInterval(() => { if (!hostMaintenanceBlocked()) void backgroundHost.refresh().catch(() => {}); }, 1000); authorizationMonitor.unref();
     await updates.poll();
     await scheduler.check('startup');
     phase('protected-state-ready');

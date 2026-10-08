@@ -8,6 +8,21 @@ import { runInNewContext } from 'node:vm';
 
 const require = createRequire(import.meta.url), source = readFileSync(new URL('./main.cjs',import.meta.url),'utf8');
 const testStorage = require('../test-storage.cjs');
+test('maintenance and completed removal block wake before and after native settlement', async () => {
+  const blocked = source.match(/^  const hostMaintenanceBlocked = (.+);$/m)?.[1], wake = source.match(/^  const wakeHost = (.+);$/m)?.[1];
+  assert.ok(blocked && wake); let release;
+  const events = [], context = { closing: false, removalFinished: false, active: false, recovery: false,
+    maintenance: { active: () => context.active }, maintenanceRecovery: () => context.recovery,
+    backgroundHost: { async wake() { events.push('native'); await new Promise(resolve => { release = resolve; }); }, executionAllowed: () => true },
+    scheduler: { async wake() { events.push('scheduler'); } } };
+  runInNewContext(`globalThis.hostMaintenanceBlocked = ${blocked}; globalThis.wake = ${wake};`, context, { timeout: 1000 });
+  for (const key of ['closing', 'removalFinished', 'active', 'recovery']) {
+    context[key] = true; assert.equal(context.hostMaintenanceBlocked(), true); context.wake(); assert.deepEqual(events, []); context[key] = false;
+  }
+  assert.equal(context.hostMaintenanceBlocked(), false); context.wake(); assert.deepEqual(events, ['native']);
+  context.removalFinished = true; release(); await new Promise(setImmediate); assert.deepEqual(events, ['native']);
+  context.removalFinished = false; context.wake(); release(); await new Promise(setImmediate); assert.deepEqual(events, ['native', 'native', 'scheduler']);
+});
 test('cold native maintenance requires unopened ordinary stores and its captured inspection handle', async () => {
   const start = source.indexOf('  maintenance = createMaintenanceGate('), end = source.indexOf('  const executionAllowed =', start);
   assert.ok(start >= 0 && end > start);

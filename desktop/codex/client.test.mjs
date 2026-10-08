@@ -7,9 +7,9 @@ import vm from 'node:vm';
 test('Codex close settles its own Mac group once and retains unverified cleanup', async () => {
   const source = readFileSync(new URL('./client.mjs', import.meta.url), 'utf8').replace(/^import .*;\n/gm, '').replace(/^export /gm, '');
   for (const mode of ['held', 'force', 'root-force', 'stuck', 'refused', 'unexpected', 'spawn-error', 'other-host']) {
-    const child = new EventEmitter(), groupSignals = [], rootSignals = [], timers = new Set();
+    const child = new EventEmitter(), groupSignals = [], rootSignals = [], timers = new Set(); let writes = 0;
     Object.assign(child, { pid: mode === 'spawn-error' ? undefined : 12345, exitCode: null, signalCode: null,
-      stdout: new EventEmitter(), stderr: new EventEmitter(), stdin: Object.assign(new EventEmitter(), { end() {}, write() {} }) });
+      stdout: new EventEmitter(), stderr: new EventEmitter(), stdin: Object.assign(new EventEmitter(), { end() {}, write() { writes++; } }) });
     let members = true, entered;
     const observed = new Promise(resolve => { entered = resolve; });
     child.kill = signal => {
@@ -42,6 +42,8 @@ test('Codex close settles its own Mac group once and retains unverified cleanup'
       let finished = false;
       pending = server.close(); pending.then(() => { finished = true; }, () => {});
       assert.equal(server.close(), pending);
+      await assert.rejects(server.request('account/read', { refreshToken: false }), /provider-unavailable/);
+      assert.equal(writes, 0);
       if (mode === 'held') { await observed; await new Promise(setImmediate); assert.equal(finished, false); members = false; }
       if (['stuck', 'refused'].includes(mode)) await assert.rejects(pending);
       else await pending;

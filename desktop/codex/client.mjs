@@ -111,7 +111,7 @@ export class AppServer {
   }
 
   request(method, params = {}, timeoutMs = 10000) {
-    if (this.#child.exitCode !== null || this.#child.signalCode !== null || this.#child.stdin.destroyed) return Promise.reject(new Error('provider-unavailable'));
+    if (this.#closing || this.#child.exitCode !== null || this.#child.signalCode !== null || this.#child.stdin.destroyed) return Promise.reject(new Error('provider-unavailable'));
     const id = this.#nextId++;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {

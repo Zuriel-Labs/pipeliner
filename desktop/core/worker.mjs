@@ -41,8 +41,8 @@ const hash = value => createHash('sha256').update(value).digest('hex');
 const cid = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const imageId = value => typeof value === 'string' && /^sha256:[a-f0-9]{64}$/.test(value);
 const workspacePath = value => typeof value === 'string' && /^\/home\/[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\/\.local\/share\/pipeliner\/workspaces\/[a-f0-9]{32}$/.test(value);
-function privateDirectory(path) {
-  if (!existsSync(path)) mkdirSync(path, { mode: 0o700 });
+function privateDirectory(path, create = true) {
+  if (!existsSync(path) && create) mkdirSync(path, { mode: 0o700 });
   const s = lstatSync(path);
   if (!s.isDirectory() || s.isSymbolicLink() || realpathSync(path) !== path || s.uid !== process.getuid() || (s.mode & 0o777) !== 0o700) throw new Error('Invalid private execution directory');
 }
@@ -75,18 +75,19 @@ export function restrictedWorkerArgs(manifest, program) {
 }
 
 // Host-only, app-owned environment. Never pass this handle to a renderer or worker.
-export function openWorkerEnvironment(directory) {
+export function openWorkerEnvironment(directory, { inspectionOnly = false } = {}) {
+  if (typeof inspectionOnly !== 'boolean') throw new Error('Execution inspection mode unavailable');
   if (process.platform !== 'darwin' || process.arch !== 'arm64') throw new Error('Restricted worker unavailable on this host');
-  privateDirectory(directory);
+  privateDirectory(directory, !inspectionOnly);
   const home = join(directory, 'home'), lima = join(directory, 'lima'), config = join(directory, 'worker.yaml'), marker = join(directory, 'environment.json');
-  privateDirectory(home); privateDirectory(lima);
+  privateDirectory(home, !inspectionOnly); privateDirectory(lima, !inspectionOnly);
   if (Buffer.byteLength(join(lima, 'engine', 'ha.sock')) > 100) throw new Error('Execution state path exceeds the local socket limit');
-  if (!existsSync(marker)) persist(marker, { version: 1, nonce: randomUUID(), configuration: hash(workerVMConfiguration), image: null });
+  if (!existsSync(marker) && !inspectionOnly) persist(marker, { version: 1, nonce: randomUUID(), configuration: hash(workerVMConfiguration), image: null });
   const ownership = privateJSON(marker);
   record(ownership, ['version', 'nonce', 'configuration', 'image']);
   if (ownership.version !== 1 || !/^[a-f0-9-]{36}$/.test(ownership.nonce) || ownership.configuration !== hash(workerVMConfiguration)
     || ownership.image !== null && !imageId(ownership.image)) throw new Error('Execution environment ownership mismatch');
-  if (!existsSync(config)) writeFileSync(config, workerVMConfiguration, { flag: 'wx', mode: 0o600 });
+  if (!existsSync(config) && !inspectionOnly) writeFileSync(config, workerVMConfiguration, { flag: 'wx', mode: 0o600 });
   const configStat = lstatSync(config);
   if (!configStat.isFile() || configStat.isSymbolicLink() || configStat.nlink !== 1 || configStat.uid !== process.getuid() || (configStat.mode & 0o777) !== 0o600
     || readFileSync(config, 'utf8') !== workerVMConfiguration) throw new Error('Execution VM configuration changed');
@@ -160,6 +161,7 @@ export function openWorkerEnvironment(directory) {
     if (!['created', 'running', 'exited'].includes(state)) throw new Error('Owned container state unknown');
     return { state, id: value.Id, exitCode: value.State.ExitCode, pid: value.State.Pid };
   }
+  if (inspectionOnly) return Object.freeze({ inventory, inspect });
   return Object.freeze({
     async prepare() {
       let instance = await inventory();

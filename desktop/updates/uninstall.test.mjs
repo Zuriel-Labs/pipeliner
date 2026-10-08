@@ -367,3 +367,40 @@ test('explicit Mac removal recovery reconciles only captured effects under a fre
     } finally { Object.defineProperty(process, 'execPath', original); journal?.close(); vault?.close(); rmSync(root, { recursive: true }); assert.equal(existsSync(root), false); }
   }
 });
+test('removal coordination holds exact journal authority through completion and cold recovery', async () => {
+  const { coordinateUninstall, openUninstallJournal, completeUninstall } = await import('./uninstall.mjs');
+  const { createMaintenanceGate } = await import('./idle.mjs');
+  assert.equal(typeof coordinateUninstall, 'function');
+  for (const mode of ['normal', 'cold', 'cancel', 'changed', 'forged', 'busy']) {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-54-removal-coordinate-')));
+    let vault, journal, held, stopping, release, entered, effect = 0;
+    const controller = new AbortController(), hold = new Promise(resolve => { release = resolve; }), started = new Promise(resolve => { entered = resolve; });
+    try {
+      vault = await openVault(root, { available: async () => true, encrypt: async text => Buffer.from(text), decrypt: async bytes => ({ result: bytes.toString(), shouldReEncrypt: false }) });
+      vault.save('ollama', vault.begin('ollama'), { synthetic: true });
+      journal = openUninstallJournal(root, { vault });
+      const plan = { bundle: join(root, 'Pipeliner.app'), identity: { kind: 'pipeliner-desktop-build', schemaVersion: 1, sourceCommit: 'a'.repeat(40), gitTree: 'b'.repeat(40), version: '0.1.0', platform: 'darwin', architecture: 'arm64' },
+        team: 'ABCDEFGHIJ', custody: { device: '1', inode: '2' }, credentials: vault.previewCredentialRemoval(), service: { qualified: true, status: 'enabled' }, recordInventorySha256: 'c'.repeat(64) };
+      if (mode === 'cold') { journal.begin(plan); journal.close(); journal = openUninstallJournal(root, { vault }); }
+      const gate = createMaintenanceGate({ ready: () => mode !== 'busy', verify: async () => true, recovery: () => !journal.clear(), recoveryReady: () => true, verifyRecovery: async () => true });
+      held = coordinateUninstall({ journal, maintenance: gate, ...(mode === 'cold' ? {} : { plan }), signal: controller.signal, checkpoint() {},
+        async consume({ token, checkpoint, signal, recovering }) {
+          assert.equal(gate.active(), true); assert.equal(journal.recoveryOwned(token), recovering); assert.equal(recovering, mode === 'cold');
+          checkpoint(); entered();
+          if (mode === 'forged') return { ...journal.read(), phase: 'removed' };
+          if (['cancel', 'changed'].includes(mode)) { await hold; checkpoint(); }
+          return completeUninstall({ journal, vault, token, checkpoint,
+            async settle() { return true; }, async logout() { effect++; return true; }, async removeService() { effect++; return true; },
+            async trash() { effect++; return true; }, async verify() { signal.throwIfAborted(); return true; } });
+        } });
+      held.catch(() => {});
+      if (mode !== 'busy') await started;
+      if (mode === 'cancel') { controller.abort(); await setImmediate(); assert.equal(gate.active(), true); }
+      if (mode === 'changed') journal.claimRecovery(journal.read());
+      release();
+      if (['normal', 'cold'].includes(mode)) { assert.equal(await held, true); assert.equal(journal.read().phase, 'removed'); assert.equal(effect, 3); }
+      else { await assert.rejects(held); assert.equal(effect, 0); assert.equal(journal.read()?.phase ?? null, mode === 'busy' ? null : 'logout-pending'); }
+      assert.equal(gate.active(), false);
+    } finally { release(); await Promise.allSettled([held, stopping].filter(Boolean)); journal?.close(); vault?.close(); rmSync(root, { recursive: true }); assert.equal(existsSync(root), false); }
+  }
+});

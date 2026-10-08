@@ -33,6 +33,64 @@ function fixture() {
     close() { manager.close(); policy.close(); rmSync(root, { recursive: true }); assert.equal(existsSync(root), false); } };
 }
 
+test('explicit removal consumes a private preview and awaits cancellation; cold recovery needs no normal policy store', async () => {
+  for (const mode of ['normal', 'cancel', 'policy', 'expired', 'cold']) {
+    const f = fixture(); let update, pending, stopped, release, entered, effects = 0, finished = 0, closed = 0, now = 1000;
+    let recovery = mode === 'cold', phase = recovery ? 'service-pending' : null;
+    const hold = new Promise(resolve => { release = resolve; }), started = new Promise(resolve => { entered = resolve; });
+    const plan = immutable({ bundle: join(f.root, 'Pipeliner.app'), identity: { kind: 'pipeliner-desktop-build', schemaVersion: 1,
+      sourceCommit: 'a'.repeat(40), gitTree: 'b'.repeat(40), version: '0.1.0', platform: 'darwin', architecture: 'arm64' },
+      team: 'ABCDEFGHIJ', custody: { device: '1', inode: '2' }, credentials: { before: { count: 1, stored: 1, sha256: 'c'.repeat(64) }, after: { count: 1, stored: 0, sha256: 'd'.repeat(64) } },
+      service: { qualified: true, status: 'enabled' }, recordInventorySha256: 'e'.repeat(64) });
+    async function consume({ plan: captured, checkpoint, signal }) {
+      if (mode !== 'cold') assert.equal(captured, plan); else assert.equal(captured, undefined);
+      effects++; entered(); checkpoint(); recovery = true; phase = 'credentials-pending';
+      update.sync(); assert.equal(signal.aborted, false); checkpoint();
+      try { if (['cancel', 'policy'].includes(mode)) await hold; checkpoint(); signal.throwIfAborted(); phase = 'removed'; recovery = false; return true; }
+      finally { finished++; }
+    }
+    try {
+      update = createUpdateManager({ policy: mode === 'cold' ? null : f.policy, version: '0.1.0', clock: () => now,
+        maintenance: createMaintenanceGate({ ready: () => true, verify: async () => true }), inspectRemoval: async () => plan,
+        removeApp: consume, recoverRemoval: consume, recovery: () => recovery, onRemoved() { assert.equal(update.status().busy, false); closed++; },
+        removalDetails: () => phase ? { phase, version: '0.1.0', credentialCount: 1, backgroundStatus: 'enabled' } : null });
+      const url = 'pipeliner://app/index.html', frame = { url, parent: null }, contents = { mainFrame: frame, isDestroyed: () => false }, event = { sender: contents, senderFrame: frame };
+      const channel = createUpdateControlChannel(update, { contents, url, context: () => ({ revision: update.status().revision }) });
+      const request = payload => channel.dispatch(event, { ...payload, contextRevision: update.status().revision });
+      assert.equal(updateCommand('Remove Desktop app').operation, 'removal-apply');
+      assert.equal(updateCommand('Resume Desktop removal').operation, 'removal-resume');
+      assert.equal(updateCommand('Stop Desktop removal').operation, 'stop');
+      assert.throws(() => channel.dispatch({ ...event, sender: {} }, { operation: 'removal-resume', contextRevision: update.status().revision }));
+      await assert.rejects(request({ operation: 'removal-apply' }));
+      if (mode === 'cold') {
+        assert.equal(update.status().storageAvailable, false); assert.equal(update.status().removalRecoverable, true);
+        pending = request({ operation: 'chat', text: 'Resume Desktop removal' });
+      } else {
+        await request({ operation: 'removal-inspect' }); const preview = update.status().removalPreview;
+        assert.equal(update.status().removalQualified, true);
+        assert.throws(() => request({ operation: 'removal-apply', hash: preview.hash, bundle: plan.bundle }));
+        await assert.rejects(request({ operation: 'removal-apply', hash: '0'.repeat(64) })); assert.equal(effects, 0);
+        if (mode === 'expired') {
+          now = preview.expiresAt + 1; await assert.rejects(request({ operation: 'removal-apply', hash: preview.hash })); assert.equal(effects, 0); continue;
+        }
+        pending = request({ operation: 'removal-apply', hash: preview.hash });
+      }
+      await started;
+      if (['cancel', 'policy'].includes(mode)) {
+        assert.equal(update.status().busy, true); assert.equal(update.status().removalPreview, null);
+        if (mode === 'cancel') stopped = request({ operation: 'chat', text: 'Cancel Desktop removal' });
+        else { f.edit({ 'appearance.theme': 'dark' }); update.sync(); }
+        await new Promise(setImmediate); assert.equal(finished, 0); assert.equal(closed, 0); release();
+      }
+      await pending; await stopped; assert.equal(effects, 1); assert.equal(finished, 1); assert.equal(update.status().busy, false);
+      assert.equal(closed, ['normal', 'cold'].includes(mode) ? 1 : 0);
+      if (closed) { assert.equal(update.status().removal.phase, 'removed'); await assert.rejects(request({ operation: 'removal-apply' })); }
+      else { assert.equal(update.status().recoveryRequired, true); assert.match(update.status().message, /recovery/i); }
+      assert.doesNotMatch(JSON.stringify(update.status()), new RegExp(f.root + '|ABCDEFGHIJ|' + plan.credentials.before.sha256));
+    } finally { release(); await Promise.allSettled([pending, stopped].filter(Boolean)); await update?.close(); f.close(); }
+  }
+});
+
 test('PM removal inspection is read-only, redacted and fenced across idle capture, expiry, cancellation and recovery', async () => {
   for (const mode of ['normal', 'cancel', 'policy', 'close', 'recovery']) {
     const f = fixture(); let update, vault, journal, pending, stopping, finish, entered, now = 1000, idle = true, captures = 0, settled = 0;

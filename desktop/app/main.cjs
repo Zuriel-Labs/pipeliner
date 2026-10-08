@@ -1,7 +1,7 @@
 'use strict';
 const path = require('node:path');
 const { app, BrowserWindow, Menu, protocol, session, ipcMain, dialog, shell, safeStorage, powerMonitor, nativeTheme } = require('electron');
-const { mkdirSync, lstatSync, realpathSync, readFileSync } = require('node:fs');
+const { mkdirSync, lstatSync, realpathSync, readFileSync, rmdirSync } = require('node:fs');
 const { pathToFileURL } = require('node:url');
 if (app.isPackaged && process.argv.some(value => /^(?:--qualify(?:-|=|$)|--(?:test-data-directory|data-directory|key-helper|calendar-helper)(?:=|$))/i.test(value))) {
   console.error('Pipeliner rejected an unsupported packaged startup option.'); app.exit(2); return;
@@ -35,7 +35,7 @@ if (startup.testMode) {
 } else { app.setPath('userData', dataDirectory); app.setPath('crashDumps', path.join(dataDirectory, 'crashes')); }
 protocol.registerSchemesAsPrivileged([{ scheme: 'pipeliner', privileges: { standard: true, secure: true } }]);
 if (!app.requestSingleInstanceLock()) app.exit(0);
-let window, manager, vault, workspaces, workspaceStore, issues, pipelines, policy, development, developmentStore, supervisor, scheduling, scheduler, background, backgroundHost, backgroundNative, skills, skillStore, tools, toolStore, toolConnections, privacy, privacyRecords, appearance, delivery, updates, updateHistory, maintenanceStore, uninstallJournal, maintenance, permissions, artifacts, retentionMonitor, attachWindow, attachment, requestShutdown, authorizationMonitor, maintenanceUnavailable = false, shutdownPaused = false, closing = false, verifiedClose = false;
+let window, manager, vault, workspaces, workspaceStore, issues, pipelines, policy, development, developmentStore, supervisor, scheduling, scheduler, background, backgroundHost, backgroundNative, skills, skillStore, tools, toolStore, toolConnections, privacy, privacyRecords, appearance, delivery, updates, updateHistory, maintenanceStore, uninstallJournal, maintenance, permissions, artifacts, retentionMonitor, attachWindow, attachment, requestShutdown, authorizationMonitor, maintenanceUnavailable = false, removalFinished = false, shutdownPaused = false, closing = false, verifiedClose = false;
 const hostCapabilities = Object.freeze(['workspace.read', 'workspace.write', 'worker.exec', 'provider.turn', 'git.push', 'github.read', 'github.issue.write', 'github.pr.write', 'github.project.write', 'extension.install', 'extension.invoke']);
 // A production publisher requires reviewed provenance; none is invented for this preview.
 const trustedUpdateSources = Object.freeze([]);
@@ -127,8 +127,9 @@ app.whenReady().then(async () => {
   phase('host-modules-ready');
   const activeConnections = new Set();
   const maintenanceRecovery = () => { try { return maintenanceUnavailable || [maintenanceStore, uninstallJournal].some(value => value && value.clear() !== true); } catch { return true; } };
+  let recoveryWork = null;
   maintenance = createMaintenanceGate({ ready: () => {
-    if (closing || !vault || !workspaceStore || !policy || !developmentStore || !supervisor || !scheduler || !backgroundHost || !privacyRecords || !updateHistory
+    if (closing || removalFinished || !vault || !workspaceStore || !policy || !developmentStore || !supervisor || !scheduler || !backgroundHost || !privacyRecords || !updateHistory
       || !maintenanceStore || !uninstallJournal) return false;
     if (scheduler.busy() || issues.busy() || manager.status().connections.some(connection => connection.busy || connection.cleanupPending)
       || backgroundHost.status().busy || backgroundHost.status().cleanupPending
@@ -138,12 +139,15 @@ app.whenReady().then(async () => {
       return state.run || state.busy || workspaceStore.schedule(workspace.id)?.pending; })
       || workspaceStore.pending().length || developmentStore.recovery().some(run => run.uncertainEffects)) return false;
     return true;
-  }, verify: signal => supervisor.verifyIdle(signal), recovery: maintenanceRecovery });
-  const executionAllowed = () => !closing && !maintenance.active() && !maintenanceRecovery() && maintenanceStore?.clear() === true && uninstallJournal?.clear() === true && (backgroundHost?.executionAllowed() ?? !backgroundLaunch);
+  }, verify: signal => supervisor.verifyIdle(signal), recovery: maintenanceRecovery,
+    recoveryReady: () => !closing && app.isPackaged && !backgroundLaunch && !maintenanceUnavailable && Boolean(vault && recoveryWork && uninstallJournal)
+      && maintenanceStore?.clear() === true && !workspaceStore && !policy && !developmentStore && !supervisor && !scheduler && !backgroundHost && !privacyRecords,
+    verifyRecovery: signal => recoveryWork?.verifyIdle(signal) ?? false });
+  const executionAllowed = () => !closing && !removalFinished && !maintenance.active() && !maintenanceRecovery() && maintenanceStore?.clear() === true && uninstallJournal?.clear() === true && (backgroundHost?.executionAllowed() ?? !backgroundLaunch);
   const registerControl = (name, channel) => ipcMain.handle(name, (event, payload) => {
-    if (closing) throw Error('App closing');
+    if (closing || removalFinished) throw Error('App closing');
     return maintenance.control(() => channel().dispatch(event, payload), {
-      passive: payload?.operation === 'status' || name === 'updates:control' && ['stop', 'view', 'removal-cancel'].includes(
+      passive: payload?.operation === 'status' || name === 'updates:control' && ['stop', 'view', 'removal-cancel', 'removal-resume'].includes(
         payload?.operation === 'chat' ? updateCommand(payload.text)?.operation : payload?.operation)
     });
   });
@@ -281,7 +285,52 @@ app.whenReady().then(async () => {
     onApplied: () => { issues?.sync(); pipelines?.sync(); development?.sync(); scheduling?.sync(); background?.sync(); skills?.sync(); tools?.sync(); appearance?.sync(); privacy?.sync(); updates?.sync(); } });
   delivery = makeDelivery(1);
   const publishUpdates = snapshot => { if (window && !window.isDestroyed()) window.webContents.send('updates:status', snapshot); };
+  const runRemoval = async ({ plan = null, signal, checkpoint }) => {
+    if (!app.isPackaged || backgroundLaunch || closing || maintenanceUnavailable || !vault || !uninstallJournal || maintenanceStore?.clear() !== true) throw Error('uninstall-recovery-required');
+    const expected = plan === null ? uninstallJournal.read() : null;
+    const scratch = path.join(directory, 'maintenance-recovery-work'); let scratchInfo, result, active = true;
+    const check = () => {
+      signal.throwIfAborted(); checkpoint();
+      if (!active || closing || maintenanceUnavailable || maintenanceStore?.clear() !== true) throw Error('uninstall-recovery-required');
+    };
+    try {
+      check();
+      if (plan === null) {
+        if (recoveryWork || workspaceStore || policy || developmentStore || supervisor) throw Error('uninstall-recovery-required');
+        const { captureRecoveryWork } = await moduleAt('../core/execution.mjs'); check();
+        mkdirSync(scratch, { mode: 0o700 }); scratchInfo = lstatSync(scratch);
+        recoveryWork = captureRecoveryWork(directory, { scratch, vault, checkpoint: check });
+      }
+      const { coordinateUninstall, completeMacUninstall, recoverMacUninstall } = await moduleAt('../updates/uninstall.mjs'); check();
+      result = await coordinateUninstall({ journal: uninstallJournal, maintenance, plan, expected, signal,
+        checkpoint() { check(); recoveryWork?.verify(); },
+        consume: ({ token, checkpoint, signal, recovering }) => (recovering ? recoverMacUninstall : completeMacUninstall)({
+          app, background: backgroundNative, directory, vault, journal: uninstallJournal, token, checkpoint, signal, shell,
+          async settle() { checkpoint(); await manager.close(); await toolConnections?.close(); checkpoint(); return true; },
+          logout: signal => adapters.codex.disconnect({ signal }), verifyLogout: signal => adapters.codex.verifyDisconnected({ signal })
+        }) });
+    } finally {
+      try { recoveryWork?.close(); recoveryWork = null; }
+      catch { maintenanceUnavailable = true; throw Error('uninstall-recovery-required'); }
+      finally {
+        active = false;
+        try {
+          if (scratchInfo) {
+            const current = lstatSync(scratch);
+            if (realpathSync(scratch) !== scratch || !current.isDirectory() || current.isSymbolicLink()
+              || current.dev !== scratchInfo.dev || current.ino !== scratchInfo.ino || current.uid !== process.getuid() || (current.mode & 0o777) !== 0o700) throw Error();
+            rmdirSync(scratch); // Remove only this operation's empty snapshot directory; retain unexpected contents.
+          }
+        } catch { maintenanceUnavailable = true; throw Error('uninstall-recovery-required'); }
+      }
+    }
+    if (result === true) removalFinished = true;
+    return result;
+  };
   const makeUpdates = initialRevision => createUpdateManager({ policy, history: updateHistory, sources: () => trustedUpdateSources,
+    removeApp: policy ? options => runRemoval(options) : null,
+    recoverRemoval: policy ? null : options => runRemoval(options),
+    onRemoved: () => { setImmediate(() => { void requestShutdown(); }); },
     removalDetails: () => {
       const saved = uninstallJournal?.read();
       return saved ? { phase: saved.phase, version: saved.plan.identity.version,

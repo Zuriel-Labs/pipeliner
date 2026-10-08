@@ -1,11 +1,77 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, realpathSync, mkdirSync, lstatSync, rmdirSync, existsSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { runInNewContext } from 'node:vm';
 
 const require = createRequire(import.meta.url), source = readFileSync(new URL('./main.cjs',import.meta.url),'utf8');
 const testStorage = require('../test-storage.cjs');
+test('cold native maintenance requires unopened ordinary stores and its captured inspection handle', async () => {
+  const start = source.indexOf('  maintenance = createMaintenanceGate('), end = source.indexOf('  const executionAllowed =', start);
+  assert.ok(start >= 0 && end > start);
+  let options, inspections = 0;
+  const signal = new AbortController().signal, context = { maintenanceRecovery: () => true, closing: false, app: { isPackaged: true }, backgroundLaunch: false,
+    maintenanceUnavailable: false, vault: {}, recoveryWork: { verifyIdle(value) { assert.equal(value, signal); inspections++; return true; } }, uninstallJournal: {},
+    maintenanceStore: { clear: () => true }, workspaceStore: null, policy: null, developmentStore: null, supervisor: null, scheduler: null, backgroundHost: null, privacyRecords: null,
+    createMaintenanceGate(value) { options = value; return {}; } };
+  runInNewContext(source.slice(start, end), context, { timeout: 1000 });
+  assert.equal(options.recoveryReady(), true); assert.equal(await options.verifyRecovery(signal), true); assert.equal(inspections, 1);
+  for (const key of ['workspaceStore', 'policy', 'developmentStore', 'supervisor', 'scheduler', 'backgroundHost', 'privacyRecords']) {
+    context[key] = {}; assert.equal(options.recoveryReady(), false, key); context[key] = null;
+  }
+  for (const key of ['closing', 'backgroundLaunch', 'maintenanceUnavailable']) { context[key] = true; assert.equal(options.recoveryReady(), false, key); context[key] = false; }
+  for (const key of ['vault', 'recoveryWork', 'uninstallJournal']) { const saved = context[key]; context[key] = null; assert.equal(options.recoveryReady(), false, key); context[key] = saved; }
+  context.app.isPackaged = false; assert.equal(options.recoveryReady(), false); context.app.isPackaged = true;
+  context.maintenanceStore.clear = () => false; assert.equal(options.recoveryReady(), false);
+});
+test('host removal execution binds native consumers, preserves ordinary stores and releases cold recovery custody', async () => {
+  const start = source.indexOf('  const runRemoval = async'), end = source.indexOf('  const makeUpdates =', start);
+  assert.ok(start >= 0 && end > start);
+  for (const mode of ['normal', 'cold', 'capture-failed', 'cleanup-failed', 'native-failed', 'source', 'background']) {
+    const directory = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-54-removal-host-'))), events = [], signal = new AbortController().signal;
+    const cold = ['cold', 'capture-failed', 'cleanup-failed'].includes(mode), token = Object.freeze({}), plan = Object.freeze({ synthetic: true });
+    const context = { app: { isPackaged: mode !== 'source' }, backgroundLaunch: mode === 'background', closing: false, maintenanceUnavailable: false,
+      directory, vault: {}, uninstallJournal: { read: () => ({ synthetic: true }) }, maintenanceStore: { clear: () => true }, maintenance: {}, recoveryWork: null, removalFinished: false,
+      policy: cold ? null : {}, workspaceStore: cold ? null : {}, developmentStore: cold ? null : {}, supervisor: cold ? null : {},
+      backgroundNative: {}, shell: {}, path: require('node:path'), mkdirSync, lstatSync, realpathSync, rmdirSync, process,
+      manager: { async close() { events.push('connections'); } }, toolConnections: { async close() { events.push('tools'); } },
+      adapters: { codex: { async disconnect(value) { assert.equal(value.signal, signal); events.push('logout'); }, async verifyDisconnected(value) { assert.equal(value.signal, signal); events.push('readback'); return true; } } },
+      moduleAt: async name => {
+        if (name === '../core/execution.mjs') return { captureRecoveryWork(root, options) {
+          assert.equal(root, directory); assert.equal(options.vault, context.vault); options.checkpoint(); events.push('capture');
+          if (mode === 'capture-failed') throw Error('Synthetic capture refusal');
+          return { verify() { events.push('verify'); return true; }, close() { events.push('release'); if (mode === 'cleanup-failed') throw Error('Synthetic close refusal'); } };
+        } };
+        assert.equal(name, '../updates/uninstall.mjs');
+        return { async coordinateUninstall(options) {
+          options.checkpoint(); assert.equal(options.journal, context.uninstallJournal); assert.equal(options.maintenance, context.maintenance);
+          assert.equal(options.plan, cold ? null : plan); assert.equal(options.signal, signal);
+          if (cold) assert.ok(context.recoveryWork);
+          await options.consume({ token, checkpoint: options.checkpoint, signal, recovering: cold }); return true;
+        }, completeMacUninstall: consume, recoverMacUninstall: consume };
+      }
+    };
+    async function consume(options) {
+      events.push('consume'); assert.equal(options.app, context.app); assert.equal(options.background, context.backgroundNative); assert.equal(options.directory, directory);
+      assert.equal(options.vault, context.vault); assert.equal(options.journal, context.uninstallJournal); assert.equal(options.token, token); assert.equal(options.shell, context.shell);
+      options.checkpoint(); assert.equal(await options.settle(), true); await options.logout(signal); assert.equal(await options.verifyLogout(signal), true);
+      if (mode === 'native-failed') throw Error('Synthetic native refusal'); return { phase: 'removed' };
+    }
+    try {
+      runInNewContext(`${source.slice(start, end)}\nglobalThis.run = runRemoval;`, context, { timeout: 1000 });
+      const operation = context.run({ ...(cold ? {} : { plan }), signal, checkpoint() {} });
+      if (['normal', 'cold'].includes(mode)) assert.equal(await operation, true); else await assert.rejects(operation);
+      assert.equal(context.removalFinished, ['normal', 'cold'].includes(mode));
+      assert.equal(context.maintenanceUnavailable, mode === 'cleanup-failed');
+      if (mode !== 'cleanup-failed') assert.equal(context.recoveryWork, null); assert.equal(existsSync(join(directory, 'maintenance-recovery-work')), false);
+      if (mode === 'cold') { assert.ok(events.indexOf('capture') < events.indexOf('consume')); assert.equal(events.at(-1), 'release'); }
+      if (['source', 'background'].includes(mode)) assert.deepEqual(events, []);
+      if (['normal', 'cold', 'native-failed'].includes(mode)) assert.deepEqual(events.filter(value => ['connections', 'tools', 'logout', 'readback'].includes(value)), ['connections', 'tools', 'logout', 'readback']);
+    } finally { rmSync(directory, { recursive: true }); assert.equal(existsSync(directory), false); }
+  }
+});
 test('host maintenance fence blocks pending or unreadable uninstall state and partial store initialization', () => {
   const expression = source.match(/^  const maintenanceRecovery = (.+);$/m)?.[1]; assert.ok(expression);
   for (const mode of ['ready', 'update', 'uninstall', 'unreadable', 'partial']) {

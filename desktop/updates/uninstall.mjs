@@ -204,6 +204,30 @@ export function openUninstallJournal(directory, { vault, clock = Date.now }) {
   } catch { db?.close(); throw Error('uninstall-state-unavailable'); }
 }
 
+// Called only after the authenticated manager consumes the PM preview or explicit recovery request.
+export async function coordinateUninstall({ journal, maintenance, plan = null, expected = plan === null ? journal.read() : null, signal, checkpoint: callerCheckpoint, consume }) {
+  if (typeof callerCheckpoint !== 'function' || typeof consume !== 'function' || !(signal instanceof AbortSignal)) throw Error('uninstall-recovery-required');
+  signal.throwIfAborted(); checkpoint(callerCheckpoint);
+  if (plan === null && (!expected || expected.phase === 'removed' || canonicalJSON(journal.read()) !== canonicalJSON(expected))) throw Error('uninstall-recovery-required');
+  let token, receipt, claimed;
+  function owned() {
+    try {
+      if (receipt) return receipt.phase === 'removed' && receipt.id === claimed.id && canonicalJSON(receipt.plan) === canonicalJSON(claimed.plan)
+        && canonicalJSON(journal.read()) === canonicalJSON(receipt);
+      return token ? journal.owned(token) && journal.recoveryOwned(token) === (plan === null)
+        : plan === null && canonicalJSON(journal.read()) === canonicalJSON(expected);
+    } catch { return false; }
+  }
+  return (plan === null ? maintenance.recover : maintenance.exclusive)(async idleCheckpoint => {
+    checkpoint(callerCheckpoint); signal.throwIfAborted(); idleCheckpoint();
+    token = plan === null ? journal.claimRecovery(expected) : journal.begin(plan); claimed = journal.read();
+    const check = () => { signal.throwIfAborted(); checkpoint(callerCheckpoint); idleCheckpoint(); if (!owned()) throw Error('uninstall-recovery-required'); };
+    check(); receipt = await consume(Object.freeze({ token, checkpoint: check, signal, recovering: plan === null }));
+    if (!receipt || receipt.phase !== 'removed' || !owned()) throw Error('uninstall-recovery-required');
+    check(); return true;
+  }, { signal, ownsRecovery: owned });
+}
+
 // Host-only consumer. Caller holds the idle fence and exact PM authority; callbacks independently verify native effects.
 export async function completeUninstall(options) {
   let held;

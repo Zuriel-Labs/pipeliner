@@ -81,6 +81,9 @@ test('recorded recovery work holds the existing owner and every source until exp
     db.exec('CREATE TABLE workers(run_id TEXT,epoch INTEGER,repository TEXT,document TEXT,hash TEXT,state TEXT,cid TEXT,error TEXT); PRAGMA user_version=1;'); db.close(); db = undefined;
     capture = execution.captureRecoveryWork(root, options);
     assert.deepEqual(capture.workers, []); assert.equal(capture.verify(), true);
+    assert.equal(typeof capture.verifyIdle, 'function');
+    await assert.rejects(capture.verifyIdle());
+    assert.equal(existsSync(join(root, 'home')), false); assert.equal(existsSync(join(root, 'lima')), false);
     assert.throws(() => { owner = execution.acquireExecutionOwner(root, { existingOnly: true }); }, /unavailable/);
     db = new DatabaseSync(path); db.exec('CREATE TABLE changed(value TEXT)'); db.close(); db = undefined;
     assert.throws(() => capture.verify()); capture.close(); capture.close(); capture = undefined;

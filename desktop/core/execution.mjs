@@ -42,13 +42,14 @@ export function acquireExecutionOwner(directory, { existingOnly = false } = {}) 
 export function captureRecoveryWork(directory, { scratch, vault, checkpoint }) {
   if (typeof checkpoint !== 'function') throw Error('Recovery ownership checkpoint required');
   const owner = acquireExecutionOwner(directory, { existingOnly: true }), snapshots = [];
-  let closed = false;
+  let closed = false, inspecting = false;
   function verify() {
     if (closed) throw Error('Recovery work inspection closed');
     for (const snapshot of snapshots) snapshot.verify();
     return true;
   }
   function close() {
+    if (inspecting) throw Error('Recovery native inspection still active');
     if (closed) return; closed = true; let failed = false;
     for (const snapshot of snapshots) try { snapshot.close(); } catch { failed = true; }
     try { owner.close(); } catch { failed = true; }
@@ -71,7 +72,13 @@ export function captureRecoveryWork(directory, { scratch, vault, checkpoint }) {
       }));
     } });
     snapshots.push(workers); verify();
-    return Object.freeze({ workers: workers.value, verify, close });
+    return Object.freeze({ workers: workers.value, verify, close, async verifyIdle(signal) {
+      verify(); if (inspecting) throw Error('Recovery native inspection still active');
+      const environment = openWorkerEnvironment(directory, { inspectionOnly: true });
+      inspecting = true;
+      try { return await environment.verifyIdle(workers.value, { signal, checkpoint: verify }); }
+      finally { inspecting = false; }
+    } });
   } catch (error) { close(); throw error; }
 }
 
@@ -143,12 +150,10 @@ export function openExecutionSupervisor(directory, { store, maintenance = () => 
       idle();
       const inventory = () => db.prepare('SELECT * FROM workers ORDER BY run_id,epoch').all();
       const rows = inventory(), snapshot = canonicalJSON(rows);
-      for (const binding of rows) {
-        const row = rowFor({ runId: binding.run_id, epoch: binding.epoch });
-        const observed = await environment.inspect(row.data.manifest, row.state === 'stopped' ? null : row.cid);
-        idle(); if (!['exited', 'absent', 'vm-stopped'].includes(observed.state)) throw Error('Owned worker still running');
-      }
-      idle(); if (canonicalJSON(inventory()) !== snapshot) throw Error('Execution inventory changed'); return true;
+      const checkpoint = () => { idle(); if (canonicalJSON(inventory()) !== snapshot) throw Error('Execution inventory changed'); };
+      const workers = rows.map(binding => { const row = executionRecord(binding); return { manifest: row.data.manifest, state: row.state, cid: row.cid }; });
+      await environment.verifyIdle(workers, { signal, checkpoint });
+      checkpoint(); return true;
     },
     async start(identity, binding, { candidate, program, allowedPath }) {
       this.attach(identity); const run = current(binding, true); candidateCheck(identity, candidate);

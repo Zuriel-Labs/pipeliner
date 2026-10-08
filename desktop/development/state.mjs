@@ -53,8 +53,17 @@ export function validateDevelopmentOutput(value) {
 
 // Only the trusted Development host receives this ledger. Policy/runtime own authority.
 export function openDevelopmentStore(directory, { clock = Date.now, vault } = {}) {
+  return developmentStore(directory, { clock, vault });
+}
+
+// Host-only inspection shares the normal authenticated record checks, without opening a store.
+export function inspectDevelopmentRecovery(db, { vault } = {}) {
+  return developmentStore(null, { vault }, db);
+}
+
+function developmentStore(directory, { clock = Date.now, vault }, inspection) {
   const codec = createRecordCodec(vault, 'development');
-  const db = new DatabaseSync(protectedFile(directory, 'development.sqlite'), { allowExtension: false, timeout: 1000 });
+  const db = inspection ?? new DatabaseSync(protectedFile(directory, 'development.sqlite'), { allowExtension: false, timeout: 1000 });
   let closed = false;
   const requireOpen = () => { if (closed) throw new Error('Development store closed'); };
   const identity = (row, table, key) => ({ repository: row.repository ?? db.prepare('SELECT repository FROM development_runs WHERE id=?').get(row.run)?.repository, table, key });
@@ -81,6 +90,11 @@ export function openDevelopmentStore(directory, { clock = Date.now, vault } = {}
   }
   try {
     const version = db.prepare('PRAGMA user_version').get().user_version;
+    if (inspection) {
+      if (version !== 2) throw Error('Unsupported Development store');
+      verify();
+      return Object.freeze({ uncertainEffects: db.prepare("SELECT COUNT(*) AS count FROM development_requests WHERE state IN ('dispatched','uncertain')").get().count });
+    }
     if (![0, 1, 2].includes(version)) throw new Error('Unsupported Development store');
     db.exec('PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON; PRAGMA temp_store=MEMORY;');
     if (!version) transact(db, () => {
@@ -108,7 +122,7 @@ export function openDevelopmentStore(directory, { clock = Date.now, vault } = {}
     } });
     finishProtectedMigration(db, directory, 'development', { vault, verify }); verify();
     if (db.prepare('PRAGMA quick_check').get().quick_check !== 'ok') throw new Error('Development store integrity failed');
-  } catch (error) { db.close(); throw error; }
+  } catch (error) { if (!inspection) db.close(); throw error; }
   function read(runId, legacy = false) {
     requireOpen(); if (!id(runId)) throw new Error('Invalid Development run');
     const row = db.prepare('SELECT * FROM development_runs WHERE id=?').get(runId);

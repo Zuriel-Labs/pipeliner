@@ -40,17 +40,26 @@ function catalogData(value) {
 }
 
 export function openPolicyStore(directory, { catalog, clock = Date.now, inspectors }) {
-  const path = protectedFile(directory, 'policy.sqlite');
+  return policyStore(directory, { catalog, clock, inspectors });
+}
+
+// Host-only snapshot inspection uses captured catalogs and grants no current control authority.
+export function inspectPolicyRecovery(db) {
+  return policyStore(null, {}, db);
+}
+
+function policyStore(directory, { catalog, clock = Date.now, inspectors }, inspection) {
   const facts = () => catalogData(catalog());
   const now = () => { const n = clock(); if (!Number.isSafeInteger(n) || n < 0) throw new Error('Invalid policy clock'); return n; };
-  const db = new DatabaseSync(path, { allowExtension: false, timeout: 1000 });
+  const db = inspection ?? new DatabaseSync(protectedFile(directory, 'policy.sqlite'), { allowExtension: false, timeout: 1000 });
   let closed = false;
   const transaction = fn => transact(db, fn);
-  const close = () => { if (!closed) { db.close(); closed = true; } };
+  const close = () => { if (!closed) { if (!inspection) db.close(); closed = true; } };
   try {
     const version = db.prepare('PRAGMA user_version').get().user_version;
+    if (inspection && version !== 3) throw new Error('Unsupported policy database schema');
     if (![0, 1, 2, 3].includes(version)) throw new Error('Unsupported policy database schema');
-    db.exec('PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;');
+    if (!inspection) db.exec('PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;');
     if (!version) transaction(() => {
       if (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().length) throw new Error('Unrecognized policy database');
       db.exec(`CREATE TABLE policy_versions (revision INTEGER PRIMARY KEY, document TEXT NOT NULL, catalog TEXT NOT NULL, hash TEXT NOT NULL, input_id TEXT, proposal_id TEXT, command_id TEXT UNIQUE, created_at INTEGER NOT NULL);
@@ -244,7 +253,10 @@ export function openPolicyStore(directory, { catalog, clock = Date.now, inspecto
         targetCheck(target); if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error('Invalid history limit');
         return immutable(db.prepare('SELECT revision,hash,created_at AS createdAt FROM policy_versions ORDER BY revision DESC LIMIT ?').all(limit));
       },
-      read(target, revision) { if (revision !== undefined && (!Number.isSafeInteger(revision) || revision < 0)) throw new Error('Invalid policy version'); return immutable(view(versionData(revision), target)); },
+      read(target, revision) {
+        if (revision !== undefined && (!Number.isSafeInteger(revision) || revision < 0)) throw new Error('Invalid policy version');
+        const version = versionData(revision); return immutable(view(version, target, inspection ? version.bindings : facts()));
+      },
       propose(request) { const current = facts(); const preview = previewEdit(request, versionData(), current); const { document: _document, ...visible } = preview; return immutable({ origin: 'agent', ...visible }); },
       authority(target, revision) {
         const current = facts(), captured = versionData(revision), latest = versionData(); targetCheck(target, current);
@@ -269,8 +281,9 @@ export function openPolicyStore(directory, { catalog, clock = Date.now, inspecto
             agentCreation: old['intake.agentCreation'] && active['intake.agentCreation'] && !revoked('intake', 'agentCreation') } });
       },
     };
-    migrateRuntime(db, directory, transaction, !version);
+    if (!inspection) migrateRuntime(db, directory, transaction, !version);
     const runtime = createRuntime(db, { transaction, policy: worker, clock: now, inspectors });
+    if (inspection) return runtime.recovery();
     return Object.freeze({ control: Object.freeze(control), worker: Object.freeze(worker), runtime, close });
   } catch (error) { close(); throw error; }
 }

@@ -15,8 +15,17 @@ const remoteIdentifier = value => typeof value === 'string' && /^[A-Za-z0-9_=-]{
 const states = ['prepared', 'dispatched', 'verified', 'uncertain', 'denied'];
 
 export function openWorkspaceStore(directory, { vault } = {}) {
+  return workspaceStore(directory, { vault });
+}
+
+// Host-only inspection of a private read-only snapshot; no migration or writable store handle.
+export function inspectWorkspaceRecovery(db, { vault } = {}) {
+  return workspaceStore(null, { vault }, db);
+}
+
+function workspaceStore(directory, { vault }, inspection) {
   const codec = createRecordCodec(vault, 'workspace');
-  const db = new DatabaseSync(protectedFile(directory, 'workspaces.sqlite'), { allowExtension: false, timeout: 1000 });
+  const db = inspection ?? new DatabaseSync(protectedFile(directory, 'workspaces.sqlite'), { allowExtension: false, timeout: 1000 });
   const tables = ['setup_draft', 'workspaces', 'issue_contexts', 'pipeline_drafts', 'schedule_states'];
   function identity(table, row) {
     const context = table === 'pipeline_drafts' ? JSON.parse(row.context) : null;
@@ -73,6 +82,14 @@ export function openWorkspaceStore(directory, { vault } = {}) {
   }
   try {
     const version = db.prepare('PRAGMA user_version').get().user_version;
+    if (inspection) {
+      if (version !== 5) throw Error('setup-schema-unsupported');
+      verify();
+      let pendingSchedules = 0;
+      for (const row of db.prepare('SELECT * FROM schedule_states').iterate()) if (decode('schedule_states', row)?.pending) pendingSchedules++;
+      return Object.freeze({ uncertainEffects: db.prepare("SELECT COUNT(*) AS count FROM setup_effects WHERE state IN ('dispatched','uncertain')").get().count,
+        pendingSchedules });
+    }
     if (![0, 1, 2, 3, 4, 5].includes(version)) throw new Error('setup-schema-unsupported');
     db.exec('PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON; PRAGMA temp_store=MEMORY;');
     if (!version) transact(db, () => {
@@ -94,7 +111,7 @@ export function openWorkspaceStore(directory, { vault } = {}) {
     finishProtectedMigration(db, directory, 'workspaces', { vault, verify }); verify();
     if (db.prepare('PRAGMA quick_check').get().quick_check !== 'ok') throw Error('setup-record-invalid');
     protectLegacyBackups(directory, 'workspaces', { vault, currentVersion: 5 });
-  } catch (error) { db.close(); throw error; }
+  } catch (error) { if (!inspection) db.close(); throw error; }
   function transition(id, allowed, state, result) {
     return transact(db, () => {
       const row = db.prepare('SELECT * FROM setup_effects WHERE id=?').get(id), value = effect(row);

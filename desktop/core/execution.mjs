@@ -2,17 +2,28 @@ import { DatabaseSync } from 'node:sqlite';
 import { constants, openSync, closeSync, fstatSync, fsyncSync, writeFileSync, readFileSync, lstatSync, statfsSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
-import { protectedFile } from './storage.mjs';
+import { protectedFile, captureRecoveryDatabase } from './storage.mjs';
 import { canonicalJSON, immutable, record } from './settings.mjs';
 import { workspaceData, workspaceCandidate } from './identity.mjs';
 import { transact, runtimeDeveloperAllowed } from './runtime.mjs';
 import { openWorkerEnvironment, restrictedWorkerArgs } from './worker.mjs';
 import { developmentWorkerProgram } from '../development/worker-tools.mjs';
+import { inspectDevelopmentRecovery } from '../development/state.mjs';
+import { inspectWorkspaceRecovery } from '../repositories/store.mjs';
+import { inspectPolicyRecovery } from './policy.mjs';
 
 const digest = value => createHash('sha256').update(canonicalJSON(value)).digest('hex');
 const bytesHash = value => createHash('sha256').update(value).digest('hex');
 const filename = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/.test(value);
 const failure = error => typeof error.message === 'string' && /^[A-Za-z][A-Za-z ;,-]{0,159}$/.test(error.message) ? error.message : 'Execution could not be verified; local recovery required';
+
+function executionRecord(row) {
+  if (!row) return null;
+  const data = JSON.parse(row.document);
+  if (digest(data) !== row.hash || data.manifest.runId !== row.run_id || data.manifest.epoch !== row.epoch || data.manifest.repository !== row.repository
+    || !['starting', 'created', 'running', 'exited', 'stopping', 'stopped', 'blocked'].includes(row.state)) throw new Error('Execution resource integrity failed');
+  return { ...row, data };
+}
 
 // ponytail: one trusted broker per local app store; it may supervise several repository slots.
 export function acquireExecutionOwner(directory, { existingOnly = false } = {}) {
@@ -25,6 +36,43 @@ export function acquireExecutionOwner(directory, { existingOnly = false } = {}) 
   catch { db.close(); throw new Error('Execution owner unavailable'); }
   let closed = false;
   return Object.freeze({ close() { if (!closed) { db.close(); closed = true; } } });
+}
+
+// Recorded state is necessary, never sufficient, for native idle verification.
+export function captureRecoveryWork(directory, { scratch, vault, checkpoint }) {
+  if (typeof checkpoint !== 'function') throw Error('Recovery ownership checkpoint required');
+  const owner = acquireExecutionOwner(directory, { existingOnly: true }), snapshots = [];
+  let closed = false;
+  function verify() {
+    if (closed) throw Error('Recovery work inspection closed');
+    for (const snapshot of snapshots) snapshot.verify();
+    return true;
+  }
+  function close() {
+    if (closed) return; closed = true; let failed = false;
+    for (const snapshot of snapshots) try { snapshot.close(); } catch { failed = true; }
+    try { owner.close(); } catch { failed = true; }
+    if (failed) throw Error('Recovery work inspection cleanup required');
+  }
+  try {
+    for (const [name, read] of [['policy.sqlite', inspectPolicyRecovery], ['workspaces.sqlite', inspectWorkspaceRecovery], ['development.sqlite', inspectDevelopmentRecovery]]) {
+      const snapshot = captureRecoveryDatabase(directory, name, { scratch, checkpoint, read: db => read(db, { vault }) }); snapshots.push(snapshot);
+      if (Object.values(snapshot.value).some(count => !Number.isSafeInteger(count) || count !== 0)) throw Error('Recorded work requires recovery');
+    }
+    const workers = captureRecoveryDatabase(directory, 'execution.sqlite', { scratch, checkpoint, read(db) {
+      if (db.prepare('PRAGMA user_version').get().user_version !== 1) throw Error('Unsupported execution inventory');
+      const rows = db.prepare('SELECT * FROM workers ORDER BY run_id,epoch LIMIT 10001').all();
+      if (rows.length > 10000) throw Error('Execution recovery inventory needs bounded archival');
+      return immutable(rows.map(binding => {
+        const row = executionRecord(binding); restrictedWorkerArgs(row.data.manifest, row.data.program);
+        if (!['stopped', 'exited'].includes(row.state)) throw Error('Recorded work requires recovery');
+        if (row.cid !== null && (typeof row.cid !== 'string' || !/^[a-f0-9]{64}$/.test(row.cid)) || row.state === 'exited' && row.cid === null) throw Error('Execution resource integrity failed');
+        return { manifest: row.data.manifest, state: row.state, cid: row.cid };
+      }));
+    } });
+    snapshots.push(workers); verify();
+    return Object.freeze({ workers: workers.value, verify, close });
+  } catch (error) { close(); throw error; }
 }
 
 export function openExecutionSupervisor(directory, { store, maintenance = () => false }) {
@@ -52,12 +100,7 @@ export function openExecutionSupervisor(directory, { store, maintenance = () => 
   let monitorWork = null;
   const requireOpen = () => { if (closed) throw new Error('Execution supervisor closed'); };
   function rowFor(binding) {
-    const row = db.prepare('SELECT * FROM workers WHERE run_id=? AND epoch=?').get(binding.runId, binding.epoch);
-    if (!row) return null;
-    const data = JSON.parse(row.document);
-    if (digest(data) !== row.hash || data.manifest.runId !== row.run_id || data.manifest.epoch !== row.epoch || data.manifest.repository !== row.repository
-      || !['starting', 'created', 'running', 'exited', 'stopping', 'stopped', 'blocked'].includes(row.state)) throw new Error('Execution resource integrity failed');
-    return { ...row, data };
+    return executionRecord(db.prepare('SELECT * FROM workers WHERE run_id=? AND epoch=?').get(binding.runId, binding.epoch));
   }
   function update(binding, state, cid, error = null) { transact(db, () => db.prepare('UPDATE workers SET state=?,cid=?,error=? WHERE run_id=? AND epoch=?').run(state, cid, error, binding.runId, binding.epoch)); }
   function current(binding, running = false) {

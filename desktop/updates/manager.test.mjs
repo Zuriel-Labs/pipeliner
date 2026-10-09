@@ -33,6 +33,76 @@ function fixture() {
     close() { manager.close(); policy.close(); rmSync(root, { recursive: true }); assert.equal(existsSync(root), false); } };
 }
 
+test('rollback preview binds local custody and policy; dispatch requires host qualification and settled idle ownership', async () => {
+  for (const mode of ['normal', 'chat', 'unqualified', 'expired', 'policy', 'inspect-cancel', 'inspect-close', 'apply-cancel', 'apply-close', 'apply-policy', 'bad-result', 'bad-path', 'missing']) {
+    const f = fixture(); let update, pending, stopping, enter, release, now = 1000, recovery = false, prepared = 0, replaced = 0, restarted = 0, settled = 0;
+    const started = new Promise(resolve => { enter = resolve; }), held = new Promise(resolve => { release = resolve; });
+    const identity = { kind: 'pipeliner-desktop-build', schemaVersion: 1, sourceCommit: 'a'.repeat(40), gitTree: 'b'.repeat(40),
+      version: '0.2.0', platform: 'darwin', architecture: 'arm64' };
+    const plan = immutable({ id: randomUUID(), running: { bundle: join(f.root, 'Pipeliner.app'), identity },
+      target: { ...identity, version: '0.1.0', sourceCommit: 'c'.repeat(40), gitTree: 'd'.repeat(40) } });
+    const token = Object.freeze({}), maintenance = createMaintenanceGate({ ready: () => true, verify: async () => true, recovery: () => recovery });
+    try {
+      update = createUpdateManager({ policy: f.policy, version: identity.version, maintenance, clock: () => now, recovery: () => recovery,
+        ...(mode === 'unqualified' ? {} : { rollbackQualified: true }), ownsIntent: value => maintenance.active() && recovery && value === token,
+        async inspectRollback({ checkpoint, signal }) {
+          checkpoint(); if (mode.startsWith('inspect-')) { enter(); await held; signal.throwIfAborted(); checkpoint(); }
+          return mode === 'missing' ? null : plan;
+        },
+        async prepareRollback({ plan: captured, checkpoint, signal, onIntent }) {
+          assert.deepEqual(captured, plan); checkpoint(); prepared++; recovery = true; onIntent(token); checkpoint();
+          enter(); try { if (mode.startsWith('apply-')) await held; signal.throwIfAborted(); checkpoint(); return token; } finally { settled++; }
+        },
+        async replaceInstaller(value, options) {
+          assert.equal(value, token); assert.deepEqual(Object.keys(options).sort(), ['checkpoint', 'signal']); options.checkpoint(); replaced++;
+          return { installed: mode === 'bad-path' ? join(f.root, 'foreign/Pipeliner.app') : plan.running.bundle, rollback: join(f.root, 'retained/Pipeliner.app'), identity: mode === 'bad-result' ? identity : plan.target };
+        }, onInstalled(value) { assert.equal(maintenance.active(), false); assert.equal(update.status().busy, false); assert.deepEqual(value.identity, plan.target); restarted++; } });
+      const url = 'pipeliner://app/index.html', frame = { url, parent: null }, contents = { mainFrame: frame, isDestroyed: () => false }, event = { sender: contents, senderFrame: frame };
+      const channel = createUpdateControlChannel(update, { contents, url, context: () => ({ revision: update.status().revision }) });
+      const request = payload => channel.dispatch(event, { ...payload, contextRevision: update.status().revision });
+      assert.equal(updateCommand('Review Desktop rollback')?.operation, 'rollback-inspect');
+      assert.equal(updateCommand('Roll back Desktop')?.operation, 'rollback-apply');
+      assert.equal(updateCommand('Cancel Desktop rollback')?.operation, 'rollback-cancel');
+      assert.equal(updateCommand('Stop Desktop rollback')?.operation, 'stop');
+      await assert.rejects(request({ operation: 'rollback-apply' }));
+      assert.throws(() => request({ operation: 'rollback-inspect', rollbackQualified: true }));
+      pending = request({ operation: 'chat', text: 'Review Desktop rollback' });
+      if (mode.startsWith('inspect-')) {
+        await started; stopping = mode === 'inspect-close' ? update.close() : request({ operation: 'chat', text: 'Cancel Desktop rollback' });
+        await new Promise(setImmediate); assert.equal(update.status().busy, true); release(); await stopping; await pending;
+        assert.equal(update.status().rollbackPreview, null); assert.equal(prepared, 0); continue;
+      }
+      await pending;
+      if (mode === 'missing') { assert.equal(update.status().rollbackPreview, null); assert.match(update.status().message, /retained|recorded/i); continue; }
+      const preview = update.status().rollbackPreview;
+      assert.equal(preview.fromVersion, identity.version); assert.deepEqual(preview.target, plan.target);
+      assert.equal(update.status().sourceQualified, false); assert.equal(update.status().rollbackQualified, mode !== 'unqualified');
+      assert.equal(recovery, false); assert.equal(prepared, 0);
+      assert.doesNotMatch(JSON.stringify(update.status()), new RegExp(f.root + '|' + plan.id));
+      assert.throws(() => request({ operation: 'rollback-apply', hash: preview.hash, plan }));
+      await assert.rejects(request({ operation: 'rollback-apply', hash: '0'.repeat(64) }));
+      if (mode === 'expired') now = preview.expiresAt + 1;
+      if (mode === 'policy') f.edit({ 'appearance.theme': 'dark' });
+      if (['unqualified', 'expired', 'policy'].includes(mode)) {
+        await assert.rejects(request({ operation: 'rollback-apply', hash: preview.hash }));
+        await assert.rejects(request({ operation: 'chat', text: 'Roll back Desktop' })); assert.equal(prepared, 0); assert.equal(recovery, false); continue;
+      }
+      pending = request(mode === 'chat' ? { operation: 'chat', text: 'Roll back Desktop' } : { operation: 'rollback-apply', hash: preview.hash });
+      await started;
+      if (mode.startsWith('apply-')) {
+        if (mode === 'apply-policy') { f.edit({ 'appearance.theme': 'dark' }); update.sync(); }
+        else stopping = mode === 'apply-close' ? update.close() : request({ operation: 'chat', text: 'Cancel Desktop rollback' });
+        await new Promise(setImmediate); assert.equal(settled, 0); assert.equal(maintenance.active(), true); release();
+      }
+      await pending; await stopping;
+      assert.equal(prepared, 1); assert.equal(settled, 1); assert.equal(replaced, mode.startsWith('apply-') ? 0 : 1);
+      assert.equal(restarted, ['normal', 'chat'].includes(mode) ? 1 : 0); assert.equal(update.status().busy, false); assert.equal(maintenance.active(), false);
+      assert.equal(update.status().rollbackPreview, null); assert.equal(update.status().recoveryRequired, true);
+      assert.equal(update.status().rollbackQualified, false); await assert.rejects(request({ operation: 'rollback-apply' }));
+    } finally { release(); await Promise.allSettled([pending, stopping].filter(Boolean)); await update?.close(); f.close(); }
+  }
+});
+
 test('explicit removal consumes a private preview and awaits cancellation; cold recovery needs no normal policy store', async () => {
   for (const mode of ['normal', 'cancel', 'policy', 'expired', 'cold']) {
     const f = fixture(); let update, pending, stopped, release, entered, effects = 0, finished = 0, closed = 0, now = 1000;

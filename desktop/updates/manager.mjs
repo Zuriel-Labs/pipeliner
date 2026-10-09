@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { canonicalJSON, immutable, record } from '../core/settings.mjs';
 import { buildIdentity } from '../package/build.mjs';
 import { updateShapes, updateCommand } from './commands.mjs';
-import { checkUpdateContext, parseUpdateVersion } from './manifest.mjs';
+import { checkUpdateContext, parseUpdateVersion, isNewerUpdateVersion } from './manifest.mjs';
 import { readUpdateSource } from './source.mjs';
 import { endpointURL } from '../tools/transport.mjs';
 import { checkUninstallPlan } from './uninstall.mjs';
@@ -12,13 +12,14 @@ export function createUpdateManager({ policy, version = null, history = null, so
   host = { platform: process.platform, architecture: process.arch }, foreground = () => true, maintenance = null, recovery = () => false,
   prepareInstaller = null, replaceInstaller = null, installerQualified = false, onInstalled = () => {}, ownsIntent = () => false, recoveryDetails = () => null, inspectRemoval = null, removalDetails = () => null,
   removeApp = null, recoverRemoval = null, onRemoved = () => {},
+  inspectRollback = null, prepareRollback = null, rollbackQualified = false,
   clock = Date.now, initialRevision = 1, onChange = () => {}, onApplied = () => {} }) {
   record(host, ['platform', 'architecture']);
-  if (!Number.isSafeInteger(initialRevision) || initialRevision < 1 || typeof installerQualified !== 'boolean' || [onChange, onApplied, onRemoved, onInstalled, sources, reader, foreground, recovery, ownsIntent, recoveryDetails, removalDetails, clock].some(fn => typeof fn !== 'function')
+  if (!Number.isSafeInteger(initialRevision) || initialRevision < 1 || [installerQualified, rollbackQualified].some(value => typeof value !== 'boolean') || [onChange, onApplied, onRemoved, onInstalled, sources, reader, foreground, recovery, ownsIntent, recoveryDetails, removalDetails, clock].some(fn => typeof fn !== 'function')
     || prepareInstaller !== null && typeof prepareInstaller !== 'function'
     || replaceInstaller !== null && typeof replaceInstaller !== 'function'
     || inspectRemoval !== null && typeof inspectRemoval !== 'function'
-    || [removeApp, recoverRemoval].some(value => value !== null && typeof value !== 'function')
+    || [removeApp, recoverRemoval, inspectRollback, prepareRollback].some(value => value !== null && typeof value !== 'function')
     || history !== null && ['read', 'begin', 'complete', 'fail'].some(name => typeof history[name] !== 'function')
     || maintenance !== null && typeof maintenance.exclusive !== 'function'
     || Object.values(host).some(value => typeof value !== 'string' || !/^[a-z0-9_-]{1,16}$/.test(value))
@@ -26,6 +27,7 @@ export function createUpdateManager({ policy, version = null, history = null, so
   host = { ...host };
   const recovering = () => { try { return recovery() !== false; } catch { return true; } };
   const conversationId = randomUUID(); let revision = initialRevision, observed, preview = null, removalPreview = null, removalPlan = null, applied = null, message = null, closed = false, pending = null;
+  let rollbackPreview = null, rollbackPlan = null;
   function time() { const now = clock(); if (!Number.isSafeInteger(now) || now < 0 || now > Number.MAX_SAFE_INTEGER - 900000) throw Error('Desktop maintenance clock unavailable'); return now; }
   function removalRecord() {
     try {
@@ -57,18 +59,19 @@ export function createUpdateManager({ policy, version = null, history = null, so
     return { view, approved, selected, current: view ? { ...host, channel: view.values['updates.channel'].value, version } : null };
   }
   function ownsPreparation(operation = pending) {
-    try { return Boolean(operation?.intent && operation === pending && operation.kind === 'install' && ownsIntent(operation.intent) === true); }
+    try { return Boolean(operation?.intent && operation === pending && ['install', 'rollback-apply'].includes(operation.kind) && ownsIntent(operation.intent) === true); }
     catch { return false; }
   }
   const removing = () => ['removal-apply', 'removal-resume'].includes(pending?.kind);
   // The native host verifies each journal transition; policy/catalog changes still cancel this operation.
   const signature = value => canonicalJSON({ revision: value.view?.revision ?? null, catalog: value.approved.fingerprint,
     recovery: removing() ? pending.baselineRecovery : recovering() && !ownsPreparation(), removal: removing() ? pending.baselineRemoval : removalRecord() });
-  function invalidate() { if (preview) policy.control.invalidate(preview.inputId); preview = null; removalPreview = null; removalPlan = null; applied = null; }
+  function invalidate() { if (preview) policy.control.invalidate(preview.inputId); preview = null; removalPreview = null; removalPlan = null; rollbackPreview = null; rollbackPlan = null; applied = null; }
   function sync() {
     const value = inspect(), current = signature(value);
     if (observed !== undefined && current !== observed) { invalidate(); pending?.controller.abort(); revision++; }
     if (removalPreview && removalPreview.expiresAt < time()) { removalPreview = null; removalPlan = null; revision++; message = 'Removal inspection expired. Review Desktop removal again; app files and saved data are preserved.'; }
+    if (rollbackPreview && rollbackPreview.expiresAt < time()) { rollbackPreview = null; rollbackPlan = null; revision++; message = 'Rollback inspection expired. Review Desktop rollback again; app files and saved data are preserved.'; }
     observed = current; return value;
   }
   const capable = value => value.view && value.selected && history && version && host.platform === 'darwin' && host.architecture === 'arm64';
@@ -102,11 +105,49 @@ export function createUpdateManager({ policy, version = null, history = null, so
       removalQualified: Boolean(removeApp && version && host.platform === 'darwin' && host.architecture === 'arm64' && !recoveryRequired),
       removalRecoverable: Boolean(recoverRemoval && version && host.platform === 'darwin' && host.architecture === 'arm64' && recoveryRequired && removal && removal.phase !== 'removed'),
       removalPreview: removalPreview ? { ...removalPreview } : null,
+      rollbackInspectable: Boolean(view && version && inspectRollback && maintenance && host.platform === 'darwin' && host.architecture === 'arm64' && !recoveryRequired),
+      rollbackQualified: Boolean(view && version && inspectRollback && prepareRollback && replaceInstaller && maintenance && rollbackQualified && host.platform === 'darwin' && host.architecture === 'arm64' && !recoveryRequired),
+      rollbackPreview: rollbackPreview ? structuredClone(rollbackPreview) : null,
       preview: preview ? { hash: preview.hash, scope: preview.scope, target: preview.target, baseRevision: preview.baseRevision, expiresAt: preview.expiresAt,
         before: display(preview.before), after: display(preview.after) } : null,
       message: recoveryRequired && !ownsPreparation() && !removing() ? 'Desktop maintenance needs verified recovery before work can resume. Keep the installed app and saved data; settings and repositories are preserved.' : message };
   }
   function publish() { try { onChange(status()); } catch { message = 'Update view needs refresh. Reopen Settings to inspect saved settings.'; } }
+  async function inspectAppRollback() {
+    if (pending) return { snapshot: status() };
+    if (!status().rollbackInspectable) {
+      revision++; message = 'Rollback inspection needs the packaged foreground Mac and protected idle state. No app files changed.'; publish(); return { snapshot: status() };
+    }
+    invalidate(); const operation = { kind: 'rollback-inspect', controller: new AbortController(), signature: signature(inspect()) }; pending = operation;
+    revision++; message = 'Reading the retained app record while work is idle. No rollback runs.';
+    operation.done = (async () => {
+      try {
+        await maintenance.exclusive(async checkpoint => {
+          const check = () => {
+            operation.controller.signal.throwIfAborted();
+            if (closed || pending !== operation || signature(sync()) !== operation.signature) throw Error('maintenance-deferred');
+            checkpoint(); operation.controller.signal.throwIfAborted();
+          };
+          check(); const captured = await inspectRollback(Object.freeze({ checkpoint: check, signal: operation.controller.signal })); check();
+          if (captured === null) { message = 'No unambiguous retained app is recorded for this build. Current app files and saved data are preserved.'; return; }
+          canonicalJSON(captured); record(captured, ['id', 'running', 'target']); record(captured.running, ['bundle', 'identity']);
+          const from = buildIdentity(captured.running.identity), target = buildIdentity(captured.target);
+          if (typeof captured.id !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(captured.id)
+            || from.version !== version || !isNewerUpdateVersion(from.version, target.version)
+            || [from, target].some(value => value.platform !== host.platform || value.architecture !== host.architecture)
+            || typeof captured.running.bundle !== 'string' || resolve(captured.running.bundle) !== captured.running.bundle
+            || !captured.running.bundle.endsWith('/Pipeliner.app') || /[\x00-\x1f\x7f]/.test(captured.running.bundle)) throw Error();
+          rollbackPlan = immutable(structuredClone(captured)); const expiresAt = time() + 900000;
+          rollbackPreview = immutable({ hash: createHash('sha256').update(canonicalJSON({ plan: rollbackPlan, policyRevision: inspect().view.revision, expiresAt })).digest('hex'),
+            fromVersion: from.version, target, expiresAt });
+          message = rollbackQualified ? 'Review the recorded rollback target. Applying rechecks both apps and data compatibility, preserves current saved data and PM settings, then replaces and restarts Desktop.'
+            : 'Rollback target recorded. Native rollback is not yet qualified in this installation. This inspection changes no app files or saved data.';
+        }, { signal: operation.controller.signal });
+      } catch { rollbackPreview = null; rollbackPlan = null; message = 'Rollback inspection did not finish: work is busy, changed or unverified. App files and saved data are preserved.'; }
+      finally { pending = null; revision++; publish(); }
+    })();
+    publish(); await operation.done; return { snapshot: status() };
+  }
   async function inspectAppRemoval() {
     if (pending) return { snapshot: status() };
     if (!status().removalInspectable) {
@@ -214,7 +255,7 @@ export function createUpdateManager({ policy, version = null, history = null, so
       const action = updateCommand(payload.text); if (!action) throw Error('Desktop update command unavailable'); return dispatch(action);
     }
     if (payload.operation === 'view') return { snapshot: status() };
-    if (payload.operation === 'stop' || payload.operation === 'removal-cancel' && removing()) {
+    if (payload.operation === 'stop' || payload.operation === 'removal-cancel' && removing() || payload.operation === 'rollback-cancel' && pending?.kind === 'rollback-apply') {
       const operation = pending; operation?.controller.abort(); await operation?.done; return { snapshot: status() };
     }
     if (payload.operation === 'removal-resume') return remove(payload);
@@ -230,6 +271,12 @@ export function createUpdateManager({ policy, version = null, history = null, so
     if (payload.operation === 'check') return check(true);
     if (payload.operation === 'removal-apply') return remove(payload);
     if (payload.operation === 'removal-inspect') return inspectAppRemoval();
+    if (payload.operation === 'rollback-inspect') return inspectAppRollback();
+    if (payload.operation === 'rollback-cancel') {
+      if (pending && pending.kind !== 'rollback-inspect') throw Error('Desktop rollback inspection unavailable');
+      rollbackPreview = null; rollbackPlan = null; const operation = pending; operation?.controller.abort(); await operation?.done;
+      revision++; message = 'Rollback inspection cancelled. App files and saved data are preserved.'; publish(); return { snapshot: status() };
+    }
     if (payload.operation === 'removal-cancel') {
       if (pending && pending.kind !== 'removal-inspect') throw Error('Desktop removal inspection unavailable');
       removalPreview = null; removalPlan = null; const operation = pending; operation?.controller.abort(); await operation?.done;
@@ -245,13 +292,16 @@ export function createUpdateManager({ policy, version = null, history = null, so
       preview = null; applied = p.hash; observed = signature(inspect()); pending?.controller.abort(); revision++; message = 'Update settings saved for this Mac. No check, download, installation or restart ran.';
       try { onApplied(); } catch { message = 'Update settings saved. Refresh did not finish; reopen Settings to inspect them.'; }
       publish(); return { snapshot: status(), applied: result.applied };
-    } else if (payload.operation === 'install') {
+    } else if (['install', 'rollback-apply'].includes(payload.operation)) {
       if (pending) return { snapshot: status() };
-      const context = inspect(), availability = status(), release = availability.release;
-      if (!availability.installQualified || !release) {
+      const context = inspect(), availability = status(), rollback = payload.operation === 'rollback-apply', plan = rollback ? rollbackPlan : null;
+      if (rollback && (!availability.rollbackQualified || !plan || !rollbackPreview)) throw Error('Desktop rollback unavailable');
+      if (rollback && payload.hash !== undefined && payload.hash !== rollbackPreview.hash) throw Error('Desktop rollback preview changed');
+      const release = rollback ? plan.target : availability.release;
+      if (!rollback && (!availability.installQualified || !release)) {
         revision++; message = 'Update installation is unavailable. A verified release, qualified installer and migration/recovery preview are required. No app files changed.';
       } else {
-        const operation = { kind: 'install', controller: new AbortController(), signature: signature(context) }; pending = operation; revision++;
+        invalidate(); const operation = { kind: payload.operation, controller: new AbortController(), signature: signature(context) }; pending = operation; revision++;
         message = 'Inspecting idle work on this Mac. No installer is downloaded.';
         operation.done = (async () => {
           let installed = null;
@@ -263,26 +313,27 @@ export function createUpdateManager({ policy, version = null, history = null, so
                 checkpoint(); operation.controller.signal.throwIfAborted();
               };
               check();
-              message = 'Preparing the verified update and protected recovery copies. The installed app is preserved.';
-              const token = await prepareInstaller(Object.freeze({ trust: Object.freeze({ ...context.selected.trust }), current: Object.freeze({ ...context.current }),
+              message = rollback ? 'Verifying the recorded rollback target and preserving current data before replacement.' : 'Preparing the verified update and protected recovery copies. The installed app is preserved.';
+              const nativeOptions = rollback ? {} : { trust: Object.freeze({ ...context.selected.trust }), current: Object.freeze({ ...context.current }) };
+              const token = await (rollback ? prepareRollback : prepareInstaller)(Object.freeze({ ...(rollback ? { plan } : nativeOptions),
                 checkpoint: check, signal: operation.controller.signal, onIntent(token) {
                   if (operation.intent || closed || pending !== operation || operation.controller.signal.aborted || !token || typeof token !== 'object'
                     || !Object.isFrozen(token) || ownsIntent(token) !== true || !recovering()) throw Error('maintenance-deferred');
                   operation.intent = token; check(); publish();
                 } }));
               check(); if (token !== operation.intent || !ownsPreparation(operation)) throw Error('maintenance-deferred');
-              message = 'Installing the verified update while work is idle. Recovery copies stay preserved.';
-              const result = await replaceInstaller(token, Object.freeze({ trust: Object.freeze({ ...context.selected.trust }),
-                current: Object.freeze({ ...context.current }), checkpoint: check, signal: operation.controller.signal }));
+              message = rollback ? 'Restoring the verified retained app while work is idle. Current data and recovery copies stay preserved.' : 'Installing the verified update while work is idle. Recovery copies stay preserved.';
+              const result = await replaceInstaller(token, Object.freeze({ ...nativeOptions, checkpoint: check, signal: operation.controller.signal }));
               check(); canonicalJSON(result); record(result, ['installed', 'rollback', 'identity']);
               const identity = buildIdentity(result.identity);
               if (['version', 'platform', 'architecture', 'sourceCommit', 'gitTree'].some(key => identity[key] !== release[key])
+                || rollback && result.installed !== plan.running.bundle
                 || ['installed', 'rollback'].some(key => typeof result[key] !== 'string' || resolve(result[key]) !== result[key]
                   || !result[key].endsWith('.app') || /[\x00-\x1f\x7f]/.test(result[key])) || result.installed === result.rollback) throw Error('maintenance-deferred');
               installed = immutable({ installed: result.installed, rollback: result.rollback, identity });
-              message = 'Update replacement verified. Closing safely before restarting; startup will verify recovery.';
+              message = rollback ? 'Rollback replacement verified. Closing safely before restarting; startup will verify recovery.' : 'Update replacement verified. Closing safely before restarting; startup will verify recovery.';
             }, { signal: operation.controller.signal, ownsRecovery: () => ownsPreparation(operation) });
-          } catch { installed = null; message = 'Update deferred: work is busy, changed or unverified. Inspect recovery before retrying; completed effects and saved data are preserved.'; }
+          } catch { installed = null; message = (rollback ? 'Rollback' : 'Update') + ' deferred: work is busy, changed or unverified. Inspect recovery before retrying; completed effects and saved data are preserved.'; }
           finally { pending = null; revision++; publish(); }
           if (installed && !closed && !operation.controller.signal.aborted) {
             try { onInstalled(installed); }

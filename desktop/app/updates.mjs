@@ -10,7 +10,7 @@ export async function initUpdates({ el, message, show }) {
     const node = el('button', text, operation === 'apply' ? 'primary' : 'secondary'); node.type = 'button'; if (id) node.id = id;
     node.disabled = operation === 'status' ? requests > 0 : operation === 'stop' ? !state.busy
       : operation === 'removal-resume' ? !state.removalRecoverable || requests > 0 || state.busy
-        : !state.storageAvailable || operation !== 'removal-cancel' && (requests > 0 || state.busy || state.recoveryRequired);
+        : !state.storageAvailable || !['removal-cancel', 'rollback-cancel'].includes(operation) && (requests > 0 || state.busy || state.recoveryRequired);
     node.addEventListener('click', () => request({ operation, ...extra })); return node;
   }
   function preview(p, suffix = '') {
@@ -34,6 +34,18 @@ export async function initUpdates({ el, message, show }) {
     if (state.removalQualified) card.append(button('Remove Desktop app', 'removal-apply', { hash: p.hash }, 'update-removal-apply' + suffix));
     else card.append(el('p', 'Removal is unavailable in this installation. This inspection changes nothing.', 'availability'));
     card.append(button('Discard inspection', 'removal-cancel', {}, 'update-removal-cancel' + suffix)); return card;
+  }
+  function rollbackPreview(p, suffix = '') {
+    const card = el('article', undefined, 'setup-preview'); card.id = 'update-rollback-preview' + suffix;
+    card.append(el('h3', 'Review Desktop rollback'), el('p', 'This Mac · ' + p.fromVersion + ' returns to recorded version ' + p.target.version + '.', 'small'),
+      el('p', 'Current saved data and PM settings stay preserved. Applying verifies both apps and matching data formats, saves fresh recovery copies, then replaces and restarts Desktop.'),
+      el('p', 'This record alone does not verify the retained app. An incompatible, missing or changed app cannot be used.', 'small'));
+    const data = el('dl', undefined, 'connection-data');
+    for (const [name, value] of [['Recorded source', p.target.sourceCommit], ['Recorded tree', p.target.gitTree], ['Inspection expires', new Date(p.expiresAt).toLocaleString()]]) data.append(el('dt', name), el('dd', value));
+    card.append(data);
+    if (state.rollbackQualified) card.append(button('Roll back Desktop', 'rollback-apply', { hash: p.hash }, 'update-rollback-apply' + suffix));
+    else card.append(el('p', 'Native rollback is unavailable in this installation. App files and saved data stay preserved.', 'availability'));
+    card.append(button('Discard inspection', 'rollback-cancel', {}, 'update-rollback-cancel' + suffix)); return card;
   }
   function render(snapshot) {
     if (state && snapshot.revision < state.revision) return;
@@ -110,23 +122,30 @@ export async function initUpdates({ el, message, show }) {
       if (state.release) data.append(el('dt', 'Release checksum'), el('dd', state.release.sha256), el('dt', 'Release source'), el('dd', state.release.sourceCommit));
       availability.append(data, el('p', state.busy ? state.busyOperation === 'removal-inspect' ? 'Inspecting app removal. Cancel inspection; no removal runs.'
         : ['removal-apply', 'removal-resume'].includes(state.busyOperation) ? 'App removal is in progress. Stopping preserves the recovery record; completed effects are not undone.'
+        : state.busyOperation === 'rollback-inspect' ? 'Reading the retained app record. Cancel inspection; no rollback runs.'
+        : state.busyOperation === 'rollback-apply' ? 'Verifying and restoring the retained app. Stopping preserves recovery state; completed effects are not undone.'
         : state.busyOperation === 'install' ? 'Preparing the verified update and recovery copies.' : 'Checking signed availability. Cancel safely before any installer download.'
         : 'Availability checks read signed metadata. Installation requires a verified installer, idle work and a recovery plan.', 'availability'),
         el('p', 'No automatic download, installation or restart. Updates cannot enable background operation or change permissions.', 'small'));
       const check = button('Check Now', 'check', {}, 'update-check'), install = button('Install when idle', 'install', {}, 'update-install'); check.disabled ||= !state.sourceQualified; install.disabled = true;
       availability.append(check, install); if (state.busy) availability.append(button('Cancel operation', 'stop', {}, 'update-stop')); nodes.push(availability);
+      const rollback = el('article', undefined, 'connection-card'); rollback.id = 'update-rollback'; rollback.append(el('h3', 'Return to a retained version'),
+        el('p', 'Review the prior app recorded by a completed update. Current data, PM settings and release history stay preserved.', 'small'));
+      const inspectRollback = button('Review Desktop rollback', 'rollback-inspect', {}, 'update-rollback-review'); inspectRollback.disabled ||= !state.rollbackInspectable;
+      rollback.append(inspectRollback); if (state.busyOperation === 'rollback-inspect') rollback.append(button('Cancel inspection', 'rollback-cancel', {}, 'update-rollback-stop'));
+      if (!state.rollbackInspectable) rollback.append(el('p', 'Inspection needs the installed app and protected idle state.', 'availability')); nodes.push(rollback);
       const removal = el('article', undefined, 'connection-card'); removal.id = 'update-removal'; removal.append(el('h3', 'App removal'),
         el('p', 'Review this app, local credentials and background registration. Repository files, GitHub work and nonsecret records stay preserved.', 'small'));
       const inspect = button('Review app removal', 'removal-inspect', {}, 'update-removal-review'); inspect.disabled ||= !state.removalInspectable;
       removal.append(inspect); if (state.busyOperation === 'removal-inspect') removal.append(button('Cancel inspection', 'removal-cancel', {}, 'update-removal-stop'));
       if (!state.removalInspectable) removal.append(el('p', 'Inspection needs the installed app and protected idle state.', 'availability')); nodes.push(removal);
     }
-    if (state.preview) nodes.push(preview(state.preview)); if (state.removalPreview) nodes.push(removalPreview(state.removalPreview));
-    chatPreview.replaceChildren(...(state.preview ? [preview(state.preview, '-chat')] : state.removalPreview ? [removalPreview(state.removalPreview, '-chat')] : []));
+    if (state.preview) nodes.push(preview(state.preview)); if (state.removalPreview) nodes.push(removalPreview(state.removalPreview)); if (state.rollbackPreview) nodes.push(rollbackPreview(state.rollbackPreview));
+    chatPreview.replaceChildren(...(state.preview ? [preview(state.preview, '-chat')] : state.removalPreview ? [removalPreview(state.removalPreview, '-chat')] : state.rollbackPreview ? [rollbackPreview(state.rollbackPreview, '-chat')] : []));
     if (state.message) nodes.push(el('p', state.message, 'protected-state')); section.replaceChildren(...nodes);
     if (focused && $(focused) && !$(focused).disabled) $(focused).focus({ preventScroll: true });
     else if (!section.hidden && focused?.startsWith('update-')) {
-      const next = focused.startsWith('update-removal-') ? $('update-removal-review') : $('update-channel');
+      const next = focused.startsWith('update-removal-') ? $('update-removal-review') : focused.startsWith('update-rollback-') ? $('update-rollback-review') : $('update-channel');
       const fallback = ['update-recovery-stop', 'update-stop', 'update-recovery-refresh'].map($).find(node => node && !node.disabled);
       (next && !next.disabled ? next : fallback)?.focus({ preventScroll: true });
     }
@@ -134,7 +153,7 @@ export async function initUpdates({ el, message, show }) {
   }
   async function request(payload, text) {
     const operation = payload.operation === 'chat' ? updateCommand(payload.text)?.operation : payload.operation;
-    if (!state || requests && !['stop', 'removal-cancel'].includes(operation)) return; requests++;
+    if (!state || requests && !['stop', 'removal-cancel', 'rollback-cancel'].includes(operation)) return; requests++;
     if (text) message(text, true); if (text && updateCommand(text)?.operation === 'view') show();
     try {
       const result = await window.pipeliner.updateRequest(payload.operation === 'status' ? payload : { ...payload, contextRevision: state.revision }); requests--; render(result.snapshot ?? result);

@@ -180,6 +180,7 @@ exports.run = async ({ window, directory, vault, privacy, delivery, updates, upd
     assert.equal(updates.status().scope, 'host'); assert.equal(updates.status().sourceConfigured, false); assert.equal(updates.status().sourceQualified, false);
     assert.equal(updates.status().installedVersion, null); assert.equal(updates.status().lastCheck, null); assert.equal(updates.status().release, null);
     assert.equal(await js("document.getElementById('update-check').disabled && document.getElementById('update-install').disabled && document.getElementById('update-availability').textContent.includes('No trusted source configured')"), true);
+    assert.equal(updates.status().rollbackQualified, false); assert.equal(await js("document.getElementById('update-rollback-review').disabled"), true);
     const payload = { operation: 'prepare', contextRevision: updates.status().revision, changes: { 'updates.channel': 'beta' } };
     assert.throws(() => updateChannel.dispatch({ ...event, sender: {} }, payload));
     assert.throws(() => updateChannel.dispatch({ ...event, senderFrame: { url: frame.url, parent: frame } }, payload));
@@ -232,6 +233,7 @@ exports.run = async ({ window, directory, vault, privacy, delivery, updates, upd
     const { openPolicyStore } = await moduleAt('../core/policy.mjs'), { canonicalJSON } = await moduleAt('../core/settings.mjs');
     const { openUpdateHistory } = await moduleAt('../updates/history.mjs'), { createUpdateManager } = await moduleAt('../updates/manager.mjs');
     const { createUpdateControlChannel } = await moduleAt('../core/control.mjs');
+    const { createMaintenanceGate } = await moduleAt('../updates/idle.mjs');
     const root = realpathSync(mkdtempSync(join(directory, 'update-controls-'))), owner = lstatSync(root), files = new Map();
     const { publicKey, privateKey } = generateKeyPairSync('ed25519');
     const source = { id: 'synthetic-publisher', label: 'Synthetic Releases', key: publicKey, origin: 'https://updates.example.com', path: '/desktop/releases/' };
@@ -250,6 +252,12 @@ exports.run = async ({ window, directory, vault, privacy, delivery, updates, upd
       history = openUpdateHistory(root, { vault });
       for (const name of ['policy.sqlite', 'updates.sqlite']) files.set(name, lstatSync(join(root, name)));
       fixture = createUpdateManager({ policy: fixturePolicy, history, version: '0.1.0', sources: () => trusted ? [source] : [],
+        maintenance: createMaintenanceGate({ ready: () => true, verify: async () => true }),
+        inspectRollback: async ({ checkpoint }) => {
+          checkpoint(); return { id: '12345678-1234-1234-1234-123456789012', running: { bundle: join(root, 'Pipeliner.app'),
+            identity: { kind: 'pipeliner-desktop-build', schemaVersion: 1, sourceCommit: 'd'.repeat(40), gitTree: 'e'.repeat(40), version: '0.1.0', platform: 'darwin', architecture: 'arm64' } },
+          target: { kind: 'pipeliner-desktop-build', schemaVersion: 1, sourceCommit: 'f'.repeat(40), gitTree: 'a'.repeat(40), version: '0.0.1', platform: 'darwin', architecture: 'arm64' } };
+        },
         host: { platform: 'darwin', architecture: 'arm64' }, initialRevision: updates.status().revision + 100,
         onChange: snapshot => window.webContents.send('updates:status', snapshot), reader: async ({ signal }) => {
           calls++;
@@ -283,13 +291,23 @@ exports.run = async ({ window, directory, vault, privacy, delivery, updates, upd
       await wait(() => js("!document.getElementById('update-stop') && document.activeElement.id==='update-channel'"));
       trusted = false; fixture.sync(); await wait(() => js("document.getElementById('update-check').disabled && document.getElementById('update-source').value==='__unavailable__'"));
       assert.equal(fixture.status().release, null);
+      await chat('Review Desktop rollback'); await wait(() => Boolean(fixture.status().rollbackPreview) && js("Boolean(document.getElementById('update-rollback-preview-chat'))"));
+      assert.equal(fixture.status().rollbackQualified, false);
+      await assert.rejects(fixture.dispatch({ operation: 'chat', text: 'Roll back Desktop' }));
+      await js("document.getElementById('settings-nav').click();document.getElementById('settings-updates').click()");
+      assert.equal(await js("!document.getElementById('update-rollback-apply') && document.getElementById('update-rollback-preview').textContent.includes('Current saved data and PM settings stay preserved')"), true);
+      assert.equal((await js("document.getElementById('update-rollback-preview').textContent")).includes(root), false);
       appearance.dispatch({ operation: 'prepare', changes: { 'appearance.textScale': 2 } }); appearance.dispatch({ operation: 'apply' });
       window.setSize(420, 760); await js('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
       assert.equal(await js('document.documentElement.scrollWidth<=innerWidth'), true);
       assert.equal(await js("Array.from(document.querySelectorAll('#update-settings select')).every(input=>Array.from(document.querySelectorAll('#update-settings label')).some(label=>label.htmlFor===input.id))"), true);
       assert.equal(await js("Array.from(document.querySelectorAll('#update-settings button,#update-settings select')).every(node=>node.getBoundingClientRect().height>=44)"), true);
+      await js("document.getElementById('update-rollback-cancel').scrollIntoView({block:'center'});document.getElementById('update-rollback-cancel').focus()");
+      window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+      await wait(() => !fixture.status().rollbackPreview && js("document.activeElement.id==='update-rollback-review' && !document.getElementById('update-rollback-preview-chat')"));
       measurements.push({ inspection: 'native-update-window-with-synthetic-reader', signedMetadata: true, publicTLSQualified: false,
-        sourcePreviewApplied: true, cancelledReaderSettled: settled === calls, dispatches: calls, installed: false });
+        sourcePreviewApplied: true, cancelledReaderSettled: settled === calls, dispatches: calls, installed: false,
+        rollbackRecordSynthetic: true, rollbackChatAndSettingsPreview: true, rollbackKeyboardCancellation: true, nativeRollbackQualified: false });
     } finally {
       await fixture?.close(); history?.close(); fixturePolicy?.close();
       if (routed) { ipcMain.removeHandler('updates:control'); ipcMain.handle('updates:control', (event, payload) => updateChannel.dispatch(event, payload)); }

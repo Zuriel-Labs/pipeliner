@@ -148,7 +148,7 @@ app.whenReady().then(async () => {
   const registerControl = (name, channel) => ipcMain.handle(name, (event, payload) => {
     if (closing || removalFinished) throw Error('App closing');
     return maintenance.control(() => channel().dispatch(event, payload), {
-      passive: payload?.operation === 'status' || name === 'updates:control' && ['stop', 'view', 'removal-cancel', 'removal-resume'].includes(
+      passive: payload?.operation === 'status' || name === 'updates:control' && ['stop', 'view', 'removal-cancel', 'removal-resume', 'rollback-cancel'].includes(
         payload?.operation === 'chat' ? updateCommand(payload.text)?.operation : payload?.operation)
     });
   });
@@ -331,7 +331,24 @@ app.whenReady().then(async () => {
   const makeUpdates = initialRevision => createUpdateManager({ policy, history: updateHistory, sources: () => trustedUpdateSources,
     replaceInstaller: async (token, { trust, current, checkpoint, signal }) => {
       if (!app.isPackaged || backgroundLaunch || closing || !maintenance.active() || maintenanceStore?.owned(token) !== true) throw Error('maintenance-state-unavailable');
-      checkpoint(); return maintenanceStore.replaceBundle(token, { history: updateHistory, trust, current, checkpoint, signal });
+      checkpoint(); return maintenanceStore.replaceBundle(token, maintenanceStore.read()?.rollback ? { checkpoint, signal } : { history: updateHistory, trust, current, checkpoint, signal });
+    },
+    inspectRollback: async ({ checkpoint, signal }) => {
+      if (!app.isPackaged || backgroundLaunch || closing || !maintenance.active() || maintenanceStore?.clear() !== true) throw Error('maintenance-state-unavailable');
+      checkpoint(); const { readBuildIdentity } = await moduleAt('../package/build.mjs'); checkpoint();
+      const bundle = path.dirname(path.dirname(path.dirname(process.execPath))), identity = await readBuildIdentity(bundle, { signal }); checkpoint();
+      const matches = maintenanceStore.completed().filter(({ intent }) => !intent.rollback && intent.copy.installed.bundle === bundle
+        && Object.keys(identity).every(key => intent.to[key] === identity[key]));
+      checkpoint(); if (matches.length !== 1) return null;
+      const saved = matches[0].intent;
+      return Object.freeze({ id: saved.id, running: Object.freeze({ bundle, identity }), target: saved.from });
+    },
+    prepareRollback: async ({ plan, checkpoint, signal, onIntent }) => {
+      if (!app.isPackaged || backgroundLaunch || closing || !maintenance.active() || maintenanceStore?.clear() !== true) throw Error('maintenance-state-unavailable');
+      checkpoint(); const { readBuildIdentity } = await moduleAt('../package/build.mjs'); checkpoint();
+      const bundle = path.dirname(path.dirname(path.dirname(process.execPath))), identity = await readBuildIdentity(bundle, { signal }); checkpoint();
+      if (bundle !== plan.running.bundle || Object.keys(identity).some(key => identity[key] !== plan.running.identity[key])) throw Error('maintenance-state-unavailable');
+      return maintenanceStore.prepareRollback({ id: plan.id, running: { bundle, identity }, checkpoint, signal, onIntent });
     },
     onInstalled: result => {
       const saved = maintenanceStore?.read(), bundle = path.dirname(path.dirname(path.dirname(process.execPath)));

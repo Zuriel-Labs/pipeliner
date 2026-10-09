@@ -42,6 +42,43 @@ test('host update replacement retains one exact restart target and refuses forei
     }
   }
 });
+test('host rollback captures one matching completion and rechecks the running build before journal preparation', async () => {
+  const start = source.indexOf('  const makeUpdates = initialRevision =>'), end = source.indexOf('  updates = makeUpdates(1);', start);
+  for (const mode of ['normal', 'source', 'background', 'closing', 'lease', 'recovery', 'missing', 'duplicate', 'rollback', 'changed', 'foreign', 'cancelled']) {
+    let captured, prepared = 0, swapped = 0, changed = false;
+    const identity = Object.freeze({ kind: 'pipeliner-desktop-build', schemaVersion: 1, sourceCommit: 'a'.repeat(40), gitTree: 'b'.repeat(40), version: '0.2.0', platform: 'darwin', architecture: 'arm64' });
+    const target = Object.freeze({ ...identity, version: '0.1.0' }), token = Object.freeze({}), signal = new AbortController().signal;
+    const previous = { intent: { id: '12345678-1234-1234-1234-123456789012', to: identity, from: target,
+      ...(mode === 'rollback' ? { rollback: {} } : {}), copy: { installed: { bundle: mode === 'foreign' ? '/private/other/Pipeliner.app' : '/private/Pipeliner.app' } } } };
+    const checkpoint = () => { if (mode === 'cancelled') throw Error('Synthetic cancellation'); };
+    const context = { policy: {}, updateHistory: {}, trustedUpdateSources: [], maintenance: { active: () => mode !== 'lease' },
+      app: { isPackaged: mode !== 'source', getVersion: () => identity.version }, backgroundLaunch: mode === 'background', closing: mode === 'closing',
+      maintenanceStore: { clear: () => mode !== 'recovery', completed: () => mode === 'missing' ? [] : mode === 'duplicate' ? [previous, previous] : [previous],
+        owned: value => value === token, read: () => ({ rollback: { id: previous.intent.id } }),
+        async replaceBundle(value, options) { assert.equal(value, token); assert.deepEqual(Object.keys(options).sort(), ['checkpoint', 'signal']); swapped++; return {}; },
+        async prepareRollback(options) {
+          assert.equal(options.id, previous.intent.id); assert.equal(options.running.bundle, '/private/Pipeliner.app');
+          assert.equal(options.running.identity, identity); assert.equal(options.checkpoint, checkpoint); assert.equal(options.signal, signal); prepared++; return token;
+        } },
+      moduleAt: async name => { assert.equal(name, '../package/build.mjs'); return { readBuildIdentity: async () => changed ? { ...identity, gitTree: 'c'.repeat(40) } : identity }; },
+      path: require('node:path'), process: { execPath: '/private/Pipeliner.app/Contents/MacOS/Pipeliner' },
+      createUpdateManager: value => { captured = value; return {}; }, maintenanceRecovery: () => false, publishUpdates() {} };
+    runInNewContext(`${source.slice(start, end)}\nmakeUpdates(1);`, context, { timeout: 1000 });
+    assert.equal(captured.rollbackQualified, undefined); assert.equal(captured.installerQualified, undefined);
+    if (['source', 'background', 'closing', 'lease', 'recovery', 'cancelled'].includes(mode)) {
+      await assert.rejects(captured.inspectRollback({ checkpoint, signal }));
+      await assert.rejects(captured.prepareRollback({ plan: {}, checkpoint, signal, onIntent() {} })); assert.equal(prepared, 0); continue;
+    }
+    const plan = await captured.inspectRollback({ checkpoint, signal });
+    if (['missing', 'duplicate', 'rollback', 'foreign'].includes(mode)) { assert.equal(plan, null); assert.equal(prepared, 0); continue; }
+    assert.equal(plan.id, previous.intent.id); assert.equal(plan.target, target); assert.equal(Object.isFrozen(plan), true);
+    if (mode === 'changed') changed = true;
+    const operation = captured.prepareRollback({ plan, checkpoint, signal, onIntent() {} });
+    if (changed) { await assert.rejects(operation); assert.equal(prepared, 0); }
+    else { assert.equal(await operation, token); assert.equal(prepared, 1); await captured.replaceInstaller(token, { checkpoint, signal }); assert.equal(swapped, 1); }
+  }
+});
+
 test('update restart follows closed stores and fresh native verification without reusing startup arguments', async () => {
   const start = source.indexOf('  requestShutdown = async () =>'), end = source.indexOf('  Menu.setApplicationMenu', start);
   assert.ok(start >= 0 && end > start);

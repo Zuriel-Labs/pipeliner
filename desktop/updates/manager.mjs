@@ -1,5 +1,7 @@
 import { randomUUID, createHash } from 'node:crypto';
-import { canonicalJSON, record } from '../core/settings.mjs';
+import { resolve } from 'node:path';
+import { canonicalJSON, immutable, record } from '../core/settings.mjs';
+import { buildIdentity } from '../package/build.mjs';
 import { updateShapes, updateCommand } from './commands.mjs';
 import { checkUpdateContext, parseUpdateVersion } from './manifest.mjs';
 import { readUpdateSource } from './source.mjs';
@@ -8,12 +10,13 @@ import { checkUninstallPlan } from './uninstall.mjs';
 
 export function createUpdateManager({ policy, version = null, history = null, sources = () => [], reader = readUpdateSource,
   host = { platform: process.platform, architecture: process.arch }, foreground = () => true, maintenance = null, recovery = () => false,
-  prepareInstaller = null, ownsIntent = () => false, recoveryDetails = () => null, inspectRemoval = null, removalDetails = () => null,
+  prepareInstaller = null, replaceInstaller = null, onInstalled = () => {}, ownsIntent = () => false, recoveryDetails = () => null, inspectRemoval = null, removalDetails = () => null,
   removeApp = null, recoverRemoval = null, onRemoved = () => {},
   clock = Date.now, initialRevision = 1, onChange = () => {}, onApplied = () => {} }) {
   record(host, ['platform', 'architecture']);
-  if (!Number.isSafeInteger(initialRevision) || initialRevision < 1 || [onChange, onApplied, onRemoved, sources, reader, foreground, recovery, ownsIntent, recoveryDetails, removalDetails, clock].some(fn => typeof fn !== 'function')
+  if (!Number.isSafeInteger(initialRevision) || initialRevision < 1 || [onChange, onApplied, onRemoved, onInstalled, sources, reader, foreground, recovery, ownsIntent, recoveryDetails, removalDetails, clock].some(fn => typeof fn !== 'function')
     || prepareInstaller !== null && typeof prepareInstaller !== 'function'
+    || replaceInstaller !== null && typeof replaceInstaller !== 'function'
     || inspectRemoval !== null && typeof inspectRemoval !== 'function'
     || [removeApp, recoverRemoval].some(value => value !== null && typeof value !== 'function')
     || history !== null && ['read', 'begin', 'complete', 'fail'].some(name => typeof history[name] !== 'function')
@@ -243,13 +246,14 @@ export function createUpdateManager({ policy, version = null, history = null, so
       publish(); return { snapshot: status(), applied: result.applied };
     } else if (payload.operation === 'install') {
       if (pending) return { snapshot: status() };
-      const context = inspect();
-      if (!capable(context) || !status().release || !maintenance) {
+      const context = inspect(), release = status().release;
+      if (!capable(context) || !release || !maintenance) {
         revision++; message = 'Update installation is unavailable. A verified release, qualified installer and migration/recovery preview are required. No app files changed.';
       } else {
         const operation = { kind: 'install', controller: new AbortController(), signature: signature(context) }; pending = operation; revision++;
         message = 'Inspecting idle work on this Mac. No installer is downloaded.';
         operation.done = (async () => {
+          let installed = null;
           try {
             await maintenance.exclusive(async checkpoint => {
               const check = () => {
@@ -268,9 +272,25 @@ export function createUpdateManager({ policy, version = null, history = null, so
                 } }));
               check(); if (token !== operation.intent || !ownsPreparation(operation)) throw Error('maintenance-deferred');
               message = 'Update preparation verified. Installation and restart still need qualified completion; the installed app is preserved.';
+              if (replaceInstaller) {
+                message = 'Installing the verified update while work is idle. Recovery copies stay preserved.';
+                const result = await replaceInstaller(token, Object.freeze({ trust: Object.freeze({ ...context.selected.trust }),
+                  current: Object.freeze({ ...context.current }), checkpoint: check, signal: operation.controller.signal }));
+                check(); canonicalJSON(result); record(result, ['installed', 'rollback', 'identity']);
+                const identity = buildIdentity(result.identity);
+                if (['version', 'platform', 'architecture', 'sourceCommit', 'gitTree'].some(key => identity[key] !== release[key])
+                  || ['installed', 'rollback'].some(key => typeof result[key] !== 'string' || resolve(result[key]) !== result[key]
+                    || !result[key].endsWith('.app') || /[\x00-\x1f\x7f]/.test(result[key])) || result.installed === result.rollback) throw Error('maintenance-deferred');
+                installed = immutable({ installed: result.installed, rollback: result.rollback, identity });
+                message = 'Update replacement verified. Closing safely before restarting; startup will verify recovery.';
+              }
             }, { signal: operation.controller.signal, ownsRecovery: () => ownsPreparation(operation) });
-          } catch { message = 'Update deferred: work is busy, changed or unverified. Finish or repair pending work, then retry. No work was stopped and no app files changed.'; }
+          } catch { installed = null; message = 'Update deferred: work is busy, changed or unverified. Inspect recovery before retrying; completed effects and saved data are preserved.'; }
           finally { pending = null; revision++; publish(); }
+          if (installed && !closed && !operation.controller.signal.aborted) {
+            try { onInstalled(installed); }
+            catch { message = 'Update replacement finished, but restart did not start. Close and reopen Desktop to inspect recovery.'; revision++; publish(); }
+          }
         })();
         publish(); await operation.done; return { snapshot: status() };
       }

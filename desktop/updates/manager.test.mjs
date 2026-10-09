@@ -330,7 +330,7 @@ test('update controls use protected signed history, exact host sources and await
 });
 
 test('update preparation binds its exact live intent without cancelling itself or reopening competing work', async () => {
-  for (const mode of ['normal', 'stop', 'close', 'policy', 'source', 'foreign', 'wrong-token', 'token-loss']) {
+  for (const mode of ['normal', 'stop', 'close', 'policy', 'source', 'foreign', 'wrong-token', 'token-loss', 'install', 'install-renamed', 'install-failed', 'install-result', 'install-shape', 'install-stop']) {
     const f = fixture(), { publicKey, privateKey } = generateKeyPairSync('ed25519');
     const source = { id: 'approved-source', label: 'Synthetic Releases', key: publicKey, origin: 'https://updates.example.com', path: '/desktop/releases/' };
     const trust = { id: source.id, key: source.key, origin: source.origin, path: source.path }, current = { version: '0.1.0', platform: 'darwin', architecture: 'arm64', channel: 'stable' };
@@ -339,7 +339,8 @@ test('update preparation binds its exact live intent without cancelling itself o
     const release = { kind: 'pipeliner-desktop-update', schemaVersion: 1, source: source.id, ...current, version: '0.2.0', sequence: 1,
       issuedAt: 900, expiresAt: 100000000, url: source.origin + source.path + 'Pipeliner.dmg', bytes: 1000,
       sha256: 'c'.repeat(64), sourceCommit: 'd'.repeat(40), gitTree: 'e'.repeat(40) };
-    let vault, history, journal, update, intent, prepared = 0, settled = 0, trusted = true, signal, finish;
+    let vault, history, journal, update, intent, prepared = 0, settled = 0, replaced = 0, restarted = 0, trusted = true, signal, finish;
+    const installing = mode.startsWith('install');
     const hold = new Promise(resolve => { finish = resolve; });
     try {
       vault = await openVault(f.root, { available: async () => true, encrypt: async text => Buffer.from(text), decrypt: async bytes => ({ result: bytes.toString(), shouldReEncrypt: false }) });
@@ -351,7 +352,20 @@ test('update preparation binds its exact live intent without cancelling itself o
       const maintenance = createMaintenanceGate({ ready: () => true, verify: async () => true, recovery: () => !journal.clear() });
       update = createUpdateManager({ policy: f.policy, history, version: current.version, host: { platform: current.platform, architecture: current.architecture },
         maintenance, sources: () => trusted ? [source] : [], recovery: () => !journal.clear(), ownsIntent: token => journal.owned(token),
-        // Synthetic preparation effects; actual protected policy, signed history, journal and host admission.
+        replaceInstaller: installing ? async (token, options) => {
+          assert.equal(token, intent); assert.equal(maintenance.active(), true); assert.equal(journal.owned(token), true);
+          options.checkpoint(); assert.equal(options.signal, signal); assert.deepEqual(options.trust, trust); assert.deepEqual(options.current, current);
+          replaced++;
+          if (mode === 'install-failed') throw Error('Synthetic native replacement refusal');
+          if (mode === 'install-stop') { void update.stop(); await new Promise(setImmediate); options.checkpoint(); }
+          return immutable({ ...(mode === 'install-shape' ? { extra: true } : {}), installed: join(f.root, mode === 'install-renamed' ? 'Renamed.app' : 'Pipeliner.app'), rollback: join(f.root, 'updates/candidate/Pipeliner.app'),
+            identity: { ...from, version: mode === 'install-result' ? '0.9.0' : release.version, sourceCommit: release.sourceCommit, gitTree: release.gitTree } });
+        } : null,
+        onInstalled(result) {
+          assert.equal(maintenance.active(), false); assert.equal(update.status().busy, false); assert.equal(result.identity.version, release.version);
+          assert.equal(Object.isFrozen(result), true); restarted++;
+        },
+        // Synthetic native effects; actual protected policy, signed history, journal and host admission.
         async prepareInstaller(options) {
           prepared++; signal = options.signal;
           try {
@@ -378,11 +392,12 @@ test('update preparation binds its exact live intent without cancelling itself o
         if (mode === 'policy') { f.edit({ 'appearance.theme': 'dark' }); update.sync(); }
         if (mode === 'source') { trusted = false; update.sync(); }
         if (mode === 'token-loss') { journal.close(); journal = open(); update.sync(); }
-        if (mode !== 'normal') assert.equal(signal.aborted, true);
+        if (mode !== 'normal' && !installing) assert.equal(signal.aborted, true);
         if (stopping) { assert.equal(settled, 0); assert.equal(maintenance.active(), true); }
         finish(); await stopping;
       }
       await operation;
+      assert.equal(replaced, installing ? 1 : 0); assert.equal(restarted, ['install', 'install-renamed'].includes(mode) ? 1 : 0);
       assert.equal(settled, 1); assert.equal(update.status().busy, false); assert.equal(maintenance.active(), false);
       assert.equal(update.status().installQualified, false); assert.equal(journal.clear(), false);
       assert.equal(update.status().recoveryRequired, true); assert.match(update.status().message, /verified recovery/);

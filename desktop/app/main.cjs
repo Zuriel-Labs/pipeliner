@@ -35,7 +35,7 @@ if (startup.testMode) {
 } else { app.setPath('userData', dataDirectory); app.setPath('crashDumps', path.join(dataDirectory, 'crashes')); }
 protocol.registerSchemesAsPrivileged([{ scheme: 'pipeliner', privileges: { standard: true, secure: true } }]);
 if (!app.requestSingleInstanceLock()) app.exit(0);
-let window, manager, vault, workspaces, workspaceStore, issues, pipelines, policy, development, developmentStore, supervisor, scheduling, scheduler, background, backgroundHost, backgroundNative, skills, skillStore, tools, toolStore, toolConnections, privacy, privacyRecords, appearance, delivery, updates, updateHistory, maintenanceStore, uninstallJournal, maintenance, permissions, artifacts, retentionMonitor, attachWindow, attachment, requestShutdown, authorizationMonitor, maintenanceUnavailable = false, removalFinished = false, shutdownPaused = false, closing = false, verifiedClose = false;
+let window, manager, vault, workspaces, workspaceStore, issues, pipelines, policy, development, developmentStore, supervisor, scheduling, scheduler, background, backgroundHost, backgroundNative, skills, skillStore, tools, toolStore, toolConnections, privacy, privacyRecords, appearance, delivery, updates, updateHistory, maintenanceStore, uninstallJournal, maintenance, permissions, artifacts, retentionMonitor, attachWindow, attachment, requestShutdown, authorizationMonitor, restartTarget = null, maintenanceUnavailable = false, removalFinished = false, shutdownPaused = false, closing = false, verifiedClose = false;
 const hostCapabilities = Object.freeze(['workspace.read', 'workspace.write', 'worker.exec', 'provider.turn', 'git.push', 'github.read', 'github.issue.write', 'github.pr.write', 'github.project.write', 'extension.install', 'extension.invoke']);
 // A production publisher requires reviewed provenance; none is invented for this preview.
 const trustedUpdateSources = Object.freeze([]);
@@ -329,6 +329,18 @@ app.whenReady().then(async () => {
     return result;
   };
   const makeUpdates = initialRevision => createUpdateManager({ policy, history: updateHistory, sources: () => trustedUpdateSources,
+    replaceInstaller: async (token, { trust, current, checkpoint, signal }) => {
+      if (!app.isPackaged || backgroundLaunch || closing || !maintenance.active() || maintenanceStore?.owned(token) !== true) throw Error('maintenance-state-unavailable');
+      checkpoint(); return maintenanceStore.replaceBundle(token, { history: updateHistory, trust, current, checkpoint, signal });
+    },
+    onInstalled: result => {
+      const saved = maintenanceStore?.read(), bundle = path.dirname(path.dirname(path.dirname(process.execPath)));
+      if (!app.isPackaged || backgroundLaunch || closing || restartTarget || maintenance.active() || saved?.phase !== 'relaunching'
+        || result.installed !== bundle || result.installed !== saved.copy?.installed.bundle || result.rollback !== saved.copy?.receipt?.bundle
+        || Object.keys(saved.to).some(key => saved.to[key] !== result.identity[key])) throw Error('maintenance-restart-unavailable');
+      restartTarget = Object.freeze({ bundle, team: saved.copy.installed.team, identity: saved.to });
+      setImmediate(() => { void requestShutdown(); });
+    },
     removeApp: policy ? options => runRemoval(options) : null,
     recoverRemoval: policy ? null : options => runRemoval(options),
     onRemoved: () => { setImmediate(() => { void requestShutdown(); }); },
@@ -451,8 +463,18 @@ app.whenReady().then(async () => {
       await tools.close(); await toolConnections?.close();
       await privacy.close(); privacyRecords?.close();
       await permissions.close(); await updates.close(); updateHistory?.close(); uninstallJournal?.close(); maintenanceStore?.close(); await delivery.close(); await artifacts?.close(); backgroundHost?.close(); background.close(); scheduling.close(); pipelines.close(); skills.close(); appearance.close();
-      developmentStore?.close(); policy?.close(); skillStore?.close(); toolStore?.close(); workspaceStore?.close(); vault?.close(); verifiedClose = true; phase('shutdown-finished'); app.quit();
-    } catch { closing = false; console.error('Pipeliner shutdown needs verified recovery. Work remains preserved.'); await attachWindow(); publish(manager.status()); }
+      developmentStore?.close(); policy?.close(); skillStore?.close(); toolStore?.close(); workspaceStore?.close(); vault?.close();
+      if (restartTarget) {
+        try {
+          const { verifyMacUpdateBundle } = await moduleAt('../updates/mac.mjs');
+          await verifyMacUpdateBundle(restartTarget);
+          app.relaunch({ execPath: path.join(restartTarget.bundle, 'Contents/MacOS/Pipeliner'), args: [] });
+        } catch { console.error('Desktop restart could not be verified. Reopen the installed app to inspect recovery; saved data is preserved.'); }
+        restartTarget = null;
+      }
+      verifiedClose = true; phase('shutdown-finished');
+      app.quit();
+    } catch { restartTarget = null; closing = false; console.error('Pipeliner shutdown needs verified recovery. Work remains preserved.'); await attachWindow(); publish(manager.status()); }
   };
   Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Pipeliner', submenu: [{ role: 'about' }, { type: 'separator' }, { role: 'quit' }] }, { role: 'editMenu' },
     { label: 'View', submenu: [{ label: 'Settings', accelerator: 'CmdOrCtrl+,', click: async () => { const view = await attachWindow(); await view?.webContents.executeJavaScript("document.getElementById('settings-nav').click()"); } }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' } ] }, { role: 'windowMenu' }]));

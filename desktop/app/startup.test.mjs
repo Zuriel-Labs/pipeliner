@@ -8,6 +8,69 @@ import { runInNewContext } from 'node:vm';
 
 const require = createRequire(import.meta.url), source = readFileSync(new URL('./main.cjs',import.meta.url),'utf8');
 const testStorage = require('../test-storage.cjs');
+test('host update replacement retains one exact restart target and refuses foreign or unowned completion', async () => {
+  const start = source.indexOf('  const makeUpdates = initialRevision =>'), end = source.indexOf('  updates = makeUpdates(1);', start);
+  for (const mode of ['normal', 'source', 'background', 'closing', 'lease', 'token', 'phase', 'foreign-path', 'foreign-build']) {
+    const token = Object.freeze({}), identity = Object.freeze({ kind: 'pipeliner-desktop-build', schemaVersion: 1,
+      sourceCommit: 'a'.repeat(40), gitTree: 'b'.repeat(40), version: '0.2.0', platform: 'darwin', architecture: 'arm64' });
+    const result = Object.freeze({ installed: '/private/Pipeliner.app', rollback: '/private/data/updates/candidate/Pipeliner.app', identity });
+    let captured, replacements = 0, restarts = 0; const queued = [];
+    const context = { policy: {}, updateHistory: {}, trustedUpdateSources: [], maintenance: { active: () => mode !== 'lease' },
+      app: { isPackaged: mode !== 'source', getVersion: () => '0.1.0' }, backgroundLaunch: mode === 'background', closing: mode === 'closing', restartTarget: null,
+      maintenanceStore: { owned: value => mode !== 'token' && value === token,
+        async replaceBundle(value, options) { assert.equal(value, token); assert.equal(options.history, context.updateHistory); options.checkpoint(); replacements++; return result; },
+        read: () => ({ phase: mode === 'phase' ? 'replacing' : 'relaunching', to: identity,
+          copy: { installed: { bundle: result.installed, team: 'ABCDEFGHIJ' }, receipt: { bundle: result.rollback } } }) },
+      path: require('node:path'), process: { execPath: '/private/Pipeliner.app/Contents/MacOS/Pipeliner' },
+      setImmediate: fn => queued.push(fn), requestShutdown: async () => { restarts++; },
+      createUpdateManager: value => { captured = value; return {}; }, maintenanceRecovery: () => false, publishUpdates() {} };
+    runInNewContext(`${source.slice(start, end)}\nmakeUpdates(1);`, context, { timeout: 1000 });
+    assert.equal(typeof captured.replaceInstaller, 'function'); assert.equal(typeof captured.onInstalled, 'function');
+    const options = { trust: {}, current: {}, checkpoint() {}, signal: new AbortController().signal };
+    if (['source', 'background', 'closing', 'lease', 'token'].includes(mode)) {
+      await assert.rejects(captured.replaceInstaller(token, options)); assert.equal(replacements, 0); continue;
+    }
+    assert.equal(await captured.replaceInstaller(token, options), result); assert.equal(replacements, 1);
+    context.maintenance.active = () => false;
+    const supplied = mode === 'foreign-path' ? { ...result, installed: '/private/other/Pipeliner.app' }
+      : mode === 'foreign-build' ? { ...result, identity: { ...identity, sourceCommit: 'c'.repeat(40) } } : result;
+    if (mode !== 'normal') { assert.throws(() => captured.onInstalled(supplied)); assert.equal(context.restartTarget, null); assert.equal(queued.length, 0); }
+    else {
+      captured.onInstalled(supplied); assert.equal(queued.length, 1); assert.equal(restarts, 0);
+      assert.deepEqual(JSON.parse(JSON.stringify(context.restartTarget)), { bundle: result.installed, team: 'ABCDEFGHIJ', identity });
+      assert.throws(() => captured.onInstalled(supplied)); queued[0](); assert.equal(restarts, 1);
+    }
+  }
+});
+test('update restart follows closed stores and fresh native verification without reusing startup arguments', async () => {
+  const start = source.indexOf('  requestShutdown = async () =>'), end = source.indexOf('  Menu.setApplicationMenu', start);
+  assert.ok(start >= 0 && end > start);
+  for (const mode of ['normal', 'shutdown-refusal', 'native-refusal', 'relaunch-refusal', 'ordinary']) {
+    const events = [], target = Object.freeze({ bundle: '/private/Pipeliner.app', team: 'ABCDEFGHIJ', identity: Object.freeze({ synthetic: true }) });
+    const context = { closing: false, verifiedClose: false, shutdownPaused: false, restartTarget: mode === 'ordinary' ? null : target,
+      authorizationMonitor: null, retentionMonitor: null, clearInterval() {}, phase() {}, suspendHost() {}, wakeHost() {}, endSession() {}, path: require('node:path'),
+      powerMonitor: { removeListener() {} }, console: { error() { events.push('error'); } }, publish() {}, attachWindow: async () => {},
+      AbortController, app: { relaunch(options) { events.push('relaunch'); assert.deepEqual(JSON.parse(JSON.stringify(options)), { execPath: '/private/Pipeliner.app/Contents/MacOS/Pipeliner', args: [] });
+        if (mode === 'relaunch-refusal') throw Error('Synthetic relaunch refusal'); }, quit() { events.push('quit'); } },
+      moduleAt: async name => { assert.equal(name, '../updates/mac.mjs'); return { verifyMacUpdateBundle: async value => {
+        assert.equal(value, target); assert.equal(events.includes('vault'), true); assert.equal(context.verifiedClose, false);
+        events.push('native'); if (mode === 'native-refusal') throw Error('Synthetic native refusal');
+      } }; } };
+    for (const name of ['updates', 'development', 'issues', 'workspaces', 'manager', 'scheduler', 'tools', 'toolConnections', 'privacy', 'privacyRecords', 'permissions',
+      'updateHistory', 'uninstallJournal', 'maintenanceStore', 'delivery', 'artifacts', 'backgroundHost', 'background', 'scheduling', 'pipelines', 'skills', 'appearance',
+      'developmentStore', 'policy', 'skillStore', 'toolStore', 'workspaceStore', 'vault']) context[name] = {
+        async stop() {}, suspend() {}, status: () => ({}), close() { events.push(name); if (mode === 'shutdown-refusal' && name === 'development') throw Error('Synthetic close refusal'); }
+      };
+    runInNewContext(source.slice(start, end), context, { timeout: 1000 });
+    await context.requestShutdown();
+    assert.equal(events.includes('relaunch'), ['normal', 'relaunch-refusal'].includes(mode));
+    assert.equal(events.includes('quit'), mode !== 'shutdown-refusal');
+    assert.equal(events.includes('native'), !['shutdown-refusal', 'ordinary'].includes(mode));
+    assert.equal(context.verifiedClose, mode !== 'shutdown-refusal');
+    if (mode !== 'shutdown-refusal') { const length = events.length; await context.requestShutdown(); assert.equal(events.length, length); }
+    else assert.equal(context.restartTarget, null);
+  }
+});
 test('maintenance and completed removal block wake before and after native settlement', async () => {
   const blocked = source.match(/^  const hostMaintenanceBlocked = (.+);$/m)?.[1], wake = source.match(/^  const wakeHost = (.+);$/m)?.[1];
   assert.ok(blocked && wake); let release;

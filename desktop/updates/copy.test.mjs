@@ -21,7 +21,7 @@ import testStorage from '../test-storage.cjs';
 import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
 
-async function checkCopy(unsafe, journaled = false, replacement = null, recovery = null, preparation = null) {
+async function checkCopy(unsafe, journaled = false, replacement = null, recovery = null, preparation = null, rollback = null) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'pipeliner-54-update-copy-'))), directory = join(root, 'updates');
   await mkdir(directory, { mode: 0o700 });
   const installed = join(root, 'Pipeliner.app'), team = 'ABCDEF1234', helper = join(installed, 'Contents/Resources/helpers/update-exchange');
@@ -129,7 +129,7 @@ async function checkCopy(unsafe, journaled = false, replacement = null, recovery
       if (journaled && (!preparation || journal.read()?.copy)) {
         await assert.rejects(journal.stageBundle(journalToken, { installed: { bundle: installed, team, identity: from }, history, trust, current,
           maxBytes: 1024 ** 2, reserveBytes: 1024 ** 2 }, { run }));
-        assert.throws(() => journal.cancel(journalToken));
+        if (!journal.read()?.rollback) assert.throws(() => journal.cancel(journalToken));
       }
       const bundle = args.at(-1);
       if (args.includes('--verify') && (['installed-signature', 'relaunch-signature'].includes(mode) && bundle === installed || mode === 'source-signature' && mount && bundle === join(mount, 'Pipeliner.app'))) throw Error('Synthetic signature refusal');
@@ -326,6 +326,69 @@ async function checkCopy(unsafe, journaled = false, replacement = null, recovery
             assert.equal((await readFile(join(root, 'maintenance.sqlite'))).includes(Buffer.from(receipt.directory)), false);
             journal.close(); journal = openUpdateMaintenance(root, { vault, clock: () => 1000 });
             assert.deepEqual(journal.completed(), completed); assert.equal(journal.clear(), true);
+            if (rollback) {
+              assert.equal(typeof journal.prepareRollback, 'function');
+              const beforeHistory = history.read(trust, current), originalArchive = pending.backups;
+              const options = { id: pending.id, running: { bundle: installed, identity: to }, signal: controller.signal,
+                checkpoint() { if (!authorized) throw Error('Synthetic rollback admission lost'); },
+                onIntent(token) {
+                  assert.equal(journal.owned(token), true); assert.equal(journal.read().phase, 'preparing');
+                  assert.throws(() => journal.cancel(token));
+                } };
+              for (const changed of [{ ...options, id: randomUUID() }, { ...options, running: { bundle: installed, identity: from } }, { ...options, unexpected: true }]) {
+                await assert.rejects(journal.prepareRollback(changed, { run })); assert.equal(journal.clear(), true);
+              }
+              if (['incompatible', 'untrusted', 'lost-admission'].includes(rollback)) {
+                if (rollback === 'incompatible') {
+                  const supportPath = join(receipt.bundle, 'Contents/Resources/pipeliner-data.json'), support = JSON.parse(await readFile(supportPath, 'utf8'));
+                  support.formats.databases.maintenance = 2;
+                  await writeFile(supportPath, canonicalJSON(support) + '\n');
+                }
+                if (rollback === 'untrusted') mode = 'relaunch-signature';
+                if (rollback === 'lost-admission') authorized = false;
+                await assert.rejects(journal.prepareRollback(options, { run })); assert.equal(journal.clear(), true); assert.equal(exchanges, 1);
+              } else if (rollback === 'intent-refusal') {
+                await assert.rejects(journal.prepareRollback({ ...options, onIntent() { throw Error('Synthetic intent refusal'); } }, { run }));
+                assert.equal(journal.read().phase, 'repair-required'); assert.equal(journal.clear(), false); assert.equal(exchanges, 1);
+              } else {
+                const token = await journal.prepareRollback(options, { run }); journalToken = token;
+                const intent = journal.read(); assert.equal(intent.phase, 'verified'); assert.deepEqual(intent.from, to); assert.deepEqual(intent.to, from);
+                assert.deepEqual(intent.rollback, { id: pending.id }); assert.equal(intent.installer, undefined);
+                assert.deepEqual(intent.backups.build, to); assert.notDeepEqual(intent.backups, originalArchive);
+                assert.deepEqual(journal.completed(), completed); assert.equal(exchanges, 1);
+                if (rollback === 'cancel') { journal.cancel(token); assert.equal(journal.clear(), true); }
+                else if (rollback === 'interrupted') {
+                  journal.close(); journal = openUpdateMaintenance(root, { vault, clock: () => 1000 });
+                  assert.deepEqual(journal.read(), intent); assert.equal(journal.owned(token), false);
+                  await assert.rejects(journal.replaceBundle(token, { checkpoint() {}, signal: controller.signal }, { run }));
+                  await assert.rejects(journal.finishRelaunch({ running: options.running, checkpoint() {}, signal: controller.signal }, { run }));
+                  assert.deepEqual(journal.read(), intent); assert.equal(exchanges, 1);
+                } else if (rollback === 'changed-running') {
+                  await rename(installed, join(root, 'synthetic-replaced.app')); await fixture(installed, to);
+                  await assert.rejects(journal.replaceBundle(token, { checkpoint() {}, signal: controller.signal }, { run }));
+                  assert.deepEqual(journal.read(), intent); assert.equal(exchanges, 1);
+                } else if (['swap-refusal', 'swap-tamper', 'swap-journal-refusal'].includes(rollback)) {
+                  mode = rollback;
+                  await assert.rejects(journal.replaceBundle(token, { checkpoint() {}, signal: controller.signal }, { run }));
+                  assert.equal(exchanges, 2); assert.equal(journal.read().phase, rollback === 'swap-journal-refusal' ? 'replacing' : 'repair-required');
+                  assert.throws(() => journal.cancel(token));
+                  await assert.rejects(journal.replaceBundle(token, { checkpoint() {}, signal: controller.signal }, { run })); assert.equal(exchanges, 2);
+                } else {
+                  const result = await journal.replaceBundle(token, { checkpoint() {}, signal: controller.signal }, { run });
+                  assert.deepEqual(result, { installed, rollback: receipt.bundle, identity: from }); assert.equal(exchanges, 2);
+                  assert.equal(journal.read().phase, 'relaunching'); assert.throws(() => journal.cancel(token));
+                  journal.close(); journal = openUpdateMaintenance(root, { vault, clock: () => 1000 });
+                  await journal.finishRelaunch({ running: { bundle: installed, identity: from }, checkpoint() {}, signal: controller.signal }, { run });
+                  assert.equal(journal.clear(), true); assert.equal(journal.completed().length, 2);
+                  assert.deepEqual(journal.completed().find(value => value.intent.id === pending.id), completed[0]);
+                  assert.deepEqual(JSON.parse(await readFile(join(installed, 'Contents/Resources/pipeliner-build.json'), 'utf8')), from);
+                  assert.deepEqual(JSON.parse(await readFile(join(receipt.bundle, 'Contents/Resources/pipeliner-build.json'), 'utf8')), to);
+                }
+              }
+              assert.deepEqual(sourceFiles.map(dataDigest), beforeData); assert.deepEqual(history.read(trust, current), beforeHistory);
+              for (const archive of originalArchive.databases) assert.equal(existsSync(archive.path), true);
+              assert.equal((await lstat(receipt.bundle)).isDirectory(), true); return;
+            }
             db = new DatabaseSync(join(root, 'maintenance.sqlite'));
             assert.throws(() => db.exec('DELETE FROM maintenance_completed'), /Immutable/);
             assert.throws(() => db.exec('UPDATE maintenance_completed SET clock=clock+1'), /Immutable/);
@@ -438,4 +501,8 @@ test('startup reconciliation requires the exact exchanged target and compatible 
 test('host preparation records download custody before effects and preserves verified or failed recovery without replacement', async () => {
   for (const mode of ['valid-preparation', 'pre-abort', 'installed-signature', 'intent-refusal', 'filename-collision', 'request-refusal', 'stale-download', 'backup-refusal', 'copy', 'cancel', 'candidate-support'])
     await checkCopy(false, true, null, null, mode);
+});
+test('compatible rollback uses authenticated retained custody and preserves current data and release history', async () => {
+  for (const mode of ['valid', 'cancel', 'interrupted', 'incompatible', 'untrusted', 'lost-admission', 'intent-refusal', 'changed-running', 'swap-refusal', 'swap-tamper', 'swap-journal-refusal'])
+    await checkCopy(false, true, 'valid-swap', 'valid-relaunch', null, mode);
 });

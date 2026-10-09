@@ -67,13 +67,15 @@ test('durable update intent fences stale owners and preserves interrupted or alt
     assert.equal(db.prepare('SELECT preserve FROM maintenance_completed').get().preserve, 'synthetic conflict');
     assert.deepEqual(Buffer.from(db.prepare('SELECT payload FROM maintenance_state WHERE id=1').get().payload), legacy);
     db.exec('DROP TABLE maintenance_completed');
-    store = open(); assert.equal(db.prepare('PRAGMA user_version').get().user_version, 2);
+    store = open(); assert.equal(db.prepare('PRAGMA user_version').get().user_version, 3);
     assert.deepEqual(store.read(), pending); assert.deepEqual(store.completed(), []); assert.equal(store.owned(), false);
     assert.deepEqual(Buffer.from(db.prepare('SELECT payload FROM maintenance_state WHERE id=1').get().payload), legacy);
     db.close(); db = undefined;
     now = pending.updatedAt - 1; assert.throws(() => store.read()); assert.equal(store.clear(), false); now = pending.updatedAt;
-    db = new DatabaseSync(file); db.exec('PRAGMA user_version=3'); store.close(); assert.throws(open);
+    db = new DatabaseSync(file); db.exec('PRAGMA user_version=4'); store.close(); assert.throws(open);
     db.exec('PRAGMA user_version=2'); store = open();
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 3);
+    assert.deepEqual(Buffer.from(db.prepare('SELECT payload FROM maintenance_state WHERE id=1').get().payload), legacy);
     const row = db.prepare('SELECT payload FROM maintenance_state WHERE id=1').get(), changed = Buffer.from(row.payload); changed[changed.length - 1] ^= 1;
     db.prepare('UPDATE maintenance_state SET payload=? WHERE id=1').run(changed);
     assert.throws(() => store.read()); assert.equal(store.clear(), false); assert.throws(() => store.begin(plan));

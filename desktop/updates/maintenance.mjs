@@ -39,15 +39,16 @@ function installer(value, directory, intent) {
 function bundleCopy(value, directory, intent) {
   canonicalJSON(value); record(value, ['directory', 'installed'], ['receipt']); record(value.installed, ['bundle', 'team', 'identity']);
   const installed = value.installed;
-  if (value.directory !== directory + '/updates/candidate-' + intent.id || typeof installed.bundle !== 'string'
+  if (value.directory !== directory + '/updates/candidate-' + (intent.rollback?.id ?? intent.id) || typeof installed.bundle !== 'string'
     || resolve(installed.bundle) !== installed.bundle || !installed.bundle.endsWith('/Pipeliner.app') || /[\x00-\x1f\x7f]/.test(installed.bundle)
     || typeof installed.team !== 'string' || !/^[A-Z0-9]{10}$/.test(installed.team)
     || canonicalJSON(buildIdentity(installed.identity)) !== canonicalJSON(intent.from)) throw Error();
   if (value.receipt !== undefined) {
-    const receipt = value.receipt; record(receipt, ['directory', 'bundle', 'identity', 'team', 'bytes', 'nodes', 'device', 'inode']);
+    const receipt = value.receipt; record(receipt, ['directory', 'bundle', 'identity', 'team', 'device', 'inode', ...(intent.rollback ? [] : ['bytes', 'nodes'])]);
     if (receipt.directory !== value.directory || receipt.bundle !== value.directory + '/Pipeliner.app' || receipt.team !== installed.team
-      || canonicalJSON(buildIdentity(receipt.identity)) !== canonicalJSON(intent.to) || !Number.isSafeInteger(receipt.bytes)
-      || receipt.bytes < 1 || receipt.bytes > 8 * 1024 ** 3 || !Number.isSafeInteger(receipt.nodes) || receipt.nodes < 1 || receipt.nodes > 20000
+      || canonicalJSON(buildIdentity(receipt.identity)) !== canonicalJSON(intent.to)
+      || !intent.rollback && (!Number.isSafeInteger(receipt.bytes) || receipt.bytes < 1 || receipt.bytes > 8 * 1024 ** 3
+        || !Number.isSafeInteger(receipt.nodes) || receipt.nodes < 1 || receipt.nodes > 20000)
       || ['device', 'inode'].some(key => typeof receipt[key] !== 'string' || !/^[1-9][0-9]{0,19}$/.test(receipt[key]))) throw Error();
   }
 }
@@ -58,13 +59,18 @@ function replacement(value, intent) {
     || value.device !== intent.copy.receipt.device || value.inode === intent.copy.receipt.inode) throw Error();
 }
 function intentRecord(value, directory, row) {
-  record(value, ['schemaVersion', 'id', 'phase', 'from', 'to', 'sha256', 'bytes', 'createdAt', 'updatedAt', 'revision'], ['backups', 'installer', 'copy', 'replacement']);
-  plan({ from: value.from, to: value.to, sha256: value.sha256, bytes: value.bytes });
+  record(value, ['schemaVersion', 'id', 'phase', 'from', 'to', 'createdAt', 'updatedAt', 'revision'], ['sha256', 'bytes', 'rollback', 'backups', 'installer', 'copy', 'replacement']);
+  if (value.rollback !== undefined) {
+    record(value.rollback, ['id']); buildIdentity(value.from); buildIdentity(value.to);
+    if (typeof value.rollback.id !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value.rollback.id)
+      || value.rollback.id === value.id || !isNewerUpdateVersion(value.from.version, value.to.version)
+      || value.sha256 !== undefined || value.bytes !== undefined || value.installer !== undefined || !value.copy?.receipt) throw Error();
+  } else plan({ from: value.from, to: value.to, sha256: value.sha256, bytes: value.bytes });
   if (value.backups !== undefined) updateBackups(value.backups, { directory, build: value.from });
   if (value.installer !== undefined) installer(value.installer, directory, value);
   if (value.copy !== undefined) bundleCopy(value.copy, directory, value);
   if (value.replacement !== undefined) replacement(value.replacement, value);
-  if (value.schemaVersion !== 1 || typeof value.id !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value.id)
+  if (value.schemaVersion !== (value.rollback ? 2 : 1) || typeof value.id !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value.id)
     || !phases.includes(value.phase) || !time(value.createdAt) || value.createdAt > value.updatedAt
     || value.updatedAt !== row.clock || value.revision !== row.revision) throw Error();
 }
@@ -78,7 +84,7 @@ export function openUpdateMaintenance(directory, { vault, clock = Date.now }) {
     const owner = lstatSync(path), root = lstatSync(directory);
     db = new DatabaseSync(path, { allowExtension: false, timeout: 1000 });
     const version = db.prepare('PRAGMA user_version').get().user_version;
-    if (![0, 1, 2].includes(version) || !version && db.prepare("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").all().length) throw Error();
+    if (![0, 1, 2, 3].includes(version) || !version && db.prepare("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").all().length) throw Error();
     db.exec('PRAGMA trusted_schema=OFF; PRAGMA secure_delete=ON; PRAGMA temp_store=MEMORY; PRAGMA journal_mode=DELETE; PRAGMA synchronous=EXTRA;');
     const size = db.prepare('PRAGMA page_size').get().page_size;
     if (!Number.isInteger(size) || size < 512 || size > 65536
@@ -147,11 +153,32 @@ export function openUpdateMaintenance(directory, { vault, clock = Date.now }) {
         const value = codec.decode(completedIdentity(row.id), row.payload, { revision: row.revision, clock: row.clock, completedAt: row.completed });
         record(value, ['intent', 'completedAt']); intentRecord(value.intent, directory, row);
         if (value.intent.id !== row.id || value.completedAt !== row.completed || !value.intent.copy?.receipt || !value.intent.replacement
-          || !value.intent.backups || !value.intent.installer || !['replacing', 'relaunching', 'repair-required'].includes(value.intent.phase)) throw Error();
+          || !value.intent.backups || !value.intent.installer && !value.intent.rollback || !['replacing', 'relaunching', 'repair-required'].includes(value.intent.phase)) throw Error();
         return value;
       });
     }
     readCompleted();
+    if (version < 3) {
+      db.exec('BEGIN IMMEDIATE');
+      try { readCompleted(); db.exec('PRAGMA user_version=3; COMMIT'); }
+      catch (error) { db.exec('ROLLBACK'); throw error; }
+    }
+    function reserve(state) {
+      readCompleted(state);
+      const free = db.prepare('PRAGMA max_page_count').get().max_page_count - db.prepare('PRAGMA page_count').get().page_count
+        + db.prepare('PRAGMA freelist_count').get().freelist_count;
+      if (free * size < 2 * 16384 + 4 * size) throw Error();
+    }
+    function rollbackSource(value, state) {
+      const previous = readCompleted(state).find(item => item.intent.id === value.rollback.id)?.intent;
+      if (!previous || previous.rollback || canonicalJSON(previous.to) !== canonicalJSON(value.from)
+        || canonicalJSON(previous.from) !== canonicalJSON(value.to)
+        || canonicalJSON(value.copy) !== canonicalJSON({ directory: previous.copy.directory,
+          installed: { ...previous.copy.installed, identity: previous.to },
+          receipt: { directory: previous.copy.directory, bundle: previous.copy.receipt.bundle, identity: previous.from,
+            team: previous.copy.installed.team, device: previous.replacement.device, inode: previous.replacement.inode } })) throw Error();
+      return previous;
+    }
     const journal = Object.freeze({
       read() { return guarded(() => immutable(readState().value)); },
       completed() { return guarded(() => immutable(readCompleted())); },
@@ -221,14 +248,71 @@ export function openUpdateMaintenance(directory, { vault, clock = Date.now }) {
           throw Error(token ? 'maintenance-preparation-recovery-required' : 'maintenance-state-unavailable');
         } finally { if (acquired) preparing = false; if (token && active?.token === token) active.preparing = false; }
       },
+      // Same-format rollback preserves live data and watermarks; only immutable completed custody selects its target.
+      async prepareRollback(options, { run = runMacUpdateCommand } = {}) {
+        let token, acquired = false;
+        try {
+          record(options, ['id', 'running', 'checkpoint', 'signal'], ['onIntent']);
+          if (Object.values(Object.getOwnPropertyDescriptors(options)).some(value => value.get || value.set)
+            || preparing || recovering || typeof run !== 'function' || typeof options.checkpoint !== 'function'
+            || !(options.signal instanceof AbortSignal) || options.onIntent !== undefined && typeof options.onIntent !== 'function') throw Error();
+          canonicalJSON(options.running); record(options.running, ['bundle', 'identity']);
+          const running = immutable(structuredClone(options.running)), { checkpoint, signal } = options;
+          buildIdentity(running.identity);
+          const initial = readState(), completed = readCompleted(initial).find(item => item.intent.id === options.id), previous = completed?.intent;
+          if (initial.value || !previous || previous.rollback || running.bundle !== previous.copy.installed.bundle
+            || canonicalJSON(running.identity) !== canonicalJSON(previous.to)) throw Error();
+          preparing = true; acquired = true;
+          const copy = { directory: previous.copy.directory, installed: { ...previous.copy.installed, identity: previous.to },
+            receipt: { directory: previous.copy.directory, bundle: previous.copy.receipt.bundle, identity: previous.from,
+              team: previous.copy.installed.team, device: previous.replacement.device, inode: previous.replacement.inode } };
+          const initialApps = [running.bundle, copy.receipt.bundle].map(path => lstatSync(path, { bigint: true }));
+          const stable = (a, b) => ['dev', 'ino', 'uid', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs'].every(key => a[key] === b[key]);
+          function check() {
+            signal.throwIfAborted(); checkpoint(); signal.throwIfAborted(); const state = readState();
+            if (token ? !owned(state) || active.token !== token : state.value !== null || state.row.revision !== initial.row.revision) throw Error();
+            if (canonicalJSON(readCompleted(state).find(item => item.intent.id === previous.id)) !== canonicalJSON(completed)) throw Error();
+            const parent = lstatSync(copy.directory, { bigint: true });
+            if (!parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== BigInt(process.getuid())
+              || (parent.mode & 0o777n) !== 0o700n || parent.dev !== BigInt(root.dev) || realpathSync(copy.directory) !== copy.directory) throw Error();
+            for (const [index, path] of [running.bundle, copy.receipt.bundle].entries()) {
+              const current = lstatSync(path, { bigint: true }), expected = index ? previous.replacement : previous.copy.receipt;
+              if (!current.isDirectory() || current.isSymbolicLink() || current.mode & 0o022n || ![0n, BigInt(process.getuid())].includes(current.uid)
+                || realpathSync(path) !== path || current.dev.toString() !== expected.device || current.ino.toString() !== expected.inode
+                || !stable(initialApps[index], current)) throw Error();
+            }
+          }
+          async function native() {
+            check(); await verifyMacUpdateBundle({ ...copy.installed, signal }, { run }); check();
+            await verifyMacUpdateBundle({ bundle: copy.receipt.bundle, identity: previous.from, team: copy.installed.team, signal }, { run }); check();
+            const from = await readDataCompatibility(running.bundle, previous.to, { signal }); check();
+            const to = await readDataCompatibility(copy.receipt.bundle, previous.from, { signal }); check(); requireSameDataSupport(from, to);
+          }
+          await native(); verifyUpdateBackups({ capture: previous.backups, directory, build: previous.from, vault, checkpoint: check }); check();
+          const id = randomUUID(); token = Object.freeze({});
+          const revision = transaction(state => {
+            if (state.value || state.row.revision !== initial.row.revision) throw Error(); reserve(state);
+            return save(state, { schemaVersion: 2, id, phase: 'preparing', from: previous.to, to: previous.from,
+              rollback: { id: previous.id }, copy, createdAt: state.now });
+          });
+          active = { token, id, revision, preparing: true }; options.onIntent?.(token); check();
+          const backups = captureUpdateBackups({ directory, vault, build: previous.to, checkpoint: check, signal }); check();
+          await native();
+          active.revision = transaction(state => {
+            if (!owned(state) || active.token !== token || state.value.phase !== 'preparing') throw Error(); rollbackSource(state.value, state);
+            return save(state, { ...state.value, phase: 'verified', backups });
+          });
+          check(); return token;
+        } catch {
+          if (token) try { journal.advance(token, 'repair-required'); } catch { /* Retain the last durable intent. */ }
+          throw Error(token ? 'maintenance-rollback-recovery-required' : 'maintenance-state-unavailable');
+        } finally { if (acquired) preparing = false; if (token && active?.token === token) active.preparing = false; }
+      },
       begin(input) {
         const token = Object.freeze({}), value = guarded(() => { plan(input); return structuredClone(input); });
         const id = randomUUID(), revision = transaction(state => {
           if (state.value !== null) throw Error();
-          readCompleted(state);
-          const free = db.prepare('PRAGMA max_page_count').get().max_page_count - db.prepare('PRAGMA page_count').get().page_count
-            + db.prepare('PRAGMA freelist_count').get().freelist_count;
-          if (free * size < 2 * 16384 + 4 * size) throw Error();
+          reserve(state);
           return save(state, { ...value, schemaVersion: 1, id, phase: 'preparing', createdAt: state.now });
         });
         active = { token, id, revision }; return token;
@@ -334,26 +418,29 @@ export function openUpdateMaintenance(directory, { vault, clock = Date.now }) {
       async replaceBundle(token, options, { run = runMacUpdateCommand } = {}) {
         let attempted = false, effectRevision;
         try {
-          record(options, ['history', 'trust', 'current', 'checkpoint', 'signal']);
+          const initial = readState(), rollback = Boolean(initial.value?.rollback);
+          record(options, ['checkpoint', 'signal', ...(rollback ? [] : ['history', 'trust', 'current'])]);
           if (Object.values(Object.getOwnPropertyDescriptors(options)).some(value => value.get || value.set)
             || typeof run !== 'function' || typeof options.checkpoint !== 'function' || !(options.signal instanceof AbortSignal)) throw Error();
           const { checkpoint, signal, history } = options, trust = { ...options.trust }, current = { ...options.current };
-          const initial = readState();
           if (!owned(initial) || token !== active.token || initial.value.phase !== 'verified' || initial.value.replacement
-            || !initial.value.copy?.receipt || !initial.value.backups || !initial.value.installer
-            || ['version', 'platform', 'architecture'].some(key => current[key] !== initial.value.from[key])) throw Error();
+            || !initial.value.copy?.receipt || !initial.value.backups || !rollback && (!initial.value.installer
+              || ['version', 'platform', 'architecture'].some(key => current[key] !== initial.value.from[key]))) throw Error();
           const intent = initial.value, { installed, receipt } = intent.copy;
           let revision = initial.row.revision, phase = 'verified';
           function check() {
             signal.throwIfAborted(); checkpoint(); signal.throwIfAborted(); const state = readState();
             if (!owned(state) || token !== active.token || state.row.revision !== revision || state.value.phase !== phase
               || canonicalJSON(state.value.copy) !== canonicalJSON(intent.copy)) throw Error();
+            if (rollback) rollbackSource(state.value, state);
           }
           check();
-          const installer = await verifyStagedInstaller({ directory: directory + '/updates', file: intent.installer.file,
-            history, trust, current, signal, isCurrent: () => { try { check(); return true; } catch { return false; } } }, { clock });
-          if (installer.bytes !== intent.bytes || installer.sha256 !== intent.sha256
-            || ['version', 'platform', 'architecture', 'sourceCommit', 'gitTree'].some(key => installer.release[key] !== intent.to[key])) throw Error();
+          if (!rollback) {
+            const installer = await verifyStagedInstaller({ directory: directory + '/updates', file: intent.installer.file,
+              history, trust, current, signal, isCurrent: () => { try { check(); return true; } catch { return false; } } }, { clock });
+            if (installer.bytes !== intent.bytes || installer.sha256 !== intent.sha256
+              || ['version', 'platform', 'architecture', 'sourceCommit', 'gitTree'].some(key => installer.release[key] !== intent.to[key])) throw Error();
+          }
           verifyUpdateBackups({ capture: intent.backups, directory, build: intent.from, vault }); check();
           await verifyMacUpdateBundle({ ...installed, signal }, { run }); check();
           await verifyMacUpdateBundle({ bundle: receipt.bundle, team: installed.team, identity: intent.to, signal }, { run }); check();
@@ -364,6 +451,10 @@ export function openUpdateMaintenance(directory, { vault, clock = Date.now }) {
           }
           await support();
           const inspect = path => lstatSync(path, { bigint: true }), from = inspect(installed.bundle), to = inspect(receipt.bundle);
+          if (rollback) {
+            const expected = rollbackSource(intent, readState()).copy.receipt;
+            if (from.dev.toString() !== expected.device || from.ino.toString() !== expected.inode) throw Error();
+          }
           const parents = [dirname(installed.bundle), receipt.directory], roots = parents.map(inspect);
           const helper = join(installed.bundle, 'Contents/Resources/helpers/update-exchange'), executable = inspect(helper);
           const unchanged = (a, b) => ['dev', 'ino', 'uid', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs'].every(key => a[key] === b[key]);
@@ -435,6 +526,7 @@ export function openUpdateMaintenance(directory, { vault, clock = Date.now }) {
           function check() {
             signal.throwIfAborted(); checkpoint(); signal.throwIfAborted(); const state = readState();
             if (active || state.row.revision !== initial.row.revision || canonicalJSON(state.value) !== canonicalJSON(intent)) throw Error();
+            if (intent.rollback) rollbackSource(state.value, state);
           }
           const inspect = path => lstatSync(path, { bigint: true }), { installed, receipt } = intent.copy;
           const parents = [dirname(installed.bundle), receipt.directory], roots = parents.map(inspect);
@@ -528,7 +620,7 @@ export function openUpdateMaintenance(directory, { vault, clock = Date.now }) {
             if (parent && (!parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== process.getuid() || (parent.mode & 0o777) !== 0o700
               || realpathSync(folder) !== folder || parent.dev !== root.dev) || lstatSync(state.value.installer.file, { throwIfNoEntry: false })) throw Error();
           }
-          if (state.value.copy) {
+          if (state.value.copy && !state.value.rollback) {
             const folder = directory + '/updates', parent = lstatSync(folder);
             if (!parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== process.getuid() || (parent.mode & 0o777) !== 0o700
               || realpathSync(folder) !== folder || parent.dev !== root.dev) throw Error();

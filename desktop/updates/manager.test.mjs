@@ -248,13 +248,10 @@ test('update controls use protected signed history, exact host sources and await
     sha256: 'a'.repeat(64), sourceCommit: 'b'.repeat(40), gitTree: 'c'.repeat(40) };
   const envelope = canonicalJSON({ release, signature: sign(null, Buffer.from(canonicalJSON(release)), privateKey).toString('base64') });
   let now = 1000, trusted = true, foreground = true, mode = 'normal', calls = 0, settled = 0, releaseRead, update, vault, history, journal;
-  let idle = true, holdInspection = false, inspectionCalls = 0, inspectionSettled = 0;
+  let idle = true, inspectionCalls = 0;
   const maintenance = createMaintenanceGate({ ready: () => idle, verify: async signal => {
     inspectionCalls++;
-    try {
-      if (holdInspection) await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
-      signal.throwIfAborted(); return true;
-    } finally { inspectionSettled++; }
+    signal.throwIfAborted(); return true;
   } });
   try {
     vault = await openVault(f.root, { available: async () => true, encrypt: async text => Buffer.from(text),
@@ -287,15 +284,11 @@ test('update controls use protected signed history, exact host sources and await
     assert.equal(update.status().lastCheck, now); assert.equal(update.status().release.version, '0.2.0'); assert.equal(update.status().installQualified, false);
     const policyRevision = f.policy.worker.read(null).revision;
     idle = false; await maintenance.control(() => update.dispatch({ operation: 'install' }));
-    assert.match(update.status().message, /deferred/); assert.equal(inspectionCalls, 0);
+    assert.match(update.status().message, /unavailable/); assert.equal(inspectionCalls, 0);
     idle = true; await maintenance.control(() => update.dispatch({ operation: 'chat', text: 'Update Desktop when idle' }));
-    assert.match(update.status().message, /Idle work verified/); assert.equal(update.status().installQualified, false);
-    holdInspection = true;
-    const inspecting = maintenance.control(() => update.dispatch({ operation: 'install' }));
-    assert.equal(update.status().busy, true); assert.equal(maintenance.active(), true);
-    await maintenance.control(() => update.dispatch({ operation: 'stop' }), { passive: true }); await inspecting;
-    assert.equal(inspectionSettled, inspectionCalls); assert.equal(update.status().busy, false); assert.equal(maintenance.active(), false);
-    assert.equal(calls, 1); assert.equal(f.policy.worker.read(null).revision, policyRevision); holdInspection = false;
+    assert.match(update.status().message, /unavailable/); assert.equal(update.status().installQualified, false);
+    assert.equal(inspectionCalls, 0); assert.equal(update.status().busy, false); assert.equal(maintenance.active(), false);
+    assert.equal(calls, 1); assert.equal(f.policy.worker.read(null).revision, policyRevision);
     const from = { kind: 'pipeliner-desktop-build', schemaVersion: 1, sourceCommit: 'a'.repeat(40), gitTree: 'b'.repeat(40),
       version: '0.1.0', platform: 'darwin', architecture: 'arm64' };
     const intent = journal.begin({ from, to: { ...from, version: release.version, sourceCommit: release.sourceCommit, gitTree: release.gitTree }, sha256: release.sha256, bytes: release.bytes });
@@ -329,6 +322,43 @@ test('update controls use protected signed history, exact host sources and await
   } finally { releaseRead?.(); await update?.close(); journal?.close(); history?.close(); vault?.close(); f.close(); }
 });
 
+test('unqualified installation refuses chat and direct dispatch before inspection or preparation', async () => {
+  const f = fixture(), { publicKey, privateKey } = generateKeyPairSync('ed25519');
+  const source = { id: 'approved-source', label: 'Synthetic Releases', key: publicKey, origin: 'https://updates.example.com', path: '/desktop/releases/' };
+  const { label: _label, ...trust } = source, current = { version: '0.1.0', platform: 'darwin', architecture: 'arm64', channel: 'stable' };
+  const release = { kind: 'pipeliner-desktop-update', schemaVersion: 1, source: source.id, ...current, version: '0.2.0', sequence: 1,
+    issuedAt: 900, expiresAt: 100000000, url: source.origin + source.path + 'Pipeliner.dmg', bytes: 1000,
+    sha256: 'c'.repeat(64), sourceCommit: 'd'.repeat(40), gitTree: 'e'.repeat(40) };
+  let vault, history, journal, update, inspections = 0, preparations = 0, replacements = 0;
+  try {
+    vault = await openVault(f.root, { available: async () => true, encrypt: async text => Buffer.from(text), decrypt: async bytes => ({ result: bytes.toString(), shouldReEncrypt: false }) });
+    history = openUpdateHistory(f.root, { vault, clock: () => 1000 }); journal = openUpdateMaintenance(f.root, { vault, clock: () => 1000 });
+    const attempt = history.begin(trust, current);
+    history.complete(attempt.token, Buffer.from(canonicalJSON({ release, signature: sign(null, Buffer.from(canonicalJSON(release)), privateKey).toString('base64') })));
+    f.edit({ 'updates.source': source.id });
+    const policyBefore = f.policy.worker.read(null), historyBefore = history.read(trust, current);
+    const options = { policy: f.policy, history, version: current.version, host: { platform: current.platform, architecture: current.architecture },
+      sources: () => [source], recovery: () => !journal.clear(), ownsIntent: token => journal.owned(token),
+      maintenance: createMaintenanceGate({ ready: () => true, verify: async () => { inspections++; return true; } }),
+      async prepareInstaller() { preparations++; throw Error('Unqualified preparation must not run'); },
+      async replaceInstaller() { replacements++; throw Error('Unqualified replacement must not run'); } };
+    for (const capability of [{}, { installerQualified: false }, { installerQualified: true, prepareInstaller: null }, { installerQualified: true, replaceInstaller: null }]) {
+      update = createUpdateManager({ ...options, ...capability });
+      assert.equal(update.status().sourceQualified, true); assert.equal(update.status().release.version, release.version);
+      assert.equal(update.status().installQualified, false);
+      await assert.rejects(update.dispatch({ operation: 'install', installerQualified: true }));
+      for (const payload of [{ operation: 'install' }, { operation: 'chat', text: 'Update Desktop when idle' }]) {
+        await options.maintenance.control(() => update.dispatch(payload));
+        assert.deepEqual([inspections, preparations, replacements], [0, 0, 0]);
+        assert.equal(update.status().busy, false); assert.match(update.status().message, /unavailable/);
+        assert.equal(journal.clear(), true); assert.deepEqual(f.policy.worker.read(null), policyBefore); assert.deepEqual(history.read(trust, current), historyBefore);
+      }
+      await update.close();
+    }
+    for (const installerQualified of [null, 'true', 1, () => true]) assert.throws(() => createUpdateManager({ ...options, installerQualified }));
+  } finally { await update?.close(); journal?.close(); history?.close(); vault?.close(); f.close(); }
+});
+
 test('update preparation binds its exact live intent without cancelling itself or reopening competing work', async () => {
   for (const mode of ['normal', 'stop', 'close', 'policy', 'source', 'foreign', 'wrong-token', 'token-loss', 'install', 'install-renamed', 'install-failed', 'install-result', 'install-shape', 'install-stop']) {
     const f = fixture(), { publicKey, privateKey } = generateKeyPairSync('ed25519');
@@ -351,8 +381,8 @@ test('update preparation binds its exact live intent without cancelling itself o
       f.edit({ 'updates.source': source.id });
       const maintenance = createMaintenanceGate({ ready: () => true, verify: async () => true, recovery: () => !journal.clear() });
       update = createUpdateManager({ policy: f.policy, history, version: current.version, host: { platform: current.platform, architecture: current.architecture },
-        maintenance, sources: () => trusted ? [source] : [], recovery: () => !journal.clear(), ownsIntent: token => journal.owned(token),
-        replaceInstaller: installing ? async (token, options) => {
+        maintenance, installerQualified: true, sources: () => trusted ? [source] : [], recovery: () => !journal.clear(), ownsIntent: token => journal.owned(token),
+        replaceInstaller: async (token, options) => {
           assert.equal(token, intent); assert.equal(maintenance.active(), true); assert.equal(journal.owned(token), true);
           options.checkpoint(); assert.equal(options.signal, signal); assert.deepEqual(options.trust, trust); assert.deepEqual(options.current, current);
           replaced++;
@@ -360,12 +390,12 @@ test('update preparation binds its exact live intent without cancelling itself o
           if (mode === 'install-stop') { void update.stop(); await new Promise(setImmediate); options.checkpoint(); }
           return immutable({ ...(mode === 'install-shape' ? { extra: true } : {}), installed: join(f.root, mode === 'install-renamed' ? 'Renamed.app' : 'Pipeliner.app'), rollback: join(f.root, 'updates/candidate/Pipeliner.app'),
             identity: { ...from, version: mode === 'install-result' ? '0.9.0' : release.version, sourceCommit: release.sourceCommit, gitTree: release.gitTree } });
-        } : null,
+        },
         onInstalled(result) {
           assert.equal(maintenance.active(), false); assert.equal(update.status().busy, false); assert.equal(result.identity.version, release.version);
           assert.equal(Object.isFrozen(result), true); restarted++;
         },
-        // Synthetic native effects; actual protected policy, signed history, journal and host admission.
+        // Synthetic qualification and native effects; actual protected policy, signed history, journal and host admission.
         async prepareInstaller(options) {
           prepared++; signal = options.signal;
           try {
@@ -378,6 +408,7 @@ test('update preparation binds its exact live intent without cancelling itself o
             await hold; options.checkpoint(); signal.throwIfAborted(); return intent;
           } finally { settled++; }
         } });
+      assert.equal(update.status().installQualified, true);
       const operation = maintenance.control(() => update.dispatch({ operation: 'install' }));
       await new Promise(setImmediate); assert.equal(prepared, 1);
       if (!['foreign', 'wrong-token'].includes(mode)) {
@@ -397,7 +428,7 @@ test('update preparation binds its exact live intent without cancelling itself o
         finish(); await stopping;
       }
       await operation;
-      assert.equal(replaced, installing ? 1 : 0); assert.equal(restarted, ['install', 'install-renamed'].includes(mode) ? 1 : 0);
+      assert.equal(replaced, mode === 'normal' || installing ? 1 : 0); assert.equal(restarted, ['normal', 'install', 'install-renamed'].includes(mode) ? 1 : 0);
       assert.equal(settled, 1); assert.equal(update.status().busy, false); assert.equal(maintenance.active(), false);
       assert.equal(update.status().installQualified, false); assert.equal(journal.clear(), false);
       assert.equal(update.status().recoveryRequired, true); assert.match(update.status().message, /verified recovery/);

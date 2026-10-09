@@ -10,11 +10,11 @@ import { checkUninstallPlan } from './uninstall.mjs';
 
 export function createUpdateManager({ policy, version = null, history = null, sources = () => [], reader = readUpdateSource,
   host = { platform: process.platform, architecture: process.arch }, foreground = () => true, maintenance = null, recovery = () => false,
-  prepareInstaller = null, replaceInstaller = null, onInstalled = () => {}, ownsIntent = () => false, recoveryDetails = () => null, inspectRemoval = null, removalDetails = () => null,
+  prepareInstaller = null, replaceInstaller = null, installerQualified = false, onInstalled = () => {}, ownsIntent = () => false, recoveryDetails = () => null, inspectRemoval = null, removalDetails = () => null,
   removeApp = null, recoverRemoval = null, onRemoved = () => {},
   clock = Date.now, initialRevision = 1, onChange = () => {}, onApplied = () => {} }) {
   record(host, ['platform', 'architecture']);
-  if (!Number.isSafeInteger(initialRevision) || initialRevision < 1 || [onChange, onApplied, onRemoved, onInstalled, sources, reader, foreground, recovery, ownsIntent, recoveryDetails, removalDetails, clock].some(fn => typeof fn !== 'function')
+  if (!Number.isSafeInteger(initialRevision) || initialRevision < 1 || typeof installerQualified !== 'boolean' || [onChange, onApplied, onRemoved, onInstalled, sources, reader, foreground, recovery, ownsIntent, recoveryDetails, removalDetails, clock].some(fn => typeof fn !== 'function')
     || prepareInstaller !== null && typeof prepareInstaller !== 'function'
     || replaceInstaller !== null && typeof replaceInstaller !== 'function'
     || inspectRemoval !== null && typeof inspectRemoval !== 'function'
@@ -92,7 +92,8 @@ export function createUpdateManager({ policy, version = null, history = null, so
     return { revision, storageAvailable: Boolean(view), recoveryRequired, scope: 'host', policyRevision: view?.revision ?? null, installedVersion: version,
       values: view ? { 'updates.channel': view.values['updates.channel'] } : null,
       sources: approved.items.map(item => ({ name: item.label })), sourceName: selected?.label ?? null,
-      sourceConfigured: Boolean(view?.values['updates.source'].value), sourceQualified: Boolean(saved), installQualified: false, busy: Boolean(pending),
+      sourceConfigured: Boolean(view?.values['updates.source'].value), sourceQualified: Boolean(saved),
+      installQualified: Boolean(installerQualified && prepareInstaller && replaceInstaller && maintenance && capable(context) && !recoveryRequired), busy: Boolean(pending),
       busyOperation: pending?.kind ?? (pending ? 'check' : null),
       lastCheck: saved?.lastCheck ?? null, upToDate: Boolean(saved?.availability && !saved.availability.available),
       release: saved?.availability?.available ? Object.fromEntries(['version', 'channel', 'platform', 'architecture', 'sequence', 'bytes', 'sha256', 'sourceCommit', 'gitTree', 'expiresAt']
@@ -246,8 +247,8 @@ export function createUpdateManager({ policy, version = null, history = null, so
       publish(); return { snapshot: status(), applied: result.applied };
     } else if (payload.operation === 'install') {
       if (pending) return { snapshot: status() };
-      const context = inspect(), release = status().release;
-      if (!capable(context) || !release || !maintenance) {
+      const context = inspect(), availability = status(), release = availability.release;
+      if (!availability.installQualified || !release) {
         revision++; message = 'Update installation is unavailable. A verified release, qualified installer and migration/recovery preview are required. No app files changed.';
       } else {
         const operation = { kind: 'install', controller: new AbortController(), signature: signature(context) }; pending = operation; revision++;
@@ -262,7 +263,6 @@ export function createUpdateManager({ policy, version = null, history = null, so
                 checkpoint(); operation.controller.signal.throwIfAborted();
               };
               check();
-              if (!prepareInstaller) { message = 'Idle work verified. Installation still needs a qualified native installer and compatible recovery preview. No app files changed.'; return; }
               message = 'Preparing the verified update and protected recovery copies. The installed app is preserved.';
               const token = await prepareInstaller(Object.freeze({ trust: Object.freeze({ ...context.selected.trust }), current: Object.freeze({ ...context.current }),
                 checkpoint: check, signal: operation.controller.signal, onIntent(token) {
@@ -271,19 +271,16 @@ export function createUpdateManager({ policy, version = null, history = null, so
                   operation.intent = token; check(); publish();
                 } }));
               check(); if (token !== operation.intent || !ownsPreparation(operation)) throw Error('maintenance-deferred');
-              message = 'Update preparation verified. Installation and restart still need qualified completion; the installed app is preserved.';
-              if (replaceInstaller) {
-                message = 'Installing the verified update while work is idle. Recovery copies stay preserved.';
-                const result = await replaceInstaller(token, Object.freeze({ trust: Object.freeze({ ...context.selected.trust }),
-                  current: Object.freeze({ ...context.current }), checkpoint: check, signal: operation.controller.signal }));
-                check(); canonicalJSON(result); record(result, ['installed', 'rollback', 'identity']);
-                const identity = buildIdentity(result.identity);
-                if (['version', 'platform', 'architecture', 'sourceCommit', 'gitTree'].some(key => identity[key] !== release[key])
-                  || ['installed', 'rollback'].some(key => typeof result[key] !== 'string' || resolve(result[key]) !== result[key]
-                    || !result[key].endsWith('.app') || /[\x00-\x1f\x7f]/.test(result[key])) || result.installed === result.rollback) throw Error('maintenance-deferred');
-                installed = immutable({ installed: result.installed, rollback: result.rollback, identity });
-                message = 'Update replacement verified. Closing safely before restarting; startup will verify recovery.';
-              }
+              message = 'Installing the verified update while work is idle. Recovery copies stay preserved.';
+              const result = await replaceInstaller(token, Object.freeze({ trust: Object.freeze({ ...context.selected.trust }),
+                current: Object.freeze({ ...context.current }), checkpoint: check, signal: operation.controller.signal }));
+              check(); canonicalJSON(result); record(result, ['installed', 'rollback', 'identity']);
+              const identity = buildIdentity(result.identity);
+              if (['version', 'platform', 'architecture', 'sourceCommit', 'gitTree'].some(key => identity[key] !== release[key])
+                || ['installed', 'rollback'].some(key => typeof result[key] !== 'string' || resolve(result[key]) !== result[key]
+                  || !result[key].endsWith('.app') || /[\x00-\x1f\x7f]/.test(result[key])) || result.installed === result.rollback) throw Error('maintenance-deferred');
+              installed = immutable({ installed: result.installed, rollback: result.rollback, identity });
+              message = 'Update replacement verified. Closing safely before restarting; startup will verify recovery.';
             }, { signal: operation.controller.signal, ownsRecovery: () => ownsPreparation(operation) });
           } catch { installed = null; message = 'Update deferred: work is busy, changed or unverified. Inspect recovery before retrying; completed effects and saved data are preserved.'; }
           finally { pending = null; revision++; publish(); }

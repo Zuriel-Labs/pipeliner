@@ -2,7 +2,7 @@
 const assert = require('node:assert/strict');
 const { writeFileSync } = require('node:fs');
 const { join } = require('node:path');
-const { nativeTheme } = require('electron');
+const { app, nativeTheme } = require('electron');
 
 // Development-only. Actual renderer, native theme, keyboard and protected policy; no Human/VoiceOver acceptance claim.
 exports.run = async ({ window, directory, appearance, channel, policy, development, js, wait, check, measurements }) => {
@@ -119,7 +119,7 @@ exports.run = async ({ window, directory, appearance, channel, policy, developme
     await wait(() => js("!document.getElementById('chat-new-activity').hidden"));
     assert.equal(await js("Math.abs(document.getElementById('transcript').scrollTop-window.layoutScroll)<2&&scrollY===window.layoutPage"), true);
     assert.equal(await js('document.activeElement.id'), 'prompt');
-    window.focus(); await js("document.getElementById('chat-new-activity').focus({preventScroll:true})");
+    app.focus({ steal: true }); window.focus(); window.webContents.focus(); await js("document.getElementById('chat-new-activity').focus({preventScroll:true})");
     await wait(() => window.isFocused());
     window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
     await wait(() => js("document.getElementById('chat-new-activity').hidden&&document.activeElement.id==='transcript'"));

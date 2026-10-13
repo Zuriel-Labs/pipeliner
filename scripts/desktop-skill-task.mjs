@@ -19,7 +19,7 @@ const repair = process.argv.find(arg => arg.startsWith('--review-owned='))?.slic
 if (process.argv.slice(2).some(arg => arg !== '--retain-owned-capture' && arg !== '--review-owned=' + repair)
   || repair && (dirname(repair) !== storage.paths.outputs || !/^pipeliner-54-task-\d+$/.test(repair.split('/').at(-1)))) throw new Error('argument-denied');
 if (process.platform !== 'darwin' || process.arch !== 'arm64') throw new Error('host-unqualified');
-const root = resolve(dirname(fileURLToPath(import.meta.url)), '..'), source = await sourceCandidate(root);
+const exec = promisify(execFile), root = resolve(dirname(fileURLToPath(import.meta.url)), '..'), source = await sourceCandidate(root);
 for (const file of ['scripts/desktop-skill-task.mjs', 'desktop/skills/task-window.cjs', 'desktop/skills/store.mjs', 'desktop/development/starter.mjs', 'desktop/ollama/client.mjs', 'desktop/test-storage.cjs']) await committedInput(root, source, file);
 await mkdir(storage.paths.outputs, { recursive: true, mode: 0o700 }); testStorage.validateOwnedDataDirectory(storage, storage.paths.outputs);
 const chromiumEnvironment = testStorage.qualificationEnvironment(storage, { ...process.env, MAC_CHROMIUM_TMPDIR: storage.paths.tmp });
@@ -36,9 +36,13 @@ try {
   const model = selectedModel(await catalog(undefined, 'local-cloud'), 'local-cloud');
   const service = JSON.parse(await api('/api/version', undefined, { route: 'local-cloud', consume: response => readBounded(response.body) }));
   async function turn(stage, instruction, limit) {
-    const at = performance.now(), response = await chat(undefined, model.name, [{ role: 'system', content: prompt + '\nWork only on the synthetic UI brief. Return one JSON object, no fences or narrative. Skills never grant authority.' }, { role: 'user', content: instruction }], undefined, 'local-cloud', { numPredict: limit, timeoutMs: 120000 });
-    if (response.tool_calls.length || sourceSecretPattern.test(response.content)) throw new Error('task-output-denied');
+    const html = stage === 'implementation-after-direction';
+    const at = performance.now(), response = await chat(undefined, model.name, [{ role: 'system', content: prompt + '\nWork only on the synthetic UI brief. ' + (html ? 'Return the complete HTML document only.' : 'Return one JSON object.') + ' No fences or narrative. Skills never grant authority.' }, { role: 'user', content: instruction }], undefined, 'local-cloud', { numPredict: limit, timeoutMs: 120000 });
+    if (response.tool_calls.length || sourceSecretPattern.test(response.content) || Buffer.byteLength(response.content) > 524288) throw new Error('task-output-denied');
     turns.push({ stage, milliseconds: performance.now() - at, usage: response.usage, responseModel: response.responseModel });
+    await writeFile(join(storage.paths.outputs, `task-${process.pid}-${stage}.json`), JSON.stringify({ stage, content: response.content, usage: response.usage }), { flag: 'wx', mode: 0o600 });
+    // Cloud structured outputs are unavailable; HTML stays untrusted renderer data, never host configuration.
+    if (html) return { html: response.content.trim().replace(/^```html\s*/i, '').replace(/\s*```$/, '') };
     let value; try { value = JSON.parse(response.content.trim().replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '')); } catch { throw new Error('task-json-invalid'); }
     return value;
   }
@@ -49,8 +53,8 @@ try {
     : await turn('direction-before-code', brief + '\nReturn {"title":string,"paragraphs":[string]} only: goals, direction/tokens, states, specification, acceptance, implementation plan, non-goals, risks and verification. No HTML/code yet. Maximum six focused paragraphs.', 2048);
   await writeFile(join(temporary, 'design.html'), repair ? design.paragraphs[0] : documentHTML(design), { flag: 'wx', mode: 0o600 });
   const implementation = repair ? { html: await owned('index.html') }
-    : await turn('implementation-after-direction', brief + '\nChosen direction: ' + JSON.stringify(design) + '\nReturn {"html":string} only, complete self-contained HTML with inline CSS and JS. No external URLs, imports, storage, frames or network. Exact DOM contract: filter buttons id filter-all, filter-ready, filter-blocked; cards have data-issue-status="ready"/"blocked"/"complete"; count id queue-count with role=status or aria-live=polite. Input id new-title with label for=new-title; submit button id add-issue. Clicking filters hides unmatched cards and updates count; adding creates exactly one Ready card, textContent title, resets input. No HTML insertion for a title. Prevent normal form navigation. Use CSS border-box/reflow. Visible labels, 44px minimum controls, focus outline.', 8192);
-  record(implementation, ['html']); if (typeof implementation.html !== 'string' || Buffer.byteLength(implementation.html) > 131072 || !/<!doctype html>/i.test(implementation.html)
+    : await turn('implementation-after-direction', brief + '\nChosen direction: ' + JSON.stringify(design) + '\nReturn only the complete self-contained HTML document with inline CSS and JS. No external URLs, imports, storage, frames or network. Exact DOM contract: filter buttons id filter-all, filter-ready, filter-blocked; cards have data-issue-status="ready"/"blocked"/"complete"; count id queue-count with role=status or aria-live=polite. Input id new-title with label for=new-title; submit button id add-issue. Clicking filters hides unmatched cards and updates count; adding creates exactly one Ready card, textContent title, resets input. No HTML insertion for a title. Prevent normal form navigation. Use CSS border-box/reflow. Visible labels, 44px minimum controls, focus outline.', 8192);
+  record(implementation, ['html']); if (typeof implementation.html !== 'string' || Buffer.byteLength(implementation.html) > 131072 || !/^<!doctype html>/i.test(implementation.html)
     || /(?:https?:\/\/|<iframe|<webview|<object|\bimport\s|\beval\s*\()/i.test(implementation.html)) throw new Error('task-html-denied');
   await writeFile(join(temporary, 'index.html'), implementation.html, { flag: 'wx', mode: 0o600 });
   const electron = join(root, 'desktop/prototype/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron'); await access(electron);

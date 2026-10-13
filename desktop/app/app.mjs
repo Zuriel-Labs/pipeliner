@@ -193,3 +193,5 @@ for (const category of ['connections', 'pipelines', 'agents', 'schedule', 'backg
 for (const button of document.querySelectorAll('[data-settings]')) button.addEventListener('click', () => showSettings());
 for (const button of document.querySelectorAll('[data-chat]')) button.addEventListener('click', () => request({ operation: 'chat', text: button.dataset.chat }, button.dataset.chat));
 window.pipeliner.onStatus(render); render(await window.pipeliner.request({ operation: 'status' }));
+$('prompt').disabled = false; $('chat-send').disabled = false;
+$('composer').removeAttribute('aria-busy'); $('chat-readiness').hidden = true;

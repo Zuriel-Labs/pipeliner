@@ -9,7 +9,10 @@ exports.run = async ({ window, directory, vault, privacy, records, channel, work
   const first = workspaces.status().workspaces.find(item => item.id === workspaces.status().selected), second = workspaces.status().workspaces.find(item => item.id !== first.id);
   const exportDirectory = process.env.PIPELINER_PRIVACY_EXPORT_DIRECTORY;
   assert.ok(typeof exportDirectory === 'string' && isAbsolute(exportDirectory) && dirname(exportDirectory) === dirname(directory) && basename(exportDirectory).startsWith('pipeliner-54-privacy-export-'));
-  const chat = text => js(`document.getElementById('chat-nav').click();document.getElementById('prompt').value=${JSON.stringify(text)};document.getElementById('composer').requestSubmit()`);
+  const chat = async text => {
+    await wait(() => js("!document.getElementById('prompt').disabled&&!document.getElementById('chat-send').disabled"));
+    return js(`document.getElementById('chat-nav').click();document.getElementById('prompt').value=${JSON.stringify(text)};document.getElementById('composer').requestSubmit()`);
+  };
   const keyApply = async () => { await js("document.getElementById('chat-nav').click();document.getElementById('privacy-apply-chat').focus()");
     window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' }); };
   async function panel(kind) {

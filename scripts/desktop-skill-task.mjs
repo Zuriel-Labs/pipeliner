@@ -13,6 +13,7 @@ import { sourceSecretPattern } from '../desktop/development/source.mjs';
 import { api, catalog, selectedModel, chat, readBounded } from '../desktop/ollama/qualify.mjs';
 import { sourceCandidate, committedInput } from '../desktop/package/source.mjs';
 import testStorage from '../desktop/test-storage.cjs';
+import { taskHTML } from '../desktop/skills/task-output.mjs';
 
 const storage = testStorage.qualificationContext();
 const repair = process.argv.find(arg => arg.startsWith('--review-owned='))?.slice(15);
@@ -20,7 +21,7 @@ if (process.argv.slice(2).some(arg => arg !== '--retain-owned-capture' && arg !=
   || repair && (dirname(repair) !== storage.paths.outputs || !/^pipeliner-54-task-\d+$/.test(repair.split('/').at(-1)))) throw new Error('argument-denied');
 if (process.platform !== 'darwin' || process.arch !== 'arm64') throw new Error('host-unqualified');
 const exec = promisify(execFile), root = resolve(dirname(fileURLToPath(import.meta.url)), '..'), source = await sourceCandidate(root);
-for (const file of ['scripts/desktop-skill-task.mjs', 'desktop/skills/task-window.cjs', 'desktop/skills/store.mjs', 'desktop/development/starter.mjs', 'desktop/ollama/client.mjs', 'desktop/test-storage.cjs']) await committedInput(root, source, file);
+for (const file of ['scripts/desktop-skill-task.mjs', 'desktop/skills/task-window.cjs', 'desktop/skills/task-output.mjs', 'desktop/skills/store.mjs', 'desktop/development/starter.mjs', 'desktop/ollama/client.mjs', 'desktop/test-storage.cjs']) await committedInput(root, source, file);
 await mkdir(storage.paths.outputs, { recursive: true, mode: 0o700 }); testStorage.validateOwnedDataDirectory(storage, storage.paths.outputs);
 const chromiumEnvironment = testStorage.qualificationEnvironment(storage, { ...process.env, MAC_CHROMIUM_TMPDIR: storage.paths.tmp });
 const temporary = await realpath(await mkdtemp(join(tmpdir(), 't'))); await chmod(temporary, 0o700);
@@ -35,6 +36,7 @@ try {
   const prompt = store.prompt(captured.manifest, captured.hash, { bundledSkills: true, extensions: [], deniedExtensions: [] });
   const model = selectedModel(await catalog(undefined, 'local-cloud'), 'local-cloud');
   const service = JSON.parse(await api('/api/version', undefined, { route: 'local-cloud', consume: response => readBounded(response.body) }));
+  output = { owningIssue: 54, passed: false, candidate: { source: source.sourceCommit, tree: source.gitTree }, manifest: captured, provider: { model: model.name, remoteModel: model.remote_model, digest: model.digest, serviceVersion: service.version }, turns };
   async function turn(stage, instruction, limit) {
     const html = stage === 'implementation-after-direction';
     const at = performance.now(), response = await chat(undefined, model.name, [{ role: 'system', content: prompt + '\nWork only on the synthetic UI brief. ' + (html ? 'Return the complete HTML document only.' : 'Return one JSON object.') + ' No fences or narrative. Skills never grant authority.' }, { role: 'user', content: instruction }], undefined, 'local-cloud', { numPredict: limit, timeoutMs: 120000 });
@@ -42,7 +44,7 @@ try {
     turns.push({ stage, milliseconds: performance.now() - at, usage: response.usage, responseModel: response.responseModel });
     await writeFile(join(storage.paths.outputs, `task-${process.pid}-${stage}.json`), JSON.stringify({ stage, content: response.content, usage: response.usage }), { flag: 'wx', mode: 0o600 });
     // Cloud structured outputs are unavailable; HTML stays untrusted renderer data, never host configuration.
-    if (html) return { html: response.content.trim().replace(/^```html\s*/i, '').replace(/\s*```$/, '') };
+    if (html) return { html: taskHTML(response.content) };
     let value; try { value = JSON.parse(response.content.trim().replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '')); } catch { throw new Error('task-json-invalid'); }
     return value;
   }
@@ -54,8 +56,7 @@ try {
   await writeFile(join(temporary, 'design.html'), repair ? design.paragraphs[0] : documentHTML(design), { flag: 'wx', mode: 0o600 });
   const implementation = repair ? { html: await owned('index.html') }
     : await turn('implementation-after-direction', brief + '\nChosen direction: ' + JSON.stringify(design) + '\nReturn only the complete self-contained HTML document with inline CSS and JS. No external URLs, imports, storage, frames or network. Exact DOM contract: filter buttons id filter-all, filter-ready, filter-blocked; cards have data-issue-status="ready"/"blocked"/"complete"; count id queue-count with role=status or aria-live=polite. Input id new-title with label for=new-title; submit button id add-issue. Clicking filters hides unmatched cards and updates count; adding creates exactly one Ready card, textContent title, resets input. No HTML insertion for a title. Prevent normal form navigation. Use CSS border-box/reflow. Visible labels, 44px minimum controls, focus outline.', 8192);
-  record(implementation, ['html']); if (typeof implementation.html !== 'string' || Buffer.byteLength(implementation.html) > 131072 || !/^<!doctype html>/i.test(implementation.html)
-    || /(?:https?:\/\/|<iframe|<webview|<object|\bimport\s|\beval\s*\()/i.test(implementation.html)) throw new Error('task-html-denied');
+  record(implementation, ['html']); implementation.html = taskHTML(implementation.html);
   await writeFile(join(temporary, 'index.html'), implementation.html, { flag: 'wx', mode: 0o600 });
   const electron = join(root, 'desktop/prototype/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron'); await access(electron);
   child = spawn(electron, [join(root, 'desktop/skills/task-window.cjs'), '--task-root=' + temporary], { env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: homedir(), LANG: 'en_US.UTF-8', ...chromiumEnvironment }, stdio: ['ignore', 'ignore', 'ignore'] });

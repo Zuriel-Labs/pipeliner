@@ -1,6 +1,6 @@
 'use strict';
 const assert = require('node:assert/strict');
-const { readFileSync, existsSync, mkdirSync, writeFileSync, lstatSync, realpathSync, rmdirSync } = require('node:fs');
+const { readFileSync, existsSync, mkdirSync, writeFileSync, lstatSync, realpathSync, rmdirSync, openSync, writeSync, fsyncSync, closeSync } = require('node:fs');
 const { execFileSync } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
 const path = require('node:path');
@@ -813,6 +813,47 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
         assert.equal(providerTurns, turns);
         assert.equal([...issueFixtures.values()].reduce((count, fixture) => count + fixture.writes.length, 0), writes);
         const reopened = openWorkspaceStore(directory, { vault }); try { assert.equal(reopened.workspaces().length, 25); } finally { reopened.close(); }
+        if (process.argv.includes('--qualify-soak')) {
+          const { measureSoak, soakDurationMs } = require('./qualify-soak.cjs');
+          const storage = require('../test-storage.cjs').qualificationContext();
+          require('../test-storage.cjs').validateOwnedDataDirectory(storage, storage.paths.outputs);
+          const file = path.join(storage.paths.outputs, `soak-${process.pid}.jsonl`), fd = openSync(file, 'wx', 0o600);
+          const controller = new AbortController(), abort = () => controller.abort(); window.once('closed', abort);
+          const wallBegan = Date.now(), pins = targets.map(target => policy.worker.read(target.id).hash), hostPin = policy.worker.read(null).hash;
+          let bytes = 0;
+          try {
+            const result = await measureSoak({ signal: controller.signal,
+              sample: async (_elapsed, index) => {
+                assert.equal(policy.worker.read(null).hash, hostPin);
+                for (const [index, target] of targets.entries()) {
+                  assert.equal(policy.worker.read(target.id).hash, pins[index]);
+                  assert.equal(policy.worker.read(target.id).values['scheduling.enabled'].value, false);
+                }
+                await scheduler.check('timer'); assert.equal(scheduler.busy(), false);
+                const label = JSON.stringify(targets[index % targets.length].name);
+                const timing = await js(`(()=>{const control=performance.now();document.getElementById('repositories-nav').click();document.getElementById('workspace-list').offsetHeight;const controlMs=performance.now()-control;const card=[...document.querySelectorAll('#workspace-list>article')].find(node=>node.querySelector('h2').textContent===${label});const began=performance.now();card.querySelector('button').click();return {controlMs,began}})()`);
+                await wait(() => js(`document.getElementById('chat-title').textContent===${label}&&document.getElementById('workspace-context').textContent===${label}`));
+                await js('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+                const navigationMs = await js('performance.now()-' + timing.began);
+                assert.equal(catalogReads, reads); assert.equal(providerTurns, turns);
+                assert.equal([...issueFixtures.values()].reduce((count, fixture) => count + fixture.writes.length, 0), writes);
+                const memory = process.memoryUsage();
+                return { navigationMs, controlMs: timing.controlMs, rssBytes: memory.rss, heapUsedBytes: memory.heapUsed };
+              },
+              write: value => {
+                const line = Buffer.from(JSON.stringify({ ...value, wallElapsedMs: Date.now() - wallBegan,
+                  catalogRequests: catalogReads - reads, fixtureProviderTurns: providerTurns - turns,
+                  fixtureWrites: [...issueFixtures.values()].reduce((count, fixture) => count + fixture.writes.length, 0) - writes }) + '\n');
+                if ((bytes += line.length) > 1024 ** 2) throw Error('soak-evidence-limit');
+                let offset = 0; while (offset < line.length) offset += writeSync(fd, line, offset, line.length - offset); fsyncSync(fd);
+                assert(value.controlMs < 150);
+              } });
+            measurements.push({ interaction: '24-hour-foreground-synthetic-cache-idle-service-soak', ...result, wallElapsedMs: Date.now() - wallBegan,
+              catalogRequests: catalogReads - reads, fixtureProviderTurns: providerTurns - turns, samplesPath: file, samplesBytes: bytes,
+              samplesSha256: require('node:crypto').createHash('sha256').update(readFileSync(file)).digest('hex') });
+            assert(result.elapsedMs >= soakDurationMs); assert(result.navigationP95Ms < 2000); assert(result.controlP95Ms < 150);
+          } finally { window.removeListener('closed', abort); closeSync(fd); }
+        }
       } finally {
         for (const [id, rows] of saved) { const fixture = issueFixtures.get(id); fixture.issues.splice(0, fixture.issues.length, ...rows); }
         workspaces.dispatch({ operation: 'select', workspace: original }); await issues.dispatch({ operation: 'refresh' }); await issues.idle();
@@ -868,7 +909,8 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
       assert.equal(folderCancelled, true);
     });
   } catch { const snapshot = workspaces.status(); workspaceEvidence = { checkpoint: workspaceStage, busy: snapshot.busy, state: snapshot.draft?.state, error: snapshot.draft?.error, folderSelected: Boolean(snapshot.draft?.folder), projectCount: snapshot.draft?.projects?.length ?? 0 }; process.exitCode = 1; }
-  const report = { desktopQualification: permissionScope ? 'permissions-and-local-testing-controls' : deliveryScope ? 'delivery-updates-recovery-controls-and-installation-data-inventory' : appearanceScope ? 'appearance-and-accessibility-preferences' : privacyScope ? 'protected-local-privacy-and-recovery' : toolsScope ? 'scoped-tools-and-custom-pipelines' : skillsScope ? 'starter-skill-management' : backgroundScope ? 'optional-background-host' : schedulingScope ? 'deterministic-scheduling' : developmentScope ? 'development-controls' : pipelineScope ? 'versioned-pipeline-editing' : 'protected-issue-intake', checks, passed: checks.length === (permissionScope ? 24 : deliveryScope ? 31 : appearanceScope ? 26 : privacyScope ? 27 : toolsScope ? 26 : skillsScope ? 26 : backgroundScope ? 25 : schedulingScope ? 23 : developmentScope ? 22 + (pipelineScope ? 6 : 0) : pipelineScope ? 24 : issueScope ? 18 : 21) + (process.argv.includes('--qualify-issues') ? 2 : 0) && checks.every(c => c.passed), milliseconds: Math.round(performance.now() - started), windowReadyFromMainEntryMs: windowReadyMs, measurements,
+  const soakVerified = !process.argv.includes('--qualify-soak') || measurements.some(value => value.interaction === '24-hour-foreground-synthetic-cache-idle-service-soak' && value.elapsedMs >= 86400000 && value.navigationP95Ms < 2000 && value.controlP95Ms < 150);
+  const report = { desktopQualification: permissionScope ? 'permissions-and-local-testing-controls' : deliveryScope ? 'delivery-updates-recovery-controls-and-installation-data-inventory' : appearanceScope ? 'appearance-and-accessibility-preferences' : privacyScope ? 'protected-local-privacy-and-recovery' : toolsScope ? 'scoped-tools-and-custom-pipelines' : skillsScope ? 'starter-skill-management' : backgroundScope ? 'optional-background-host' : schedulingScope ? 'deterministic-scheduling' : developmentScope ? 'development-controls' : pipelineScope ? 'versioned-pipeline-editing' : 'protected-issue-intake', checks, passed: soakVerified && checks.length === (permissionScope ? 24 : deliveryScope ? 31 : appearanceScope ? 26 : privacyScope ? 27 : toolsScope ? 26 : skillsScope ? 26 : backgroundScope ? 25 : schedulingScope ? 23 : developmentScope ? 22 + (pipelineScope ? 6 : 0) : pipelineScope ? 24 : issueScope ? 18 : 21) + (process.argv.includes('--qualify-issues') ? 2 : 0) && checks.every(c => c.passed), milliseconds: Math.round(performance.now() - started), windowReadyFromMainEntryMs: windowReadyMs, measurements,
     versions: { electron: process.versions.electron, chromium: process.versions.chrome, node: process.versions.node, sqlite: process.versions.sqlite, os: process.platform, architecture: process.arch }, storageRouting,
     nativeEvidence, workspaceEvidence, folderFailure, folderCancelled, synthetic: 'Synthetic GitHub/model replies, first folder selection, optional tool catalog and background-service adapters; actual native secure fields, folder-panel cancellation, protected storage, local Git and own window. External tool compatibility and actual SMAppService/bootstrap are qualified separately.',
     notRun: issueScope ? ['Unchanged Codex unauthenticated discovery', 'Unchanged public GitHub App qualification', 'Unchanged invalid Cloud key probe'] : [],

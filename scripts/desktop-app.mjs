@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 
 const exec = promisify(execFile), root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const qualificationFlags = ['--qualify', '--qualify-issues', '--qualify-pipelines', '--qualify-development', '--qualify-scheduling', '--qualify-background', '--qualify-skills', '--qualify-tools', '--qualify-privacy', '--qualify-appearance', '--qualify-delivery', '--qualify-permissions'];
+const qualificationFlags = ['--qualify', '--qualify-issues', '--qualify-soak', '--qualify-pipelines', '--qualify-development', '--qualify-scheduling', '--qualify-background', '--qualify-skills', '--qualify-tools', '--qualify-privacy', '--qualify-appearance', '--qualify-delivery', '--qualify-permissions'];
+if (process.argv.includes('--qualify-soak') && !process.argv.includes('--qualify-issues')) throw new Error('soak-requires-workload');
 const storageFixture = process.argv.includes('--storage-fixture');
 if (storageFixture && process.argv.some(arg => qualificationFlags.includes(arg) || arg === '--retain-owned-capture')) {
   throw new Error('storage-fixture-native-option-conflict');
@@ -26,6 +27,11 @@ const chromiumEnvironment = qualificationEnvironment(storage, { ...process.env,
   try { await mkdir(storage.paths.recordings, { mode: 0o700 }); }
   catch (error) { if (error.code !== 'EEXIST') throw error; }
   validateOwnedDataDirectory(storage, storage.paths.recordings);
+  if (process.argv.includes('--qualify-soak')) {
+    try { await mkdir(storage.paths.outputs, { mode: 0o700 }); }
+    catch (error) { if (error.code !== 'EEXIST') throw error; }
+    validateOwnedDataDirectory(storage, storage.paths.outputs);
+  }
   if (storageFixture) {
     const path = join(storage.paths.recordings, 'synthetic-storage-capture.bin');
     await writeFile(path, Buffer.alloc(128, 112), { flag: 'wx', mode: 0o600 });
@@ -38,6 +44,9 @@ const temporary = await realpath(await mkdtemp(join(tmpdir(), 'pipeliner-app-'))
 const temporaryInfo = await lstat(temporary);
 const calendar = join(temporary, 'calendar');
 let child, privacyExport, privacyExportInfo, nativeRoot, nativeRootInfo, code = 1, report = '', errors = 0, delivered = 0;
+let cancelled = false;
+const cancel = () => { cancelled = true; if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGTERM'); };
+process.on('SIGTERM', cancel); process.on('SIGINT', cancel);
 try {
   if (qualifying) {
     nativeRoot = await realpath(await mkdtemp(join(tmpdir(), 'pipeliner-native-workspace-')));
@@ -53,6 +62,7 @@ try {
   await exec('/usr/bin/clang', ['-fobjc-arc', '-framework', 'Foundation', '-mmacosx-version-min=13.0', join(root, 'desktop/scheduling/calendar.m'), '-o', calendar], { timeout: 30000 });
   phase('helper-build-finished');
   const electron = join(root, 'desktop/prototype/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron'); await access(electron);
+  if (cancelled) throw new Error('qualification-cancelled');
   phase('app-launch-started');
   child = spawn(electron, [join(root, 'desktop/app/main.cjs'), `--key-helper=${helper}`, `--calendar-helper=${calendar}`, ...(qualifying ? ['--qualify', ...process.argv.filter(arg => qualificationFlags.includes(arg) && arg !== '--qualify'), `--test-data-directory=${temporary}`] : [])], {
     env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: homedir(), LANG: 'en_US.UTF-8', ...chromiumEnvironment, ...(nativeRoot ? { PIPELINER_NATIVE_WORKSPACE_ROOT: nativeRoot } : {}), ...(privacyExport ? { PIPELINER_PRIVACY_EXPORT_DIRECTORY: privacyExport } : {}) }, stdio: ['ignore', 'pipe', 'pipe'],
@@ -87,6 +97,7 @@ try {
   }
 } finally {
   if (child && child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await new Promise(resolveClose => child.once('close', resolveClose)); }
+  process.removeListener('SIGTERM', cancel); process.removeListener('SIGINT', cancel);
   try {
     const record = JSON.parse(await readFile(join(temporary, 'native-ownership.json'), 'utf8'));
     const expected = join(nativeRoot, 'repository'), info = await lstat(expected);

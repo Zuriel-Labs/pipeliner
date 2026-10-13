@@ -11,7 +11,7 @@ function progress(text) {
     const value = JSON.parse(text); if (!value || Array.isArray(value) || typeof value !== 'object') return null;
     const keys = Object.keys(value).sort().join(',');
     if (keys === 'desktopPhase,milliseconds' && phases.has(value.desktopPhase) && Number.isSafeInteger(value.milliseconds)
-      && value.milliseconds >= 0 && value.milliseconds <= 600000) return value;
+      && value.milliseconds >= 0) return value;
     if (keys === 'desktopCheck,stage' && Number.isSafeInteger(value.desktopCheck) && value.desktopCheck >= 1 && value.desktopCheck <= 256
       && ['started', 'passed', 'failed'].includes(value.stage)) return value;
   } catch { /* Child payloads never cross the public fixture-log boundary. */ }

@@ -81,7 +81,7 @@ export function openWorkerEnvironment(directory, { inspectionOnly = false } = {}
   privateDirectory(directory, !inspectionOnly);
   const home = join(directory, 'home'), lima = join(directory, 'lima'), config = join(directory, 'worker.yaml'), marker = join(directory, 'environment.json');
   privateDirectory(home, !inspectionOnly); privateDirectory(lima, !inspectionOnly);
-  if (Buffer.byteLength(join(lima, 'engine', 'ha.sock')) > 100) throw new Error('Execution state path exceeds the local socket limit');
+  if (Buffer.byteLength(join(lima, 'engine', 'ssh.sock.1234567890123456')) >= 104) throw new Error('Execution state path exceeds the local socket limit');
   if (!existsSync(marker) && !inspectionOnly) persist(marker, { version: 1, nonce: randomUUID(), configuration: hash(workerVMConfiguration), image: null });
   const ownership = privateJSON(marker);
   record(ownership, ['version', 'nonce', 'configuration', 'image']);

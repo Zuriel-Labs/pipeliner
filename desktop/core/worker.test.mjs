@@ -105,6 +105,22 @@ test('provisioning refusal preserves bounded native evidence without executing g
   } finally { fs.rmSync(root, { recursive: true }); assert.equal(fs.existsSync(root), false); }
 });
 
+test('worker path respects the longest native socket boundary in bytes before provisioning', { skip: process.platform !== 'darwin' || process.arch !== 'arm64' }, () => {
+  const root = fs.realpathSync(fs.mkdtempSync(join(tmpdir(), 'pipeliner-54-worker-path-'))), commands = [];
+  try {
+    const api = workerFixture(root, args => { commands.push(args); return ''; });
+    const suffix = '/lima/engine/ssh.sock.1234567890123456', space = 103 - Buffer.byteLength('/owned/' + suffix);
+    const accepted = '/owned/' + 'a'.repeat(space), rejected = accepted + 'a';
+    assert.equal(Buffer.byteLength(accepted + suffix), 103); assert.equal(Buffer.byteLength(rejected + suffix), 104);
+    assert.equal(typeof api.openWorkerEnvironment(accepted).prepare, 'function');
+    assert.throws(() => api.openWorkerEnvironment(rejected), /Execution state path exceeds the local socket limit/);
+    const multibyte = '/owned/' + 'é'.repeat(Math.floor((space + 1) / 2)) + 'b'.repeat((space + 1) % 2);
+    assert.equal(Buffer.byteLength(multibyte + suffix), 104);
+    assert.throws(() => api.openWorkerEnvironment(multibyte), /Execution state path exceeds the local socket limit/);
+    assert.deepEqual(commands, []);
+  } finally { fs.rmSync(root, { recursive: true }); assert.equal(fs.existsSync(root), false); }
+});
+
 test('maintenance inspects the whole private runtime and refuses changed custody or unsettled cancellation', { skip: process.platform !== 'darwin' || process.arch !== 'arm64' }, async () => {
   const manifest = { name: `pipeliner-${'a'.repeat(32)}`, nonce: 'a'.repeat(32), runId: 'run-one', repository: 'R_fixture', epoch: 1,
     workspace: `/home/fixture/.local/share/pipeliner/workspaces/${'a'.repeat(32)}`, image: `sha256:${'c'.repeat(64)}` };

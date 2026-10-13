@@ -15,7 +15,7 @@ const storage = testStorage.qualificationContext(), repository = resolve(dirname
 const source = await sourceCandidate(repository), candidate = { source: source.sourceCommit, tree: source.gitTree };
 for (const file of ['scripts/desktop-tool-worker.mjs', 'desktop/core/worker.mjs', 'desktop/development/worker-tools.mjs', 'desktop/authority/Dockerfile']) await committedInput(repository, source, file);
 mkdirSync(storage.paths.outputs, { mode: 0o700, recursive: true }); testStorage.validateOwnedDataDirectory(storage, storage.paths.outputs);
-const directory = realpathSync(mkdtempSync(join(storage.paths.tmp, 'w-'))), runId = randomUUID().replaceAll('-', '');
+const directory = realpathSync(mkdtempSync(join(storage.paths.tmp, 'w'))), runId = randomUUID().replaceAll('-', '');
 testStorage.validateOwnedDataDirectory(storage, directory); const rootIdentity = lstatSync(directory);
 const ownership = { issue: 54, owner: 'brimdor', directory, runId, candidate }, marker = join(directory, 'ownership.json');
 writeFileSync(marker, JSON.stringify(ownership), { mode: 0o600, flag: 'wx' }); const owned = lstatSync(marker);

@@ -17,7 +17,7 @@ test('bundle data support metadata binds the exact build and preserves existing 
     assert.equal(typeof metadata.dataCompatibilityForBuild, 'function');
     const support = metadata.dataCompatibilityForBuild(identity, '0.160.0');
     assert(Object.isFrozen(support)); assert(Object.isFrozen(support.formats.databases));
-    assert.deepEqual(support.build, identity); assert.equal(support.formats.databases.maintenance, 2);
+    assert.deepEqual(support.build, identity); assert.equal(support.formats.databases.maintenance, 3);
     assert.equal(support.formats.databases.uninstall, 1);
     assert.equal(support.formats.databases.policy, 3); assert.equal(support.formats.policyDocument, 4);
     assert.equal(support.codexCLI, '0.160.0'); assert.equal(metadata.dataCompatibilityName, 'pipeliner-data.json');
@@ -25,6 +25,8 @@ test('bundle data support metadata binds the exact build and preserves existing 
     const next = metadata.dataCompatibilityForBuild(nextBuild, support.codexCLI);
     assert.equal(typeof metadata.requireSameDataSupport, 'function');
     assert.equal(metadata.requireSameDataSupport(support, next), undefined);
+    const previousMaintenance = structuredClone(next); previousMaintenance.formats.databases.maintenance = 2;
+    assert.throws(() => metadata.requireSameDataSupport(support, previousMaintenance), /package-data-support-incompatible/);
     const missingRemovalSupport = structuredClone(next); delete missingRemovalSupport.formats.databases.uninstall;
     assert.throws(() => metadata.requireSameDataSupport(support, missingRemovalSupport));
     const changed = structuredClone(next); changed.formats.databases.workspaces++;

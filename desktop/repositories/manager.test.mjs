@@ -11,7 +11,10 @@ import { definitions, planFields, verifyFields } from './github.mjs';
 const completeFields = () => definitions.map((definition, i) => ({ id: 'F' + i, name: definition.role,
   options: definition.choices.map((name, n) => ({ id: 'O' + i + n, name, color: 'BLUE', description: '' })) }));
 async function fixture() {
-  const base = existsSync(join(homedir(), 'Documents')) ? join(homedir(), 'Documents') : tmpdir();
+  const temporary = realpathSync(tmpdir());
+  // macOS's default private temp tree is deliberately ineligible for workspace setup.
+  const base = /^\/private(?:\/|$)/.test(temporary) && existsSync(join(homedir(), 'Documents'))
+    ? join(homedir(), 'Documents') : temporary;
   const root = realpathSync(mkdtempSync(join(base, 'pipeliner-36-test-'))), vault = await openTestVault(root), store = openWorkspaceStore(root, { vault });
   const owner = { id: 'ORG1', numericId: 2, login: 'fixture', type: 'Organization' };
   const repo = { id: 'R1', numericId: 3, owner, name: 'repo', slug: 'fixture/repo', displayName: 'fixture/repo', private: true, permissions: { pull: true } };

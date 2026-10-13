@@ -602,6 +602,6 @@ async function githubPrompt({ connection, verificationUri, userCode, signal, can
 }
 app.on('second-instance', (_event, argv) => { if (!argv.includes('--background-helper')) void attachWindow?.(); });
 app.on('activate', () => { if (!backgroundLaunch || window) void attachWindow?.(); });
-app.on('window-all-closed', () => { if (!qualifying && !closing && !backgroundHost?.status().effective) void requestShutdown?.(); });
+app.on('window-all-closed', () => { if (verifiedClose) app.quit(); else if (!qualifying && !closing && !backgroundHost?.status().effective) void requestShutdown?.(); });
 app.on('before-quit', event => { if (!verifiedClose && requestShutdown) { event.preventDefault(); void requestShutdown(); } });
 process.on('SIGTERM', () => app.quit());

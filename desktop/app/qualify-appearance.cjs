@@ -6,7 +6,10 @@ const { nativeTheme } = require('electron');
 
 // Development-only. Actual renderer, native theme, keyboard and protected policy; no Human/VoiceOver acceptance claim.
 exports.run = async ({ window, directory, appearance, channel, policy, development, js, wait, check, measurements }) => {
-  const chat = text => js(`document.getElementById('chat-nav').click();document.getElementById('prompt').value=${JSON.stringify(text)};document.getElementById('composer').requestSubmit()`);
+  const chat = async text => {
+    await wait(() => js("!document.getElementById('prompt').disabled && !document.getElementById('chat-send').disabled"));
+    return js(`document.getElementById('chat-nav').click();document.getElementById('prompt').value=${JSON.stringify(text)};document.getElementById('composer').requestSubmit()`);
+  };
   const show = () => js("document.getElementById('settings-nav').click();document.getElementById('settings-appearance').click()");
   async function change(text) { await chat(text); await wait(() => Boolean(appearance.status().preview)); await chat('Apply this appearance change'); await wait(() => !appearance.status().preview); }
   await check('appearance-registered-frame-host-scope-and-defaults', async () => {

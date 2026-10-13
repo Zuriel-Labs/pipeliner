@@ -107,6 +107,7 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
     const begin = performance.now(), desktopCheck = checks.length + 1;
     console.log(JSON.stringify({ desktopCheck, stage: 'started' }));
     try {
+      app.focus({ steal: true }); window.focus(); await wait(() => window.isFocused());
       await fn(); checks.push({ name, passed: true, milliseconds: Math.round(performance.now() - begin) });
       console.log(JSON.stringify({ desktopCheck, stage: 'passed' }));
     } catch (error) {

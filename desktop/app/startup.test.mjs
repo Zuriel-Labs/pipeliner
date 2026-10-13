@@ -8,6 +8,19 @@ import { runInNewContext } from 'node:vm';
 
 const require = createRequire(import.meta.url), source = readFileSync(new URL('./main.cjs',import.meta.url),'utf8');
 const testStorage = require('../test-storage.cjs');
+test('last-window close completes verified quit without bypassing pending cleanup or background operation', () => {
+  const handler = source.match(/^app.on\('window-all-closed', (.+)\);$/m)?.[1];
+  assert(handler);
+  for (const mode of ['verified', 'pending', 'foreground', 'background', 'qualification']) {
+    const events = [], context = {
+      verifiedClose: mode === 'verified', closing: ['verified', 'pending'].includes(mode), qualifying: mode === 'qualification',
+      app: { quit() { events.push('quit'); } }, requestShutdown() { events.push('cleanup'); },
+      backgroundHost: { status() { if (context.verifiedClose) throw Error('Closed policy must not be read'); return { effective: mode === 'background' }; } },
+    };
+    runInNewContext(`(${handler})();`, context, { timeout: 1000 });
+    assert.deepEqual(events, mode === 'verified' ? ['quit'] : mode === 'foreground' ? ['cleanup'] : [], mode);
+  }
+});
 test('host update replacement retains one exact restart target and refuses foreign or unowned completion', async () => {
   const start = source.indexOf('  const makeUpdates = initialRevision =>'), end = source.indexOf('  updates = makeUpdates(1);', start);
   for (const mode of ['normal', 'source', 'background', 'closing', 'lease', 'token', 'phase', 'foreign-path', 'foreign-build']) {

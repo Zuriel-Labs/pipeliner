@@ -26,6 +26,7 @@ test('Guest reports reject stale, foreign, linked, oversized and hostile evidenc
     await assert.rejects(readGuestReport(root,'agent-result.json',nonce)); lease?.prepareHardlink(); await unlink(path); await link(neighbor,path); lease?.hardlinkReady();
     await assert.rejects(readGuestReport(root,'agent-result.json',nonce),/file-unqualified/);
     lease?.closing(); await unlink(path); lease?.release(); lease = undefined; await writeFile(path,JSON.stringify(value),{mode:0o644});
+    await chmod(path,0o644); // Exercise the unsafe mode even when the caller uses a restrictive umask.
     await assert.rejects(readGuestReport(root,'agent-result.json',nonce),/file-unqualified/);
     if (process.env.TEST_ARTIFACT_RUN) returnedLease = testStorage.negativeFixtureLease({ kind:'bridge-returned', root }, import.meta.url);
     await symlink(neighbor,join(root,'returned-link.json')); returnedLease?.aliasReady();

@@ -110,7 +110,7 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
       await fn(); checks.push({ name, passed: true, milliseconds: Math.round(performance.now() - begin) });
       console.log(JSON.stringify({ desktopCheck, stage: 'passed' }));
     } catch (error) {
-      checks.push({ name, passed: false, category: error.code === 'ERR_ASSERTION' ? 'assertion' : 'native-failure', failureLine: error.qualificationLine || Number(/qualify(?:-[a-z]+)?\.cjs:(\d+)/.exec(error.stack)?.[1]) || null, ...(name.startsWith('privacy-') ? { publicMessage: privacy.status().message, publicCode: privacy.status().errorCode, privacyBusy: privacy.status().busy, previewKind: privacy.status().preview?.kind ?? null } : {}), ...(name.startsWith('pipeline-') ? { control: pipelineControl, publicError: pipelines.status().error } : {}), ...(name.startsWith('tools-') ? { publicError: tools.status().error, publicMessage: tools.status().message, toolBusy: tools.status().busy, catalogPresent: Boolean(tools.status().catalog), pipelineError: pipelines.status().error } : {}) });
+      checks.push({ name, passed: false, category: error.code === 'ERR_ASSERTION' ? 'assertion' : error.name === 'AbortError' ? 'cancelled' : 'native-failure', failureLine: error.qualificationLine || Number(/qualify(?:-[a-z]+)?\.cjs:(\d+)/.exec(error.stack)?.[1]) || null, ...(name.startsWith('privacy-') ? { publicMessage: privacy.status().message, publicCode: privacy.status().errorCode, privacyBusy: privacy.status().busy, previewKind: privacy.status().preview?.kind ?? null } : {}), ...(name.startsWith('pipeline-') ? { control: pipelineControl, publicError: pipelines.status().error } : {}), ...(name.startsWith('tools-') ? { publicError: tools.status().error, publicMessage: tools.status().message, toolBusy: tools.status().busy, catalogPresent: Boolean(tools.status().catalog), pipelineError: pipelines.status().error } : {}) });
       console.log(JSON.stringify({ desktopCheck, stage: 'failed' })); throw error;
     }
   }
@@ -856,7 +856,7 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
         }
       } finally {
         for (const [id, rows] of saved) { const fixture = issueFixtures.get(id); fixture.issues.splice(0, fixture.issues.length, ...rows); }
-        workspaces.dispatch({ operation: 'select', workspace: original }); await issues.dispatch({ operation: 'refresh' }); await issues.idle();
+        if (!window.isDestroyed()) { workspaces.dispatch({ operation: 'select', workspace: original }); await issues.dispatch({ operation: 'refresh' }); await issues.idle(); }
       }
       } finally {
         for (const { folder, info } of seeded) {

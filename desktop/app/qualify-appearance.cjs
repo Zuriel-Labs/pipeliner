@@ -144,8 +144,15 @@ exports.run = async ({ window, directory, appearance, channel, policy, developme
   await check('appearance-200-percent-reflow-labels-touch-targets-and-motion', async () => {
     await change('Set text size to 200%'); await change('Use dark mode'); await show();
     assert.equal(await js("Array.from(document.querySelectorAll('#appearance-settings input,#appearance-settings select')).every(input=>Array.from(document.querySelectorAll('#appearance-settings label')).some(label=>label.htmlFor===input.id))"), true);
+    const navigation = () => js("(()=>{const nav=document.querySelector('.app-nav');return {viewport:innerWidth,scrollWidth:nav.scrollWidth,clientWidth:nav.clientWidth,labels:[...nav.querySelectorAll('button')].map(button=>({text:button.textContent,height:button.getBoundingClientRect().height}))}})()");
+    const desktopNavigation = await navigation(); measurements.push({ interaction: 'appearance-desktop-navigation-200-percent', ...desktopNavigation });
+    assert(desktopNavigation.scrollWidth <= desktopNavigation.clientWidth);
+    assert(desktopNavigation.labels.every(label => label.height >= 44));
     window.setSize(420, 760); await new Promise(resolve => setTimeout(resolve, 100));
     assert.equal(await js('document.documentElement.scrollWidth<=innerWidth'), true);
+    const narrowNavigation = await navigation(); measurements.push({ interaction: 'appearance-narrow-navigation-200-percent', ...narrowNavigation });
+    assert(narrowNavigation.scrollWidth <= narrowNavigation.clientWidth);
+    assert(narrowNavigation.labels.every(label => label.height >= 44));
     assert.equal(await js("Array.from(document.querySelectorAll('#appearance-settings button')).every(button=>button.getBoundingClientRect().height>=44)"), true);
     await js("document.getElementById('appearance-form').scrollIntoView({block:'start'});window.scrollBy(0,-(document.querySelector('.app-head').getBoundingClientRect().height+document.querySelector('.app-nav').getBoundingClientRect().height+10))");
     writeFileSync(join(directory, 'qa-capture.png'), (await window.webContents.capturePage()).toPNG(), { flag: 'wx', mode: 0o600 });

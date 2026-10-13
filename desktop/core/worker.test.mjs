@@ -44,7 +44,7 @@ test('cold worker inspection refuses missing state without creating files or exp
     try {
       const api = workerFixture(root, (args, options) => {
         assert.deepEqual(args, ['list', '--json']);
-        commands.push({ args, home: options.env.HOME, lima: options.env.LIMA_HOME });
+        commands.push({ args, home: options.env.HOME, lima: options.env.LIMA_HOME, temporary: options.env.TMPDIR });
         return '{"name":"engine","status":"Stopped"}\n';
       });
       if (mode !== 'missing-root') {
@@ -73,7 +73,7 @@ test('cold worker inspection refuses missing state without creating files or exp
         assert.equal(commands.length, 0);
         assert.equal((await inspection.inventory()).status, 'Stopped');
         const result = await inspection.inspect({ name: 'pipeliner-' + 'a'.repeat(32) }); assert.equal(result.state, 'vm-stopped');
-        assert.deepEqual(commands, [{ args: ['list', '--json'], home: '/owned/home', lima: '/owned/lima' }, { args: ['list', '--json'], home: '/owned/home', lima: '/owned/lima' }]);
+        assert.deepEqual(commands, [{ args: ['list', '--json'], home: '/owned/home', lima: '/owned/lima', temporary: '/owned' }, { args: ['list', '--json'], home: '/owned/home', lima: '/owned/lima', temporary: '/owned' }]);
       } else {
         const directory = mode === 'missing-root' ? '/owned/missing' : '/owned';
         assert.throws(() => api.openWorkerEnvironment(directory, { inspectionOnly: true })); assert.equal(commands.length, 0);

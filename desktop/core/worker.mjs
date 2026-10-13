@@ -91,7 +91,7 @@ export function openWorkerEnvironment(directory, { inspectionOnly = false } = {}
   const configStat = lstatSync(config);
   if (!configStat.isFile() || configStat.isSymbolicLink() || configStat.nlink !== 1 || configStat.uid !== process.getuid() || (configStat.mode & 0o777) !== 0o600
     || readFileSync(config, 'utf8') !== workerVMConfiguration) throw new Error('Execution VM configuration changed');
-  const env = { PATH: '/opt/homebrew/bin:/usr/bin:/bin', HOME: home, LIMA_HOME: lima, LC_ALL: 'C', LIMA_INSTANCE: 'engine' };
+  const env = { PATH: '/opt/homebrew/bin:/usr/bin:/bin', HOME: home, LIMA_HOME: lima, TMPDIR: directory, LC_ALL: 'C', LIMA_INSTANCE: 'engine' };
   const children = new Set();
   async function command(args, { input, timeout = 30000, maximum = 65536, signal, checkpoint } = {}) {
     const check = () => {

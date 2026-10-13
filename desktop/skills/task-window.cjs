@@ -29,11 +29,15 @@ app.whenReady().then(async () => {
     await check('isolated-generated-output-no-host-or-network', async () => { assert.equal(await js("typeof require + ':' + typeof process + ':' + typeof window.pipeliner"), 'undefined:undefined:undefined'); assert.equal(await js("fetch('https://example.com').then(()=>false,()=>true)"), true); });
     await check('real-three-card-filter-and-live-count', async () => {
       assert.equal(await js("document.querySelectorAll('[data-issue-status]').length"), 3);
+      const allCount = await js("document.getElementById('queue-count').textContent");
       await js("document.getElementById('filter-ready').click()");
       assert.equal(await js("Array.from(document.querySelectorAll('[data-issue-status]')).filter(node=>node.getBoundingClientRect().height>0).length"), 1);
       assert.match(await js("document.getElementById('queue-count').textContent"), /1/);
+      assert.notEqual(await js("document.getElementById('queue-count').textContent"), allCount);
       await js("document.getElementById('filter-blocked').click()"); assert.equal(await js("Array.from(document.querySelectorAll('[data-issue-status]')).filter(node=>node.getBoundingClientRect().height>0).length"), 1);
+      assert.notEqual(await js("document.getElementById('queue-count').textContent"), allCount);
       await js("document.getElementById('filter-all').click()"); assert.match(await js("document.getElementById('queue-count').textContent"), /3/);
+      assert.equal(await js("document.getElementById('queue-count').textContent"), allCount);
     });
     await check('real-keyboard-draft-addition-and-escaped-title', async () => {
       assert.equal(await js("document.querySelector('label[for=\"new-title\"]')!==null"), true);

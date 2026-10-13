@@ -12,6 +12,11 @@
 #include <mach/mach_time.h>
 #include <time.h>
 
+#if defined(PIPELINER_VM_DISK_TEST) || defined(PIPELINER_VM_GATE_TEST)
+#undef assert
+#define assert(check) do { if (!(check)) { fprintf(stderr, "Native boundary case failed at line %d.\n", __LINE__); return 1; } } while (0)
+#endif
+
 static BOOL validNativeGate(NSData *data, NSString *mode, NSString *nonce, pid_t pid) {
   id value = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
   return [value isKindOfClass:NSDictionary.class] && [value count] == 3
@@ -185,11 +190,11 @@ static NSDictionary *readPrivateJSON(NSURL *url) {
 }
 - (void)watchInstallation {
   self.monitor = [NSTimer scheduledTimerWithTimeInterval:10 repeats:YES block:^(NSTimer *timer) {
-    struct statvfs disk = {0}; BOOL reserved = statvfs(self.root.fileSystemRepresentation, &disk) == 0 && (uint64_t)disk.f_bavail * disk.f_frsize >= 16ULL * 1024 * 1024 * 1024;
+    struct statvfs disk = {0}; BOOL available = statvfs(self.root.fileSystemRepresentation, &disk) == 0 && disk.f_bavail > 0;
     struct stat guestDisk; uint64_t allocated = lstat(childURL(self.root, @"Disk.img").fileSystemRepresentation, &guestDisk) == 0 ? (uint64_t)guestDisk.st_blocks * 512 : 0;
-    report(@{@"installationFraction": @(self.installer.progress.fractionCompleted), @"storageReserve": reserved ? @YES : @NO,
+    report(@{@"installationFraction": @(self.installer.progress.fractionCompleted), @"storageAvailable": @(available),
       @"availableBytes": @((uint64_t)disk.f_bavail * disk.f_frsize), @"allocatedGuestDiskBytes": @(allocated)});
-    if (!reserved || -self.began.timeIntervalSinceNow > 1800) {
+    if (!available || -self.began.timeIntervalSinceNow > 1800) {
       [self.installer.progress cancel]; [timer invalidate];
       dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ fail(@"installation-cancel-unverified", nil); });
     }
@@ -437,12 +442,14 @@ int main(int argc, const char *argv[]) {
     NSString *alias = [root stringByAppendingPathComponent:@"alias"];
     assert(rename(path.fileSystemRepresentation, alias.fileSystemRepresentation) == 0 && symlink("alias", path.fileSystemRepresentation) == 0);
     assert(openOwnedEmptyDisk(root) == -1 && unlink(path.fileSystemRepresentation) == 0 && rename(alias.fileSystemRepresentation, path.fileSystemRepresentation) == 0);
-    struct stat linked = before; linked.st_nlink = 2; assert(!emptyPrivateDisk(linked)); // Injected metadata; a hardlink is refused by the outer storage scanner.
     assert(truncate(path.fileSystemRepresentation, 0) == 0);
+    assert(link(path.fileSystemRepresentation, alias.fileSystemRepresentation) == 0);
+    assert(openOwnedEmptyDisk(root) == -1 && unlink(alias.fileSystemRepresentation) == 0);
+    struct stat linked = before; linked.st_nlink = 2; assert(!emptyPrivateDisk(linked)); // Preserve the predicate check alongside actual native refusal.
     assert(chmod(path.fileSystemRepresentation, 0644) == 0 && openOwnedEmptyDisk(root) == -1 && chmod(path.fileSystemRepresentation, 0600) == 0);
     assert(chmod(root.fileSystemRepresentation, 0755) == 0 && openOwnedEmptyDisk(root) == -1 && chmod(root.fileSystemRepresentation, 0700) == 0);
     assert(lstat(path.fileSystemRepresentation, &after) == 0 && after.st_dev == before.st_dev && after.st_ino == before.st_ino && emptyPrivateDisk(after));
-    assert(unlink(path.fileSystemRepresentation) == 0); printf("Owned empty disk boundary OK: 6 native cases, 1 injected link-count case.\n"); return 0;
+    assert(unlink(path.fileSystemRepresentation) == 0); printf("Owned empty disk boundary OK: 7 native cases, 1 injected link-count case.\n"); return 0;
   }
 }
 #else

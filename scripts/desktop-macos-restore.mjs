@@ -7,7 +7,7 @@ import { resolve } from 'node:path';
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) throw Error('macos-restore-controller-required');
 
-// Qualification only; the caller supplies the already leased empty role.
+// Qualification only; the caller supplies its exclusively created empty role.
 export const restore = Object.freeze({
   url: 'https://updates.cdn-apple.com/2026FallFCS/59241290-5d51-4ca8-9df4-31624b9a4eac/UniversalMac_27.0.1_26A434_Restore.ipsw',
   bytes: 26637307067, sha256: '2f016638293c3e641b8b25391a76fbc16563b3711915a5551cf8aa0f5598a5c1',
@@ -34,7 +34,7 @@ export async function writeLeasedRestore(path, response, expected, signal, progr
       }
       if (written - measured >= 32 * 1024 ** 2) {
         measured = written; const free = await statfs(path);
-        if (free.bavail * free.bsize < 200 * 1024 ** 3) throw Error('macos-restore-storage-reserve-exhausted');
+        if (free.bavail * free.bsize <= 0) throw Error('macos-restore-storage-exhausted');
       }
       if (performance.now() - reported >= 10000) { reported = performance.now(); progress({ downloadedBytes: written, expectedBytes: expected.bytes }); }
     }

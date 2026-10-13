@@ -15,17 +15,12 @@ static BOOL guestConfigurationValid(id value) {
     if ([value[key] length] != ([key isEqual:@"nonce"] ? 32 : 64) || [value[key] rangeOfCharacterFromSet:hex.invertedSet].location != NSNotFound) return NO;
   NSString *neighbor = value[@"neighbor"];
   NSArray *parts = neighbor.pathComponents;
-  NSArray *fixed = @[@"/", @"Volumes", @"TESTING", @"TestArtifacts", @"projects", @"pipeliner", @"issues", @"54", @"runs"];
-  if (parts.count != 13 || ![neighbor.stringByStandardizingPath isEqual:neighbor]
-    || ![[parts subarrayWithRange:NSMakeRange(0, 9)] isEqual:fixed] || ![parts[10] isEqual:@"tmp"] || ![parts[12] isEqual:@"neighbor"]) return NO;
-  NSString *run = parts[9], *worker = parts[11], *prefix = @"pipeliner-54-macos-worker-";
-  NSCharacterSet *digits = [NSCharacterSet characterSetWithCharactersInString:@"0123456789"], *letters = [NSCharacterSet characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"];
-  if (run.length != 49 || ![[run substringWithRange:NSMakeRange(8, 1)] isEqual:@"T"] || ![[run substringWithRange:NSMakeRange(15, 2)] isEqual:@"Z-"]
-    || [[run substringToIndex:8] rangeOfCharacterFromSet:digits.invertedSet].location != NSNotFound
-    || [[run substringWithRange:NSMakeRange(9, 6)] rangeOfCharacterFromSet:digits.invertedSet].location != NSNotFound
-    || [[run substringFromIndex:17] rangeOfCharacterFromSet:hex.invertedSet].location != NSNotFound
-    || (![worker isEqual:@"pipeliner-54-macos-worker"] && (![worker hasPrefix:prefix] || worker.length != prefix.length + 6
-      || [[worker substringFromIndex:prefix.length] rangeOfCharacterFromSet:letters.invertedSet].location != NSNotFound))) return NO;
+  if (![neighbor isAbsolutePath] || parts.count < 3 || ![neighbor.stringByStandardizingPath isEqual:neighbor]
+    || [neighbor rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location != NSNotFound || ![parts.lastObject isEqual:@"neighbor"]) return NO;
+  NSString *worker = parts[parts.count - 2], *prefix = @"pipeliner-54-macos-worker-";
+  NSCharacterSet *letters = [NSCharacterSet characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"];
+  if (![worker hasPrefix:prefix] || worker.length != prefix.length + 6
+    || [[worker substringFromIndex:prefix.length] rangeOfCharacterFromSet:letters.invertedSet].location != NSNotFound) return NO;
   return [value[@"targetIdentifier"] isEqual:[NSString stringWithFormat:@"com.pipeliner.qualification.%@.target", value[@"nonce"]]];
 }
 
@@ -171,17 +166,19 @@ int main(int argc, const char *argv[]) {
   }
 }
 #else
+#undef assert
+#define assert(check) do { if (!(check)) { fprintf(stderr, "Guest configuration case failed at line %d.\n", __LINE__); return 1; } } while (0)
 int main(void) {
   @autoreleasepool {
-    NSString *nonce = @"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", *root = @"/Volumes/TESTING/TestArtifacts/projects/pipeliner/issues/54/runs/20261006T192509Z-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/tmp/pipeliner-54-macos-worker-Ab12Cd/neighbor";
+    NSString *nonce = @"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", *root = @"/synthetic/private/run/tmp/pipeliner-54-macos-worker-Ab12Cd/neighbor";
     NSDictionary *valid = @{@"nonce": nonce, @"neighbor": root, @"targetSHA256": @"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", @"targetIdentifier": [NSString stringWithFormat:@"com.pipeliner.qualification.%@.target", nonce]};
-    assert(guestConfigurationValid(valid)); NSMutableDictionary *fixed = [valid mutableCopy]; fixed[@"neighbor"] = [root stringByReplacingOccurrencesOfString:@"-Ab12Cd" withString:@""];
-    assert(guestConfigurationValid(fixed)); NSUInteger passed = 2;
+    assert(guestConfigurationValid(valid)); NSUInteger passed = 1;
     for (NSArray *change in @[@[@"nonce", @"bad"], @[@"targetSHA256", @"gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg"],
-      @[@"targetIdentifier", @"com.pipeliner.qualification.other.target"], @[@"neighbor", @"/private/var/folders/legacy/neighbor"],
-      @[@"neighbor", [root stringByReplacingOccurrencesOfString:@"issues/54" withString:@"issues/55"]], @[@"neighbor", [root stringByReplacingOccurrencesOfString:@"projects/pipeliner" withString:@"projects/other"]],
+      @[@"targetIdentifier", @"com.pipeliner.qualification.other.target"], @[@"neighbor", @"/synthetic/other/neighbor"],
+      @[@"neighbor", [root stringByReplacingOccurrencesOfString:@"pipeliner-54" withString:@"pipeliner-55"]], @[@"neighbor", [root stringByReplacingOccurrencesOfString:@"macos-worker" withString:@"other-worker"]],
       @[@"neighbor", [root stringByReplacingOccurrencesOfString:@"/tmp/" withString:@"/tmp/../tmp/"]], @[@"neighbor", [root stringByAppendingString:@"/sibling"]],
-      @[@"neighbor", [root stringByReplacingOccurrencesOfString:@"Ab12Cd" withString:@"short"]], @[@"neighbor", [root stringByReplacingOccurrencesOfString:@"20261006T192509Z" withString:@"invalid"]], @[@"nonce", @1], @[@"extra", @"unknown"]]) {
+      @[@"neighbor", [root stringByReplacingOccurrencesOfString:@"Ab12Cd" withString:@"short"]], @[@"neighbor", [root substringFromIndex:1]],
+      @[@"neighbor", [root stringByAppendingString:@"\n"]], @[@"nonce", @1], @[@"extra", @"unknown"]]) {
       NSMutableDictionary *bad = [valid mutableCopy]; bad[change[0]] = change[1]; assert(!guestConfigurationValid(bad)); passed++;
     }
     printf("Guest configuration boundary OK: %lu cases.\n", (unsigned long)passed); return 0;

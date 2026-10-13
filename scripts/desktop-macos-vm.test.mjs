@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, chmodSync, writeFileSync, readFileSync, realpathSync, symlinkSync, rmSync, existsSync, lstatSync } from 'node:fs';
+import { mkdtempSync, chmodSync, writeFileSync, readFileSync, realpathSync, symlinkSync, rmSync, existsSync, lstatSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -46,10 +46,20 @@ test('Ungated legacy VM setup preserves its supplied root and neighboring data',
   } finally { rmSync(root,{recursive:true,force:true}); rmSync(neighbor,{recursive:true}); }
 });
 
-test('VM producer refuses a missing managed context before creating resources', { skip: process.platform !== 'darwin' || process.arch !== 'arm64' }, () => {
-  const environment = {...process.env}; for (const name of Object.keys(environment)) if (name.startsWith('TEST_ARTIFACT_')) delete environment[name];
-  const result = spawnSync(process.execPath,[fileURLToPath(new URL('./desktop-macos-vm.mjs',import.meta.url)),'--bridge'],{env:environment,encoding:'utf8',timeout:10000});
-  assert.equal(result.status,1); assert.match(result.stderr,/macos-vm-context-required/); assert.equal(result.stdout,'');
+test('VM producer refuses missing, relative, public and aliased temporary roots before creating resources', { skip: process.platform !== 'darwin' || process.arch !== 'arm64' }, () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(),'pipeliner-54-vm-context-'))), alias = root + '-alias';
+  chmodSync(root,0o755); writeFileSync(join(root,'preserve.txt'),'synthetic caller data',{mode:0o600});
+  try {
+    symlinkSync(root,alias);
+    for (const temporary of [undefined,'relative-temp',root,alias]) {
+      const environment = {...process.env};
+      if (temporary === undefined) delete environment.TMPDIR; else environment.TMPDIR = temporary;
+      const result = spawnSync(process.execPath,[fileURLToPath(new URL('./desktop-macos-vm.mjs',import.meta.url)),'--bridge'],{env:environment,encoding:'utf8',timeout:10000});
+      assert.equal(result.status,1); assert.match(result.stderr,/macos-vm-context-required/); assert.equal(result.stdout,'');
+      assert.deepEqual(readdirSync(root),['preserve.txt']); assert.equal(readFileSync(join(root,'preserve.txt'),'utf8'),'synthetic caller data');
+      if (temporary === root) chmodSync(root,0o700); // The alias case must fail despite a private destination.
+    }
+  } finally { rmSync(alias,{force:true}); rmSync(root,{recursive:true}); }
 });
 
 test('Leased restore keeps the original inode and refuses oversize, wrong hash and nonempty roles', { skip: process.platform !== 'darwin' || process.arch !== 'arm64' }, async () => {

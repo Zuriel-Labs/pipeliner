@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { mkdtemp, realpath, mkdir, readFile, writeFile, readdir, lstat, rm, rename, access, statfs } from 'node:fs/promises';
+import { mkdtemp, realpath, mkdir, readFile, writeFile, readdir, lstat, rm, rename, access } from 'node:fs/promises';
 import { join, dirname, resolve, isAbsolute } from 'node:path';
 import { tmpdir, homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -22,8 +22,8 @@ if(process.platform!=='darwin'||process.arch!=='arm64'||Number(process.versions.
 const candidate=await sourceCandidate(source);
 const temporary=await realpath(await mkdtemp(join(tmpdir(),'pipeliner-54-review-build-')));
 const stage=join(temporary,'stage'), distribution=join(temporary,'distribution'), app=join(distribution,'Pipeliner.app');
-const env={PATH:dirname(process.execPath)+':/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',HOME:temporary,TMPDIR:temporary,LANG:'en_US.UTF-8'};
-const signingEnv={...env,HOME:homedir()};
+const env={PATH:dirname(process.execPath)+':/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',HOME:homedir(),TMPDIR:temporary,
+  CLANG_MODULE_CACHE_PATH:join(temporary,'clang-cache'),LANG:'en_US.UTF-8'};
 const command=(file,args,options={})=>exec(file,args,{env,timeout:60000,maxBuffer:1024*1024,...options});
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
 async function fileHash(path){const value=createHash('sha256');for await(const bytes of createReadStream(path))value.update(bytes);return value.digest('hex');}
@@ -31,15 +31,14 @@ const inputs=[];
 async function stageSource(file){const bytes=await committedInput(source,candidate,file);const target=join(stage,file);await mkdir(dirname(target),{recursive:true,mode:0o700});await writeFile(target,bytes,{flag:'wx',mode:0o600});inputs.push({path:file,sha256:hash(bytes)});return target;}
 async function download(name,url,bytes,digest){
   const path=join(temporary,name);
-  await command('/usr/bin/curl',['--fail','--silent','--show-error','--location','--proto','=https','--proto-redir','=https','--connect-timeout','30','--max-time','600','--max-filesize',String(bytes),'--output',path,url],{timeout:610000,maxBuffer:8192});
+  await command('/usr/bin/curl',['--disable','--fail','--silent','--show-error','--location','--proto','=https','--proto-redir','=https','--connect-timeout','30','--max-time','600','--max-filesize',String(bytes),'--output',path,url],{timeout:610000,maxBuffer:8192});
   if((await lstat(path)).size!==bytes||await fileHash(path)!==digest)throw new Error('package-download-unverified');return path;
 }
 const electron={version:'44.4.5',bytes:130418529,sha256:'a212eee63ba2f45fd83bd28f77a3e3313a336ad17a4c25adf617942eef5e0e2c',url:'https://github.com/electron/electron/releases/download/v44.4.5/electron-v44.4.5-darwin-arm64.zip'};
 const codex={version:'0.160.0',bytes:95893648,sha256:'07c3c7ca376a8f791115342f53138dda37e97cfa29b8125d0652d93784894b5d',binarySha256:'112fae7a5a1223e673c8a1791d32338f37df8b527ff1159bb8adac6c4dbf1b4b',url:'https://github.com/openai/codex/releases/download/rust-v0.160.0/codex-aarch64-apple-darwin.tar.gz'};
 let retained=false;
 try {
-  const capacity=await statfs(temporary);if(capacity.bavail*capacity.bsize<4*1024**3)throw new Error('package-capacity-unavailable');
-  const identities=(await command('/usr/bin/security',['find-identity','-v','-p','codesigning'],{env:signingEnv})).stdout;
+  const identities=(await command('/usr/bin/security',['find-identity','-v','-p','codesigning'])).stdout;
   const available=[...identities.matchAll(/\d+\) ([A-F0-9]{40}) "Apple Development:[^"]+"/g)];
   if(available.length!==1)throw new Error('package-local-signing-identity-unavailable');
   const signingIdentity=available[0][1];
@@ -128,7 +127,7 @@ try {
   // Keep hardened runtime and library validation; distribution still requires Developer ID/notarization.
   const entitlements=join(temporary,'electron-entitlements.plist');
   await writeFile(entitlements,'<?xml version="1.0"?><plist version="1.0"><dict><key>com.apple.security.cs.allow-jit</key><true/></dict></plist>');
-  const sign=async(path,jit=false)=>command('/usr/bin/codesign',['--force','--sign',signingIdentity,'--options','runtime','--timestamp=none',...(jit?['--entitlements',entitlements]:[]),path],{env:signingEnv});
+  const sign=async(path,jit=false)=>command('/usr/bin/codesign',['--force','--sign',signingIdentity,'--options','runtime','--timestamp=none',...(jit?['--entitlements',entitlements]:[]),path]);
   const frameworkRoot=join(contents,'Frameworks');
   async function nativeBinaries(directory){
     for(const name of await readdir(directory)){const path=join(directory,name),info=await lstat(path);if(info.isSymbolicLink())continue;
@@ -151,7 +150,7 @@ try {
   await command('/usr/bin/hdiutil',['verify',dmg],{timeout:180000});
   const report={kind:'local-mac-review',...candidate,files:undefined,buildRoot:temporary,app,dmg,sourceInputs:inputs,nativeInputs,electron,codex,buildIdentity:{resource:buildIdentityName,sha256:hash(identityBytes),identity},dataSupport:{resource:dataCompatibilityName,sha256:hash(dataSupportBytes),declaration:dataSupport},archive:{sha256:await fileHash(archive),headerSha256},fuses,dmgSha256:await fileHash(dmg),signing:'Apple-Development-local-only',pending:['Developer ID and notarization','actual packaged native QA','Human PM acceptance','Windows/Linux'],retained:{owner:'Issue #54',trigger:'replace candidate or finish PM testing'},versions:{node:process.versions.node,os:(await command('/usr/bin/sw_vers',['-productVersion'])).stdout.trim(),architecture:process.arch}};
   await writeFile(join(temporary,'build.json'),JSON.stringify(report,null,2)+'\n',{flag:'wx',mode:0o600});
-  for(const path of [stage,nativeRoot,runtime,electronZip,codexTar,license,entitlements,userConfig,globalConfig,join(temporary,'npm-cache'),join(temporary,'node-compile-cache')])await rm(path,{recursive:true,force:true});
+  for(const path of [stage,nativeRoot,runtime,electronZip,codexTar,license,entitlements,userConfig,globalConfig,join(temporary,'npm-cache'),join(temporary,'node-compile-cache'),join(temporary,'clang-cache')])await rm(path,{recursive:true,force:true});
   retained=true;console.log(JSON.stringify({built:true,sourceCommit:candidate.sourceCommit,gitTree:candidate.gitTree,app,dmg,dmgSha256:report.dmgSha256,buildRecord:join(temporary,'build.json'),signing:report.signing,pending:report.pending}));
 } finally {
   if(!retained){await rm(temporary,{recursive:true,force:true});await access(temporary).then(()=>{throw new Error('package-cleanup-failed');},e=>{if(e.code!=='ENOENT')throw e;});console.log(JSON.stringify({cleanup:'owned-failed-build-removed',verified:true}));}

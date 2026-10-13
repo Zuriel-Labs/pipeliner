@@ -1,13 +1,15 @@
 'use strict';
 // Generated task output runs in a temporary sandbox with no host bridge or network.
 const { app, BrowserWindow, session } = require('electron');
-const { readFileSync, writeFileSync, lstatSync, realpathSync } = require('node:fs');
-const { join, resolve } = require('node:path');
+const { writeFileSync } = require('node:fs');
+const { join } = require('node:path');
 const { pathToFileURL } = require('node:url');
 const assert = require('node:assert/strict');
+const testStorage = require('../test-storage.cjs');
 const root = process.argv.find(value => value.startsWith('--task-root='))?.slice(12);
-if (!root || realpathSync(root) !== resolve(root) || lstatSync(root).uid !== process.getuid() || (lstatSync(root).mode & 0o777) !== 0o700) throw new Error('task-root-invalid');
-app.setPath('userData', join(root, 'renderer')); app.setPath('crashDumps', join(root, 'crashes'));
+const storage = testStorage.qualificationContext();
+testStorage.qualificationEnvironment(storage);
+testStorage.configureOwnedPaths(app, storage, root);
 app.whenReady().then(async () => {
   const file = join(root, 'index.html'), url = pathToFileURL(file).href, started = performance.now(), checks = [];
   session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false)); session.defaultSession.setPermissionCheckHandler(() => false);
@@ -44,7 +46,10 @@ app.whenReady().then(async () => {
     await check('real-narrow-zoom-and-semantic-controls', async () => {
       assert.equal(await js("Array.from(document.querySelectorAll('button,input')).every(node=>node.getBoundingClientRect().height>=44)"), true);
       assert.equal(await js("document.getElementById('queue-count').getAttribute('aria-live')==='polite'||document.getElementById('queue-count').getAttribute('role')==='status'"), true);
-      window.setSize(420, 760); for (const zoom of [1, 2]) { window.webContents.setZoomFactor(zoom); await new Promise(resolve => setTimeout(resolve, 100)); assert.equal(await js('document.documentElement.scrollWidth<=innerWidth'), true); }
+      window.setSize(420, 760); for (const zoom of [1, 2]) {
+        window.webContents.setZoomFactor(zoom); await new Promise(resolve => setTimeout(resolve, 100)); assert.equal(await js('document.documentElement.scrollWidth<=innerWidth'), true);
+        writeFileSync(join(root, zoom === 1 ? 'task-capture-narrow.png' : 'task-capture-zoom.png'), (await window.webContents.capturePage()).toPNG(), { flag: 'wx', mode: 0o600 });
+      }
       window.webContents.setZoomFactor(1); window.setSize(1180, 840);
     });
     passed = true;

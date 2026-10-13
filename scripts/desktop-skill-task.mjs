@@ -22,6 +22,7 @@ if (process.argv.slice(2).some(arg => arg !== '--retain-owned-capture' && arg !=
 if (process.platform !== 'darwin' || process.arch !== 'arm64') throw new Error('host-unqualified');
 const exec = promisify(execFile), root = resolve(dirname(fileURLToPath(import.meta.url)), '..'), source = await sourceCandidate(root);
 for (const file of ['scripts/desktop-skill-task.mjs', 'desktop/skills/task-window.cjs', 'desktop/skills/task-output.mjs', 'desktop/skills/store.mjs', 'desktop/development/starter.mjs', 'desktop/ollama/client.mjs', 'desktop/test-storage.cjs']) await committedInput(root, source, file);
+const electron = join(root, 'desktop/prototype/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron'); await access(electron);
 await mkdir(storage.paths.outputs, { recursive: true, mode: 0o700 }); testStorage.validateOwnedDataDirectory(storage, storage.paths.outputs);
 const chromiumEnvironment = testStorage.qualificationEnvironment(storage, { ...process.env, MAC_CHROMIUM_TMPDIR: storage.paths.tmp });
 const temporary = await realpath(await mkdtemp(join(tmpdir(), 't'))); await chmod(temporary, 0o700);
@@ -58,7 +59,6 @@ try {
     : await turn('implementation-after-direction', brief + '\nChosen direction: ' + JSON.stringify(design) + '\nReturn only the complete self-contained HTML document with inline CSS and JS. No external URLs, imports, storage, frames or network. Exact DOM contract: filter buttons id filter-all, filter-ready, filter-blocked; cards have data-issue-status="ready"/"blocked"/"complete"; count id queue-count with role=status or aria-live=polite. Input id new-title with label for=new-title; submit button id add-issue. Clicking filters hides unmatched cards and updates count; adding creates exactly one Ready card, textContent title, resets input. No HTML insertion for a title. Prevent normal form navigation. Use CSS border-box/reflow. Visible labels, 44px minimum controls, focus outline.', 8192);
   record(implementation, ['html']); implementation.html = taskHTML(implementation.html);
   await writeFile(join(temporary, 'index.html'), implementation.html, { flag: 'wx', mode: 0o600 });
-  const electron = join(root, 'desktop/prototype/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron'); await access(electron);
   child = spawn(electron, [join(root, 'desktop/skills/task-window.cjs'), '--task-root=' + temporary], { env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: homedir(), LANG: 'en_US.UTF-8', ...chromiumEnvironment }, stdio: ['ignore', 'ignore', 'ignore'] });
   timer = setTimeout(() => child.kill('SIGTERM'), 30000); const nativeCode = await new Promise((resolveCode, reject) => { child.once('error', reject); child.once('close', value => resolveCode(value ?? 1)); }); clearTimeout(timer);
   const native = JSON.parse(await readFile(join(temporary, 'task-result.json'), 'utf8'));
@@ -77,7 +77,7 @@ try {
   }
   output = { passed: nativeCode === 0 && native.passed && !review.findings.some(item => ['high', 'critical'].includes(item.severity)), owningIssue: 54,
     qualification: 'Real bounded starter-skill UI task; authorized installed Cloud relay, separate from the product direct-key route', candidate: { source: source.sourceCommit, tree: source.gitTree }, brief, manifest: captured,
-    sourceHash: hash(implementation.html), ...(previous ? { repairedFrom: { sourceHash: previous.sourceHash, native: previous.native, findings: previous.review.findings }, priorTurns: [...(previous.priorTurns ?? []), ...previous.turns] } : {}), provider: { model: model.name, remoteModel: model.remote_model, digest: model.digest, serviceVersion: service.version },
+    sourceHash: hash(implementation.html), ...(previous ? { repairedFrom: { sourceHash: previous.sourceHash ?? null, native: previous.native ?? null, findings: previous.review?.findings ?? null, failure: previous.failure ?? null, outputTransformation: previous.outputTransformation ?? null }, priorTurns: [...(previous.priorTurns ?? []), ...previous.turns] } : {}), provider: { model: model.name, remoteModel: model.remote_model, digest: model.digest, serviceVersion: service.version },
     turns, native, review, host: { os: (await promisify(execFile)('/usr/bin/sw_vers', ['-productVersion'])).stdout.trim(), architecture: process.arch, node: process.version },
     milliseconds: performance.now() - started, retained: process.argv.includes('--retain-owned-capture') ? outputRoot : null };
   code = output.passed ? 0 : 1;

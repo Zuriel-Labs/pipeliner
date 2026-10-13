@@ -232,7 +232,7 @@ export function openWorkerEnvironment(directory, { inspectionOnly = false } = {}
       let instance = await inventory();
       if (!instance || instance.status === 'Stopped') {
         const result = await command(['start', '--tty=false', '--name=engine', ...(instance ? ['engine'] : [config])], { timeout: 600000, maximum: 1048576 });
-        if (result.code !== 0) throw new Error('Restricted execution VM provisioning failed');
+        if (result.code !== 0) throw new Error('Restricted execution VM provisioning failed', { cause: { command: ['start'], code: result.code, diagnostic: result.diagnostic } });
       }
       const verified = await verifyEnvironment();
       if (!ownership.image) {

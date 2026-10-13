@@ -86,7 +86,10 @@ try {
     measurements.push({ repository: value.repository, milliseconds: value.milliseconds, guestNode: value.node });
   }
   results.push({ name: 'five-concurrent-bounded-native-commands', passed: true, preparationMilliseconds, milliseconds: performance.now() - batchStarted, readyTogether: ready.size, measurements, image: prepared.image, disk: prepared.disk, configuration: prepared.configuration, scope: 'Worker mechanism; synthetic repositories, not full Development runs.' });
-} catch (failure) { error = { stage, message: failure.message, code: failure.cause?.code ?? null }; }
+} catch (failure) {
+  error = { stage, message: failure.message, code: failure.cause?.code ?? null };
+  if (typeof failure.cause?.diagnostic === 'string') writeFileSync(join(storage.paths.outputs, `native-diagnostic-${runId}.log`), failure.cause.diagnostic, { flag: 'wx', mode: 0o600 });
+}
 finally {
   signals.abort(); await Promise.all(jobs); stage = 'verifying-owned-cleanup'; console.log(JSON.stringify({ issue: 54, stage }));
   try {

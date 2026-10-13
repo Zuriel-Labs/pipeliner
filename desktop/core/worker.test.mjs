@@ -85,6 +85,26 @@ test('cold worker inspection refuses missing state without creating files or exp
   }
 });
 
+test('provisioning refusal preserves bounded native evidence without executing guest work', { skip: process.platform !== 'darwin' || process.arch !== 'arm64' }, async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(join(tmpdir(), 'pipeliner-54-worker-refusal-'))), commands = [];
+  try {
+    const api = workerFixture(root, (args, options, child) => {
+      commands.push(args);
+      if (args[0] === 'list') return '';
+      child.stderr.emit('data', Buffer.from('Synthetic provisioning refusal.'));
+      child.finish('', 41);
+    });
+    const environment = api.openWorkerEnvironment('/owned');
+    await assert.rejects(environment.prepare(), failure => {
+      assert.equal(failure.message, 'Restricted execution VM provisioning failed');
+      assert.equal(failure.cause?.code, 41); assert.equal(failure.cause?.diagnostic, 'Synthetic provisioning refusal.');
+      assert.deepEqual([...failure.cause.command], ['start']); return true;
+    });
+    assert.deepEqual(commands, [['list', '--json'], ['start', '--tty=false', '--name=engine', '/owned/worker.yaml']]);
+    assert.equal(JSON.parse(fs.readFileSync(join(root, 'environment.json'), 'utf8')).image, null);
+  } finally { fs.rmSync(root, { recursive: true }); assert.equal(fs.existsSync(root), false); }
+});
+
 test('maintenance inspects the whole private runtime and refuses changed custody or unsettled cancellation', { skip: process.platform !== 'darwin' || process.arch !== 'arm64' }, async () => {
   const manifest = { name: `pipeliner-${'a'.repeat(32)}`, nonce: 'a'.repeat(32), runId: 'run-one', repository: 'R_fixture', epoch: 1,
     workspace: `/home/fixture/.local/share/pipeliner/workspaces/${'a'.repeat(32)}`, image: `sha256:${'c'.repeat(64)}` };

@@ -6,7 +6,29 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 
-const { classifyStartup, validateContext, validateOwnedDataDirectory, configureOwnedPaths, nativeTestEnvironment, chromiumLauncher } = createRequire(import.meta.url)('./test-storage.cjs');
+const { classifyStartup, validateContext, validateOwnedDataDirectory, configureOwnedPaths, nativeTestEnvironment, chromiumLauncher,
+  qualificationContext, qualificationEnvironment } = createRequire(import.meta.url)('./test-storage.cjs');
+
+test('Source qualification binds a private canonical temporary root and Chromium IPC before startup', () => {
+  const root = '/synthetic/private', uid = process.getuid();
+  let change = {}, realpath = root;
+  const io = { realpathSync: () => realpath,
+    lstatSync: () => ({ isDirectory: () => true, isSymbolicLink: () => false, uid, mode: 0o40700, ...change }) };
+  const environment = { TMPDIR: root, MAC_CHROMIUM_TMPDIR: root };
+  const context = qualificationContext(environment, io, uid);
+  assert.equal(context.paths.tmp, root); assert.equal(context.paths.recordings, root + '/recordings');
+  assert.deepEqual(qualificationEnvironment(context, environment, io, uid), environment);
+  for (const TMPDIR of [undefined, '', 'relative']) assert.throws(() => qualificationContext({ TMPDIR }, io, uid), /test-storage-run-required/);
+  for (change of [{ isDirectory: () => false }, { isSymbolicLink: () => true }, { uid: uid + 1 }, { mode: 0o40750 }])
+    assert.throws(() => qualificationContext(environment, io, uid), /test-storage-directory-unverified/);
+  change = {}; realpath = '/synthetic/elsewhere';
+  assert.throws(() => qualificationContext(environment, io, uid), /test-storage-directory-unverified/); realpath = root;
+  for (const MAC_CHROMIUM_TMPDIR of [undefined, root + '/foreign'])
+    assert.throws(() => qualificationEnvironment(context, { ...environment, MAC_CHROMIUM_TMPDIR }, io, uid), /test-storage-chromium-context/);
+  assert.throws(() => qualificationEnvironment({ paths: { tmp: '/synthetic/foreign' } }, environment, io, uid), /test-storage-chromium-context/);
+  realpath = '/' + 'long'.repeat(26);
+  assert.throws(() => qualificationEnvironment({ paths: { tmp: realpath } }, { TMPDIR: realpath, MAC_CHROMIUM_TMPDIR: realpath }, io, uid), /test-storage-chromium-context/);
+});
 const volume = '3F381C66-C7CC-4F8F-B3BE-E46151ACF674';
 test('Developer storage admission binds the active run, volume and every supplied path', () => {
   const run='/Volumes/TESTING/TestArtifacts/projects/pipeliner/issues/54/runs/synthetic';

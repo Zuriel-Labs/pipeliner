@@ -47,9 +47,10 @@ export async function initUpdates({ el, message, show }) {
     else card.append(el('p', 'Native rollback is unavailable in this installation. App files and saved data stay preserved.', 'availability'));
     card.append(button('Discard inspection', 'rollback-cancel', {}, 'update-rollback-cancel' + suffix)); return card;
   }
-  function render(snapshot) {
+  function render(snapshot, requestFocus = null) {
     if (state && snapshot.revision < state.revision) return;
-    const focused = document.activeElement?.id, prior = $('update-channel'), sourcePrior = $('update-source'),
+    const focused = document.activeElement === document.body ? requestFocus : document.activeElement?.id,
+      prior = $('update-channel'), sourcePrior = $('update-source'),
       draft = state && JSON.stringify(state.values) === JSON.stringify(snapshot.values) && prior ? prior.value : null,
       sourceDraft = state && state.sourceName === snapshot.sourceName && state.sourceConfigured === snapshot.sourceConfigured && sourcePrior ? sourcePrior.value : null;
     state = snapshot;
@@ -152,15 +153,16 @@ export async function initUpdates({ el, message, show }) {
     if (state.message && state.message !== lastMessage) { message(state.message); $('announcement').textContent = state.message; lastMessage = state.message; }
   }
   async function request(payload, text) {
+    const requestFocus = document.activeElement?.id;
     const operation = payload.operation === 'chat' ? updateCommand(payload.text)?.operation : payload.operation;
     if (!state || requests && !['stop', 'removal-cancel', 'rollback-cancel'].includes(operation)) return; requests++;
     if (text) message(text, true); if (text && updateCommand(text)?.operation === 'view') show();
     try {
-      const result = await window.pipeliner.updateRequest(payload.operation === 'status' ? payload : { ...payload, contextRevision: state.revision }); requests--; render(result.snapshot ?? result);
+      const result = await window.pipeliner.updateRequest(payload.operation === 'status' ? payload : { ...payload, contextRevision: state.revision }); requests--; render(result.snapshot ?? result, requestFocus);
       if (payload.operation === 'status' && state.recoveryRequired) $('announcement').textContent = 'Maintenance recovery refreshed. ' + (state.removal ? 'Recorded removal: ' + state.removal.phase.replaceAll('-', ' ') + '.'
         : state.maintenance ? 'Recorded state: ' + state.maintenance.phase.replaceAll('-', ' ') + '.' : 'Protected maintenance details are unavailable.');
     }
-    catch { requests--; render(await window.pipeliner.updateRequest({ operation: 'status' })); message(state.recoveryRequired
+    catch { requests--; render(await window.pipeliner.updateRequest({ operation: 'status' }), requestFocus); message(state.recoveryRequired
       ? 'Maintenance did not finish. Inspect recovery before resuming; completed effects are not undone.' : 'Update action could not finish. Inspect saved settings and create a fresh preview.'); }
     if (!$('chat-view').hidden) $('prompt').focus({ preventScroll: true });
   }

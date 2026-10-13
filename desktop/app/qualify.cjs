@@ -97,7 +97,11 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
   const started = performance.now(), checks = [], measurements = [];
   const permissionScope = process.argv.includes('--qualify-permissions'), deliveryScope = process.argv.includes('--qualify-delivery'), appearanceScope = process.argv.includes('--qualify-appearance'), privacyScope = process.argv.includes('--qualify-privacy'), toolsScope = process.argv.includes('--qualify-tools'), skillsScope = process.argv.includes('--qualify-skills'), backgroundScope = process.argv.includes('--qualify-background'), schedulingScope = process.argv.includes('--qualify-scheduling'), developmentScope = process.argv.includes('--qualify-development'), pipelineScope = process.argv.includes('--qualify-pipelines'), issueScope = permissionScope || deliveryScope || appearanceScope || privacyScope || toolsScope || skillsScope || backgroundScope || schedulingScope || developmentScope || pipelineScope || process.argv.includes('--qualify-issues');
   const js = code => window.webContents.executeJavaScript(code);
-  const wait = async predicate => { const until = Date.now() + 10000; while (!await predicate()) { if (Date.now() >= until) throw new Error('qualification-wait-timeout'); await new Promise(resolve => setTimeout(resolve, 50)); } };
+  const wait = async predicate => {
+    const until = Date.now() + 10000, failure = new Error('qualification-wait-timeout');
+    failure.qualificationLine = Number(/qualify-[a-z]+\.cjs:(\d+)/.exec(failure.stack)?.[1]) || null;
+    while (!await predicate()) { if (Date.now() >= until) throw failure; await new Promise(resolve => setTimeout(resolve, 50)); }
+  };
   let pipelineControl;
   async function check(name, fn) {
     const begin = performance.now(), desktopCheck = checks.length + 1;
@@ -106,7 +110,7 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
       await fn(); checks.push({ name, passed: true, milliseconds: Math.round(performance.now() - begin) });
       console.log(JSON.stringify({ desktopCheck, stage: 'passed' }));
     } catch (error) {
-      checks.push({ name, passed: false, category: error.code === 'ERR_ASSERTION' ? 'assertion' : 'native-failure', failureLine: Number(/qualify(?:-[a-z]+)?\.cjs:(\d+)/.exec(error.stack)?.[1]) || null, ...(name.startsWith('privacy-') ? { publicMessage: privacy.status().message, publicCode: privacy.status().errorCode, privacyBusy: privacy.status().busy, previewKind: privacy.status().preview?.kind ?? null } : {}), ...(name.startsWith('pipeline-') ? { control: pipelineControl, publicError: pipelines.status().error } : {}), ...(name.startsWith('tools-') ? { publicError: tools.status().error, publicMessage: tools.status().message, toolBusy: tools.status().busy, catalogPresent: Boolean(tools.status().catalog), pipelineError: pipelines.status().error } : {}) });
+      checks.push({ name, passed: false, category: error.code === 'ERR_ASSERTION' ? 'assertion' : 'native-failure', failureLine: error.qualificationLine || Number(/qualify(?:-[a-z]+)?\.cjs:(\d+)/.exec(error.stack)?.[1]) || null, ...(name.startsWith('privacy-') ? { publicMessage: privacy.status().message, publicCode: privacy.status().errorCode, privacyBusy: privacy.status().busy, previewKind: privacy.status().preview?.kind ?? null } : {}), ...(name.startsWith('pipeline-') ? { control: pipelineControl, publicError: pipelines.status().error } : {}), ...(name.startsWith('tools-') ? { publicError: tools.status().error, publicMessage: tools.status().message, toolBusy: tools.status().busy, catalogPresent: Boolean(tools.status().catalog), pipelineError: pipelines.status().error } : {}) });
       console.log(JSON.stringify({ desktopCheck, stage: 'failed' })); throw error;
     }
   }

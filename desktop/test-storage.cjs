@@ -144,6 +144,26 @@ function configureOwnedPaths(app, storage, directory, io = fs, uid = process.get
   return Object.freeze(destinations);
 }
 
+// Source qualification uses a caller-owned root; host storage policy stays with its caller.
+function qualificationContext(environment = process.env, io = fs, uid = process.getuid()) {
+  const root = environment.TMPDIR;
+  if (typeof root !== 'string' || !path.isAbsolute(root)) throw Error('test-storage-run-required');
+  const temporary = path.resolve(root), info = io.lstatSync(temporary);
+  if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== uid || info.mode & 0o077
+    || io.realpathSync(temporary) !== temporary) throw Error('test-storage-directory-unverified');
+  return Object.freeze({ paths: Object.freeze({ tmp: temporary,
+    logs: path.join(temporary, 'logs'), recordings: path.join(temporary, 'recordings'), outputs: path.join(temporary, 'outputs') }) });
+}
+
+function qualificationEnvironment(storage, environment = process.env, io = fs, uid = process.getuid()) {
+  const checked = qualificationContext(environment, io, uid), temporary = checked.paths.tmp;
+  if (storage.paths?.tmp !== temporary || environment.MAC_CHROMIUM_TMPDIR !== temporary
+    || Buffer.byteLength(path.join(temporary, 'scoped_dirXXXXXX', 'SingletonSocket')) > 103) {
+    throw Error('test-storage-chromium-context');
+  }
+  return Object.freeze({ TMPDIR: temporary, MAC_CHROMIUM_TMPDIR: temporary });
+}
+
 
 function negativeFixtureLease(declaration, sourceURL) {
   const run = process.env.TEST_ARTIFACT_RUN;
@@ -174,4 +194,4 @@ function negativeFixtureLease(declaration, sourceURL) {
 }
 
 module.exports = { negativeFixtureLease, classifyStartup, validateContext, validateOwnedDataDirectory, configureOwnedPaths,
-  nativeTestEnvironment, nativeTestLauncher, chromiumLauncher };
+  nativeTestEnvironment, nativeTestLauncher, chromiumLauncher, qualificationContext, qualificationEnvironment };

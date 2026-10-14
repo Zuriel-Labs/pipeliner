@@ -10,6 +10,24 @@ import { createConnectionControlChannel } from '../core/control.mjs';
 
 const wrap = { available: async () => true, encrypt: async x => Buffer.from(x), decrypt: async x => ({ result: x.toString() }) };
 const connected = { credential: { accessToken: 'ghu_syntheticFixtureOnly123' }, view: { account: 'fixture', models: [{ id: 'synthetic-model', name: 'Synthetic model' }], health: 'connected', lastVerified: 1, capability: null } };
+
+test('provider bridge qualification controls visible Dev eligibility and acquisition', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-54-bridge-eligibility-'))), vault = await openVault(root, wrap);
+  const value = { credential: null, view: { health: 'connected', selectedModel: 'test-model', models: [{ id: 'test-model' }],
+    capability: { model: 'test-model', testedAt: 1, stream: true, toolLoop: true, resumed: true } } };
+  let qualified = false, calls = 0;
+  const adapter = { qualified: (record, model) => qualified && record.view.selectedModel === model, noPrompts: true,
+    refresh: async ({ value }) => value, turn: async () => { calls++; return { content: 'synthetic result' }; } };
+  const manager = createConnectionManager({ vault, adapters: { codex: adapter } });
+  try {
+    vault.save('codex', vault.begin('codex'), value);
+    assert.equal(manager.status().connections.find(c => c.id === 'codex').executionAvailable, false); assert.equal(manager.developers().length, 0);
+    await assert.rejects(manager.acquireProvider('codex', 'test-model'), /capability-unverified/); assert.equal(calls, 0);
+    qualified = true; assert.equal(manager.developers().length, 1);
+    const lease = await manager.acquireProvider('codex', 'test-model'); lease.check(); lease.close();
+    qualified = false; assert.equal(manager.developers().length, 0);
+  } finally { await manager.close(); vault.close(); rmSync(root, { recursive: true }); }
+});
 test('disconnect fences late sign-in and refresh; revocation blocks further tests', async () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-connections-test-'))); chmodSync(root, 0o700);
   const vault = await openVault(root, wrap); let finish, requests = 0;

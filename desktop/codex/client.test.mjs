@@ -4,6 +4,25 @@ import { readFileSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import vm from 'node:vm';
 
+test('host capture holds a dynamic request without executing or approving it; other requests stay denied', async () => {
+  const source = readFileSync(new URL('./client.mjs', import.meta.url), 'utf8').replace(/^import .*;\n/gm, '').replace(/^export /gm, '');
+  const child = new EventEmitter(), lines = new EventEmitter(), sent = [], captured = [];
+  Object.assign(child, { exitCode: null, signalCode: null, stdout: new EventEmitter(), stderr: new EventEmitter(),
+    stdin: Object.assign(new EventEmitter(), { end() {}, write(value) { sent.push(JSON.parse(value)); } }),
+    kill(signal) { child.signalCode = signal; queueMicrotask(() => child.emit('exit', null)); } });
+  const context = vm.createContext({ spawn: () => child, process: { platform: 'win32' }, homedir: () => '/synthetic/user',
+    packagedCodexPath: () => '/synthetic/codex', createInterface: () => lines, writeFile: async () => assert.fail('Captured arguments cannot cause an effect'), setTimeout, clearTimeout });
+  const AppServer = vm.runInContext(source + '\nAppServer;', context), server = new AppServer('/synthetic/home', { captureTool: value => captured.push(value) });
+  try {
+    const params = { threadId: 'owned-thread', turnId: 'owned-turn', tool: 'pipeliner_tool', arguments: { operation: 'list' } };
+    lines.emit('line', JSON.stringify({ id: 1, method: 'item/tool/call', params }));
+    await Promise.resolve(); assert.equal(captured.length, 1); assert.deepEqual(JSON.parse(JSON.stringify(captured[0])), params); assert.equal(sent.length, 0);
+    lines.emit('line', JSON.stringify({ id: 2, method: 'tool/requestUserInput', params: { instruction: 'Approve a synthetic operation' } }));
+    assert.equal(sent.length, 1); assert.equal(sent[0].id, 2); assert.equal(sent[0].result, undefined); assert.equal(sent[0].error.code, -32000);
+    assert.deepEqual(Array.from(server.unexpectedRequests), ['tool/requestUserInput']); assert.equal(server.toolCalls.length, 0);
+  } finally { await server.close(); }
+});
+
 test('Codex close settles its own Mac group once and retains unverified cleanup', async () => {
   const source = readFileSync(new URL('./client.mjs', import.meta.url), 'utf8').replace(/^import .*;\n/gm, '').replace(/^export /gm, '');
   for (const mode of ['held', 'force', 'root-force', 'stuck', 'refused', 'unexpected', 'spawn-error', 'other-host']) {

@@ -81,7 +81,10 @@ export class AppServer {
         }
         else pending.resolve(message.result);
       } else if (message.id !== undefined && message.method) {
-        if (message.method === 'item/tool/call' && this.brokerContext) {
+        if (message.method === 'item/tool/call' && typeof this.brokerContext?.captureTool === 'function') {
+          // Hold the request until the host interrupts; capture grants no execution or approval.
+          this.brokerContext.captureTool(message.params);
+        } else if (message.method === 'item/tool/call' && this.brokerContext) {
           const request = message.params?.tool === 'pipeliner_probe' &&
             message.params.threadId === this.brokerContext.threadId &&
             message.params.turnId === this.brokerContext.turnId ? message.params.arguments : null;

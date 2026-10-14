@@ -126,6 +126,82 @@ test('Codex model catalog checks every page and rejects repeated cursors', async
   await assert.rejects(codexModels({ request: async () => ({ data: [{ model: 'same' }], nextCursor: 'next' }) }), /catalog-invalid/);
 });
 
+test('Codex Development captures bound requests, settles interruption and cleanup, and refuses drift or interaction', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-54-codex-turn-')));
+  const args = { runId: 'synthetic-run', epoch: 1, operation: 'list', payload: {} };
+  const tools = [{ type: 'function', function: { name: 'pipeliner_tool', description: 'Synthetic broker', parameters: { type: 'object' } } }];
+  const value = { credential: null, account: 'synthetic-account', view: { account: 'synthetic-account', health: 'connected', models: [{ id: 'test-model' }], selectedModel: 'test-model',
+    capability: { bridge: 'codex-development-v1', model: 'test-model', testedAt: 123, stream: true, toolLoop: true, resumed: true, noPrompts: true } } };
+  let mode = 'valid', closes = 0, started = 0, interrupted = false, controller = new AbortController(), release, entered;
+  const adapter = codexAdapter({ directory: root, openBrowser: async () => assert.fail('No login'), async initialize(home, capture) {
+    assert.equal(home, join(root, 'codex'));
+    const events = [], server = { events, unexpectedRequests: [],
+      async request(method, params) {
+        if (method === 'account/read') return { account: { type: 'chatgpt', email: mode === 'account-changed' ? 'other-account' : 'synthetic-account' } };
+        if (method === 'model/list') return { data: mode === 'removed' ? [] : [{ model: 'test-model' }], nextCursor: null };
+        if (method === 'thread/start') {
+          started++; assert.deepEqual(params.environments, []); assert.equal(params.sandbox, 'read-only'); assert.equal(params.approvalPolicy, 'never');
+          assert.equal(params.allowProviderModelFallback, false); assert.equal(params.ephemeral, true);
+          assert.equal(params.dynamicTools[0].name, 'pipeliner_tool'); assert.deepEqual(params.dynamicTools[0].inputSchema, tools[0].function.parameters);
+          return { thread: { id: 'owned-thread' }, model: mode === 'substituted' ? 'other-model' : 'test-model' };
+        }
+        if (method === 'turn/start') {
+          assert.equal(params.threadId, 'owned-thread'); assert.deepEqual(params.environments, []);
+          assert.match(params.input[0].text, /Synthetic user/);
+          events.push({ method: 'item/agentMessage/delta', params: { threadId: 'foreign-thread', turnId: 'owned-turn', delta: 'foreign content' } },
+            { method: 'item/agentMessage/delta', params: { threadId: 'owned-thread', turnId: 'owned-turn', delta: 'synthetic content' } });
+          const request = { callId: 'synthetic-call', threadId: mode === 'foreign-thread' ? 'foreign-thread' : 'owned-thread', turnId: mode === 'foreign-turn' ? 'foreign-turn' : 'owned-turn',
+            namespace: mode === 'namespace' ? 'foreign' : null, tool: mode === 'foreign-tool' ? 'shell' : 'pipeliner_tool',
+            arguments: mode === 'oversized' ? { payload: 'x'.repeat(1048576) } : args };
+          if (mode !== 'narrative') capture.captureTool(request);
+          if (mode === 'duplicate') capture.captureTool(request);
+          if (mode === 'overflow') for (let i = 0; i < 8; i++) capture.captureTool({ ...request, callId: 'synthetic-extra-' + i });
+          if (mode === 'interaction') server.unexpectedRequests.push('tool/requestUserInput');
+          return { turn: { id: 'owned-turn' } };
+        }
+        assert.equal(method, 'turn/interrupt'); assert.deepEqual(params, { threadId: 'owned-thread', turnId: 'owned-turn' });
+        if (mode === 'interrupt-failed') throw Error('synthetic interruption failure');
+        interrupted = true; return {};
+      },
+      async waitForNotification(method, predicate, _timeout, signal) {
+        assert.equal(method, 'turn/completed'); await new Promise(setImmediate); signal.throwIfAborted();
+        assert.equal(interrupted, mode !== 'narrative');
+        if (mode === 'cancelled') controller.abort();
+        const terminal = { threadId: 'owned-thread', turn: { id: 'owned-turn', status: mode === 'failed' ? 'failed' : mode === 'narrative' ? 'completed' : 'interrupted' } };
+        assert.equal(predicate(terminal), true); return terminal;
+      },
+      async close() { closes++; if (mode === 'cancel-on-close') controller.abort(); if (mode === 'interaction-on-close') server.unexpectedRequests.push('tool/requestUserInput');
+        if (mode === 'plaintext-on-close') writeFileSync(join(home, 'auth.json'), 'Synthetic unexpected plaintext', { mode: 0o600 });
+        if (mode === 'cleanup-failed') throw Error('provider-cleanup-blocked'); if (mode === 'held') { entered(); await new Promise(resolve => { release = resolve; }); } },
+    }; return server;
+  } });
+  let pending;
+  try {
+    assert.equal(typeof adapter.turn, 'function'); assert.equal(typeof adapter.qualified, 'function');
+    const input = () => ({ value, model: 'test-model', messages: [{ role: 'user', content: 'Synthetic user' }], tools, maxOutput: 128, signal: controller.signal });
+    const result = await adapter.turn(input()); assert.equal(interrupted, true); assert.equal(closes, 1);
+    assert.deepEqual(result.tool_calls, [{ function: { name: 'pipeliner_tool', arguments: args } }]); assert.equal(result.content, 'synthetic content'); assert.equal(result.thinking, '');
+    assert.deepEqual(result.usage, { input: null, output: null }); assert.equal(existsSync(join(root, 'codex', 'auth.json')), false);
+    mode = 'narrative'; interrupted = false;
+    const narrative = await adapter.turn(input()); assert.equal(narrative.content, 'synthetic content'); assert.deepEqual(narrative.tool_calls, []); assert.equal(interrupted, false);
+    mode = 'valid';
+    const refreshed = await adapter.refresh({ value, signal: controller.signal }); assert.deepEqual(refreshed.view.capability, value.view.capability);
+    assert.equal(refreshed.view.selectedModel, 'test-model'); assert.equal(adapter.qualified(refreshed, 'test-model'), true);
+    const old = structuredClone(value); delete old.view.capability.bridge; assert.equal(adapter.qualified(old, 'test-model'), false);
+    const before = started; await assert.rejects(adapter.turn({ ...input(), value: old }), /capability-unverified/); assert.equal(started, before);
+    for (mode of ['account-changed', 'substituted', 'foreign-thread', 'foreign-turn', 'foreign-tool', 'namespace', 'oversized', 'duplicate', 'overflow', 'interaction', 'failed', 'cancelled', 'cleanup-failed', 'cancel-on-close', 'plaintext-on-close', 'interrupt-failed', 'interaction-on-close']) {
+      controller = new AbortController(); interrupted = false; const closedBefore = closes;
+      await assert.rejects(adapter.turn(input())); assert.equal(closes, closedBefore + 1);
+      rmSync(join(root, 'codex', 'auth.json'), { force: true });
+      await new Promise(setImmediate);
+    }
+    mode = 'removed'; controller = new AbortController();
+    const removed = await adapter.refresh({ value, signal: controller.signal }); assert.equal(removed.view.capability, null); assert.equal(removed.view.selectedModel, null);
+    mode = 'held'; interrupted = false; let done = false; const closing = new Promise(resolve => { entered = resolve; });
+    pending = adapter.turn(input()).then(result => { done = true; return result; }); await closing; assert.equal(done, false); release(); await pending; assert.equal(done, true);
+  } finally { controller.abort(); release?.(); await Promise.allSettled(pending ? [pending] : []); rmSync(root, { recursive: true }); assert.equal(existsSync(root), false); }
+});
+
 test('Cloud turns keep historical qualification, enforce model/output bounds and use the direct Cloud route', async () => {
   let calls = 0, mode = 'ok';
   const send = async (url, request) => {

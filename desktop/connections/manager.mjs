@@ -26,7 +26,7 @@ export function createConnectionManager({ vault, adapters, onChange = () => {}, 
         repositories: view.repositories ?? [], projects: view.projects ?? [], installations: view.installations ?? [], owners: view.owners ?? [],
         resourceCompleteness: view.resourceCompleteness ?? null, permissions: view.permissions ?? [],
         models: view.models ?? [], selectedModel: view.selectedModel ?? null, capability: view.capability ?? null,
-        executionAvailable: Boolean(adapters[id]?.turn && !task && view.health === 'connected' && view.selectedModel && view.capability?.model === view.selectedModel
+        executionAvailable: Boolean(adapters[id]?.turn && (!adapters[id].qualified || adapters[id].qualified(value, view.selectedModel)) && !task && view.health === 'connected' && view.selectedModel && view.capability?.model === view.selectedModel
           && ['stream', 'toolLoop', 'resumed'].every(key => view.capability[key] === true)),
         credentialStatus: view.credentialStatus ?? (value ? 'Protected locally; rechecked before use' : 'No local credential'),
         error, busy: Boolean(task), cleanupPending: Boolean(value?.cleanupPending),
@@ -115,7 +115,7 @@ export function createConnectionManager({ vault, adapters, onChange = () => {}, 
       requireReady(id);
       if (!['ollama', 'codex'].includes(id) || typeof adapters[id].turn !== 'function') throw new Error('capability-unverified');
       const lease = await acquire(id, signal), view = lease.value.view;
-      if (view.health !== 'connected' || view.selectedModel !== model || view.capability?.model !== model || !view.models?.some(item => item.id === model)
+      if (adapters[id].qualified && !adapters[id].qualified(lease.value, model) || view.health !== 'connected' || view.selectedModel !== model || view.capability?.model !== model || !view.models?.some(item => item.id === model)
         || !Number.isSafeInteger(view.capability.testedAt) || view.capability.testedAt < 1 || !['stream', 'toolLoop', 'resumed'].every(key => view.capability[key] === true)) {
         lease.close(); throw new Error('capability-unverified');
       }

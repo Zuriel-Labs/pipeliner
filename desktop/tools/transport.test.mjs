@@ -108,9 +108,24 @@ test('HTTP redirect/auth/encoding/size failures never disclose credentials or fo
   }, async ({ client, calls }) => { await assert.rejects(client.call(tool, { title: 'Queue' }), error => error.message.startsWith('MCP ') && !error.message.includes(token)); assert.equal(calls.length, 1); });
 });
 
-test('deadline/cancel/revocation terminate owned sockets; stale or forged local handles send nothing', async () => {
-  await fixture(({ response }) => { response.writeHead(200, { 'content-type': 'text/event-stream' }); response.write(': waiting\n\n'); }, async ({ client, calls, local }) => {
-    await assert.rejects(client.call(tool, { title: 'Queue' }, { timeoutMs: 300 }), error => /MCP deadline/.test(error.message) && error.dispatched);
+test('deadline before qualification sends no HTTP request', async t => {
+  await fixture(({ response, body }) => json(response, body, { resultType: 'complete', content: [] }), async ({ client, calls }) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      const rejected = assert.rejects(client.call(tool, { title: 'Queue' }, { timeoutMs: 300 }), error => /MCP deadline/.test(error.message) && error.dispatched === false);
+      t.mock.timers.tick(300); await rejected; assert.equal(calls.length, 0);
+    } finally { t.mock.timers.reset(); }
+  });
+});
+
+test('deadline/cancel/revocation terminate owned sockets; stale or forged local handles send nothing', { timeout: 30000 }, async t => {
+  const arrived = Promise.withResolvers();
+  await fixture(({ response, index }) => { response.writeHead(200, { 'content-type': 'text/event-stream' }); response.write(': waiting\n\n'); if (index === 1) arrived.resolve(); }, async ({ client, calls, local }) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      const rejected = assert.rejects(client.call(tool, { title: 'Queue' }, { timeoutMs: 300 }), error => /MCP deadline/.test(error.message) && error.dispatched === true);
+      await arrived.promise; t.mock.timers.tick(300); await rejected; assert.equal(calls.length, 1);
+    } finally { t.mock.timers.reset(); }
     const controller = new AbortController(), work = client.call(tool, { title: 'Queue' }, { signal: controller.signal });
     while (calls.length < 2) await new Promise(resolve => setTimeout(resolve, 5)); controller.abort(); await assert.rejects(work, /MCP cancelled/);
     assert.throws(() => createMCPClient({ endpoint: local.endpoint, local: { ...local }, authorize() {} }), /MCP destination/);

@@ -36,6 +36,7 @@ async function download(name,url,bytes,digest){
 }
 const electron={version:'44.4.5',bytes:130418529,sha256:'a212eee63ba2f45fd83bd28f77a3e3313a336ad17a4c25adf617942eef5e0e2c',url:'https://github.com/electron/electron/releases/download/v44.4.5/electron-v44.4.5-darwin-arm64.zip'};
 const codex={version:'0.160.0',bytes:95893648,sha256:'07c3c7ca376a8f791115342f53138dda37e97cfa29b8125d0652d93784894b5d',binarySha256:'112fae7a5a1223e673c8a1791d32338f37df8b527ff1159bb8adac6c4dbf1b4b',url:'https://github.com/openai/codex/releases/download/rust-v0.160.0/codex-aarch64-apple-darwin.tar.gz'};
+const codexCodeModeHost={version:codex.version,bytes:23825926,sha256:'dc70fbc76e9dcae5ae3d5424808c8e7c2df5e0db4ac827ddd4fbe339015aad75',binaryBytes:65391216,binarySha256:'679eedaea70529aa1cffc9bc0a0788c186412663544fa76c09d63b57f383a65a',url:'https://github.com/openai/codex/releases/download/rust-v0.160.0/codex-code-mode-host-aarch64-apple-darwin.tar.gz'};
 let retained=false;
 try {
   const identities=(await command('/usr/bin/security',['find-identity','-v','-p','codesigning'])).stdout;
@@ -121,6 +122,17 @@ try {
   await command('/usr/bin/tar',['-xzf',codexTar,'-C',helpers]);await rename(join(helpers,entries),join(helpers,'codex'));
   if(await fileHash(join(helpers,'codex'))!==codex.binarySha256||(await command(join(helpers,'codex'),['--version'])).stdout.trim()!=='codex-cli '+codex.version)throw new Error('package-codex-unverified');
   await command('/usr/bin/codesign',['--verify','--strict',join(helpers,'codex')]);
+  // Codex resolves its vendor-owned code-mode runtime beside the entrypoint.
+  const codexHostTar=await download('codex-host.tar.gz',codexCodeModeHost.url,codexCodeModeHost.bytes,codexCodeModeHost.sha256);
+  const hostEntry=(await command('/usr/bin/tar',['-tzf',codexHostTar])).stdout.trim();if(hostEntry!=='codex-code-mode-host-aarch64-apple-darwin')throw new Error('package-codex-host-archive-unexpected');
+  await command('/usr/bin/tar',['-xzf',codexHostTar,'-C',helpers]);const hostPath=join(helpers,'codex-code-mode-host');await rename(join(helpers,hostEntry),hostPath);
+  const hostInfo=await lstat(hostPath);
+  if(!hostInfo.isFile()||hostInfo.isSymbolicLink()||hostInfo.nlink!==1||hostInfo.size!==codexCodeModeHost.binaryBytes||await fileHash(hostPath)!==codexCodeModeHost.binarySha256
+    ||(await command('/usr/bin/file',['-b',hostPath])).stdout.trim()!=='Mach-O 64-bit executable arm64')throw new Error('package-codex-host-unverified');
+  const verifyHost=()=>command('/usr/bin/codesign',['--verify','--strict','-R','=anchor apple generic and identifier "codex-code-mode-host" and certificate leaf[subject.OU] = "2DC432GLL2"',hostPath]);
+  await verifyHost();
+  const hostEntitlements=join(temporary,'codex-host-entitlements.plist');await writeFile(hostEntitlements,(await command('/usr/bin/codesign',['-d','--entitlements',':-',hostPath])).stdout,{flag:'wx',mode:0o600});
+  if(canonicalJSON(JSON.parse((await command('/usr/bin/plutil',['-convert','json','-o','-',hostEntitlements])).stdout))!==canonicalJSON({'com.apple.security.cs.allow-jit':true,'com.apple.security.cs.allow-unsigned-executable-memory':true}))throw new Error('package-codex-host-entitlements-unverified');
   const license=await download('codex-LICENSE','https://raw.githubusercontent.com/openai/codex/rust-v0.160.0/LICENSE',10926,'d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc');
   await writeFile(join(resources,'Codex-LICENSE'),await readFile(license),{flag:'wx',mode:0o600});
   // An existing Apple Development identity qualifies only this host's local review.
@@ -137,6 +149,7 @@ try {
   for(const name of await readdir(frameworkRoot)){const path=join(frameworkRoot,name);if(name.endsWith('.app')||name.endsWith('.framework'))await sign(path,name.endsWith('.app'));}
   for(const name of ['secure-entry','calendar','git-credential','update-exchange'])await sign(join(helpers,name));await sign(join(service,'PipelinerBackground'));
   await sign(app,true);await command('/usr/bin/codesign',['--verify','--deep','--strict',app]);
+  await verifyHost();if(await fileHash(hostPath)!==codexCodeModeHost.binarySha256)throw new Error('package-codex-host-changed');
   await command('/usr/bin/codesign',['--verify','--deep','--strict','-R','=anchor apple generic and identifier "'+backgroundBundleId+'"',app]);
   if(canonicalJSON(await readBuildIdentity(app))!==canonicalJSON(identity))throw new Error('package-build-identity-unverified');
   if(canonicalJSON(await readDataCompatibility(app,identity))!==canonicalJSON(dataSupport))throw new Error('package-data-support-unverified');
@@ -148,9 +161,9 @@ try {
   const dmg=join(temporary,'Pipeliner-0.1.0-mac-arm64-review.dmg');
   await command('/usr/bin/hdiutil',['create','-volname','Pipeliner Review','-srcfolder',distribution,'-format','UDZO','-ov',dmg],{timeout:180000});
   await command('/usr/bin/hdiutil',['verify',dmg],{timeout:180000});
-  const report={kind:'local-mac-review',...candidate,files:undefined,buildRoot:temporary,app,dmg,sourceInputs:inputs,nativeInputs,electron,codex,buildIdentity:{resource:buildIdentityName,sha256:hash(identityBytes),identity},dataSupport:{resource:dataCompatibilityName,sha256:hash(dataSupportBytes),declaration:dataSupport},archive:{sha256:await fileHash(archive),headerSha256},fuses,dmgSha256:await fileHash(dmg),signing:'Apple-Development-local-only',pending:['Developer ID and notarization','actual packaged native QA','Human PM acceptance','Windows/Linux'],retained:{owner:'Issue #54',trigger:'replace candidate or finish PM testing'},versions:{node:process.versions.node,os:(await command('/usr/bin/sw_vers',['-productVersion'])).stdout.trim(),architecture:process.arch}};
+  const report={kind:'local-mac-review',...candidate,files:undefined,buildRoot:temporary,app,dmg,sourceInputs:inputs,nativeInputs,electron,codex:{...codex,codeModeHost:codexCodeModeHost},buildIdentity:{resource:buildIdentityName,sha256:hash(identityBytes),identity},dataSupport:{resource:dataCompatibilityName,sha256:hash(dataSupportBytes),declaration:dataSupport},archive:{sha256:await fileHash(archive),headerSha256},fuses,dmgSha256:await fileHash(dmg),signing:'Apple-Development-local-only',pending:['Developer ID and notarization','actual packaged native QA','Human PM acceptance','Windows/Linux'],retained:{owner:'Issue #54',trigger:'replace candidate or finish PM testing'},versions:{node:process.versions.node,os:(await command('/usr/bin/sw_vers',['-productVersion'])).stdout.trim(),architecture:process.arch}};
   await writeFile(join(temporary,'build.json'),JSON.stringify(report,null,2)+'\n',{flag:'wx',mode:0o600});
-  for(const path of [stage,nativeRoot,runtime,electronZip,codexTar,license,entitlements,userConfig,globalConfig,join(temporary,'npm-cache'),join(temporary,'node-compile-cache'),join(temporary,'clang-cache')])await rm(path,{recursive:true,force:true});
+  for(const path of [stage,nativeRoot,runtime,electronZip,codexTar,codexHostTar,hostEntitlements,license,entitlements,userConfig,globalConfig,join(temporary,'npm-cache'),join(temporary,'node-compile-cache'),join(temporary,'clang-cache')])await rm(path,{recursive:true,force:true});
   retained=true;console.log(JSON.stringify({built:true,sourceCommit:candidate.sourceCommit,gitTree:candidate.gitTree,app,dmg,dmgSha256:report.dmgSha256,buildRecord:join(temporary,'build.json'),signing:report.signing,pending:report.pending}));
 } finally {
   if(!retained){await rm(temporary,{recursive:true,force:true});await access(temporary).then(()=>{throw new Error('package-cleanup-failed');},e=>{if(e.code!=='ENOENT')throw e;});console.log(JSON.stringify({cleanup:'owned-failed-build-removed',verified:true}));}

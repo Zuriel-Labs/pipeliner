@@ -9,6 +9,11 @@ const positive = n => Number.isSafeInteger(n) && n > 0;
 const nodeId = id => typeof id === 'string' && /^[A-Za-z0-9_=-]{1,180}$/.test(id);
 const login = name => typeof name === 'string' && /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(name);
 
+async function verifyApp(send, signal) {
+  const app = await readApp(githubApp.slug, { send, signal });
+  if (app.id !== githubApp.id || app.clientId !== githubApp.clientId || app.owner !== githubApp.owner || !isDeepStrictEqual(app.permissions, appPermissions)) throw new Error('app-changed');
+}
+
 async function restPages(read, path, collection, signal) {
   const nodes = [], ids = new Set(); let expected;
   for (let page = 1; page <= 100; page++) {
@@ -50,8 +55,7 @@ export async function inspectGitHub(credential, { setup = false, previousAccount
     }
     for (const repo of await restPages(read, '/user/repos?affiliation=owner,organization_member,collaborator', null, signal)) repositories.push(repo);
   } else {
-    const app = await readApp(githubApp.slug, { send, signal });
-    if (app.id !== githubApp.id || app.clientId !== githubApp.clientId || app.owner !== githubApp.owner || !isDeepStrictEqual(app.permissions, appPermissions)) throw new Error('app-changed');
+    await verifyApp(send, signal);
     for (const installation of await restPages(read, '/user/installations', 'installations', signal)) {
       const owner = installation.account;
       if (installation.app_id !== githubApp.id || !positive(owner?.id) || !nodeId(owner.node_id) || !login(owner.login) || !['User', 'Organization'].includes(owner.type) ||
@@ -98,6 +102,7 @@ export function githubAdapter({ setup = false, prompt, send = fetch, now = Date.
   }
   return {
     async connect({ signal }) {
+      if (!setup) await verifyApp(send, signal);
       const flow = await (setup ? startSetupDevice : startDevice)(clientId, { signal, send, now, ...(wait ? { wait } : {}) });
       let surface;
       try { surface = await prompt({ connection: setup ? 'github-setup' : 'github', verificationUri: flow.verificationUri, userCode: flow.userCode, signal, cancel: flow.cancel });

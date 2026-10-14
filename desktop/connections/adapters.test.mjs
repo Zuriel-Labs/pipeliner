@@ -7,6 +7,66 @@ import { mkdtempSync, realpathSync, rmSync, existsSync, readFileSync, writeFileS
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+test('scoped GitHub authorization refuses changed, unavailable or cancelled registration before requesting a grant', async () => {
+  for (const mode of ['id', 'client', 'owner', 'permissions', 'missing', 'cancelled']) {
+    const controller = new AbortController(), requests = [];
+    const adapter = githubAdapter({ prompt: async () => assert.fail('No authorization prompt after refused registration'),
+      send: async (url, request) => {
+        requests.push(new URL(url).pathname);
+        assert.equal(new URL(url).pathname, '/apps/pipeliner-desktop');
+        assert.equal(request.method, 'GET'); assert.equal(request.headers.Authorization, undefined);
+        if (mode === 'missing') return new Response('{}', { status: 404 });
+        if (mode === 'cancelled') controller.abort();
+        return Response.json({ slug: githubApp.slug, id: mode === 'id' ? githubApp.id + 1 : githubApp.id,
+          client_id: mode === 'client' ? 'Iv23syntheticOtherClient' : githubApp.clientId, name: 'Pipeliner',
+          owner: { login: mode === 'owner' ? 'fixture-other' : githubApp.owner, type: 'Organization' },
+          permissions: mode === 'permissions' ? { ...appPermissions, contents: 'admin' } : appPermissions });
+      } });
+    await assert.rejects(adapter.connect({ signal: controller.signal }), { message: mode === 'missing' ? 'http-404' : mode === 'cancelled' ? 'cancelled' : 'app-changed' });
+    assert.deepEqual(requests, ['/apps/pipeliner-desktop']);
+  }
+});
+
+test('GitHub authorization checks scoped registration before and after the grant, preserves setup and closes its prompt', async () => {
+  for (const mode of ['scoped', 'changed-during-grant', 'setup']) {
+    const requests = []; let appReads = 0, closed = 0, prompted = 0;
+    const setup = mode === 'setup', token = setup ? 'gho_syntheticFixtureOnly123' : 'ghu_syntheticFixtureOnly123';
+    const adapter = githubAdapter({ setup, wait: async () => {}, now: () => 100000,
+      prompt: async ({ connection, verificationUri, userCode }) => {
+        prompted++; assert.equal(connection, setup ? 'github-setup' : 'github');
+        assert.equal(verificationUri, 'https://github.com/login/device'); assert.equal(userCode, 'ABCD-1234');
+        assert.deepEqual(requests, setup ? ['/login/device/code'] : ['/apps/pipeliner-desktop', '/login/device/code']);
+        return { close: async () => { closed++; } };
+      }, send: async (url, request) => {
+        const path = new URL(url).pathname; requests.push(path);
+        if (path === '/apps/pipeliner-desktop') {
+          appReads++; assert.equal(request.headers.Authorization, undefined);
+          return Response.json({ ...githubApp, client_id: githubApp.clientId, name: 'Pipeliner', owner: { login: githubApp.owner, type: 'Organization' },
+            permissions: mode === 'changed-during-grant' && appReads === 2 ? { ...appPermissions, contents: 'admin' } : appPermissions });
+        }
+        if (path === '/login/device/code') {
+          const fields = new URLSearchParams(request.body);
+          assert.equal(fields.get('client_id'), setup ? 'Ov23liqnTj1cUOMnqW1l' : githubApp.clientId);
+          assert.equal(fields.get('scope'), setup ? 'repo project offline_access' : null);
+          return Response.json({ device_code: 'syntheticDeviceCode123', user_code: 'ABCD-1234', verification_uri: 'https://github.com/login/device', expires_in: 900, interval: 5 });
+        }
+        if (path === '/login/oauth/access_token') return Response.json({ access_token: token, token_type: 'bearer', scope: setup ? 'repo,project' : '',
+          expires_in: 28800, refresh_token: 'ghr_syntheticRefresh123', refresh_token_expires_in: 15897600 });
+        assert.equal(request.headers.Authorization, `Bearer ${token}`);
+        if (path === '/user') return Response.json({ id: 1, node_id: 'U1', login: 'fixture', type: 'User' });
+        if (path === '/user/installations') return Response.json({ total_count: 0, installations: [] });
+        if (path === '/user/orgs' || path === '/user/repos') return Response.json([]);
+        if (path === '/graphql') return Response.json({ data: { node: { id: 'U1', projectsV2: { totalCount: 0, nodes: [], pageInfo: { hasNextPage: false } } } } });
+        assert.fail('Unexpected authorization request');
+      } });
+    if (mode === 'changed-during-grant') await assert.rejects(adapter.connect({ signal: new AbortController().signal }), /^Error: app-changed$/);
+    else { const result = await adapter.connect({ signal: new AbortController().signal }); assert.equal(result.view.health, 'connected'); assert.equal(result.view.account, 'fixture'); }
+    assert.equal(appReads, setup ? 0 : 2); assert.equal(prompted, 1); assert.equal(closed, 1);
+    assert.equal(requests.filter(path => path === '/login/device/code').length, 1);
+    assert.equal(requests.filter(path => path === '/login/oauth/access_token').length, 1);
+  }
+});
+
 test('GitHub complete scoped discovery rejects missing/duplicate resources and reports limited Projects', async () => {
   const credential = { accessToken: 'ghu_syntheticFixtureOnly123', expiresAt: 200000, refreshToken: 'ghr_syntheticRefresh123', refreshExpiresAt: 300000 };
   let mode = 'complete';

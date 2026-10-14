@@ -815,32 +815,47 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
         assert.equal([...issueFixtures.values()].reduce((count, fixture) => count + fixture.writes.length, 0), writes);
         const reopened = openWorkspaceStore(directory, { vault }); try { assert.equal(reopened.workspaces().length, 25); } finally { reopened.close(); }
         if (process.argv.includes('--qualify-soak')) {
-          const { measureSoak, soakDurationMs } = require('./qualify-soak.cjs');
+          const { measureSoak, soakDurationMs, observeSoakSample, observeSoakFrames } = require('./qualify-soak.cjs');
           const storage = require('../test-storage.cjs').qualificationContext();
           require('../test-storage.cjs').validateOwnedDataDirectory(storage, storage.paths.outputs);
           const file = path.join(storage.paths.outputs, `soak-${process.pid}.jsonl`), fd = openSync(file, 'wx', 0o600);
+          const phaseFile = path.join(storage.paths.outputs, `soak-phases-${process.pid}.jsonl`);
           const controller = new AbortController(), abort = () => controller.abort(); window.once('closed', abort);
           const wallBegan = Date.now(), pins = targets.map(target => policy.worker.read(target.id).hash), hostPin = policy.worker.read(null).hash;
-          let bytes = 0;
+          let bytes = 0, phaseBytes = 0, phaseFd;
           try {
+            phaseFd = openSync(phaseFile, 'wx', 0o600);
             const result = await measureSoak({ signal: controller.signal,
-              sample: async (_elapsed, index) => {
-                assert.equal(policy.worker.read(null).hash, hostPin);
-                for (const [index, target] of targets.entries()) {
-                  assert.equal(policy.worker.read(target.id).hash, pins[index]);
-                  assert.equal(policy.worker.read(target.id).values['scheduling.enabled'].value, false);
-                }
-                await scheduler.check('timer'); assert.equal(scheduler.busy(), false);
-                const label = JSON.stringify(targets[index % targets.length].name);
-                const timing = await js(`(()=>{const control=performance.now();document.getElementById('repositories-nav').click();document.getElementById('workspace-list').offsetHeight;const controlMs=performance.now()-control;const card=[...document.querySelectorAll('#workspace-list>article')].find(node=>node.querySelector('h2').textContent===${label});const began=performance.now();card.querySelector('button').click();return {controlMs,began}})()`);
-                await wait(() => js(`document.getElementById('chat-title').textContent===${label}&&document.getElementById('workspace-context').textContent===${label}`));
-                await js('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
-                const navigationMs = await js('performance.now()-' + timing.began);
-                assert.equal(catalogReads, reads); assert.equal(providerTurns, turns);
-                assert.equal([...issueFixtures.values()].reduce((count, fixture) => count + fixture.writes.length, 0), writes);
-                const memory = process.memoryUsage();
-                return { navigationMs, controlMs: timing.controlMs, rssBytes: memory.rss, heapUsedBytes: memory.heapUsed };
-              },
+              sample: async (_elapsed, index) => observeSoakSample({ signal: controller.signal,
+                windowState: () => ({ windowVisible: Number(!window.isDestroyed() && window.isVisible()), windowFocused: Number(!window.isDestroyed() && window.isFocused()) }),
+                write: value => {
+                  const line = Buffer.from(JSON.stringify({ sample: index, ...value }) + '\n');
+                  if ((phaseBytes += line.length) > 2 * 1024 ** 2) throw Error('soak-phase-evidence-limit');
+                  let offset = 0; while (offset < line.length) offset += writeSync(phaseFd, line, offset, line.length - offset); fsyncSync(phaseFd);
+                },
+                sample: async phase => {
+                  phase(1);
+                  assert.equal(policy.worker.read(null).hash, hostPin);
+                  for (const [index, target] of targets.entries()) {
+                    assert.equal(policy.worker.read(target.id).hash, pins[index]);
+                    assert.equal(policy.worker.read(target.id).values['scheduling.enabled'].value, false);
+                  }
+                  await scheduler.check('timer'); assert.equal(scheduler.busy(), false);
+                  const label = JSON.stringify(targets[index % targets.length].name);
+                  phase(2);
+                  const timing = await js(`(()=>{const control=performance.now();document.getElementById('repositories-nav').click();document.getElementById('workspace-list').offsetHeight;const controlMs=performance.now()-control;const card=[...document.querySelectorAll('#workspace-list>article')].find(node=>node.querySelector('h2').textContent===${label});const began=performance.now();card.querySelector('button').click();return {controlMs,began,rendererVisible:document.visibilityState==='visible'?1:0}})()`);
+                  phase(3, timing.rendererVisible);
+                  await wait(() => js(`document.getElementById('chat-title').textContent===${label}&&document.getElementById('workspace-context').textContent===${label}`));
+                  phase(4, await js("document.visibilityState==='visible'?1:0"));
+                  const frames = await js(`(${observeSoakFrames.toString()})()`);
+                  phase(4, frames.rendererVisible); assert.equal(frames.frames, 2);
+                  phase(5);
+                  const navigationMs = await js('performance.now()-' + timing.began);
+                  assert.equal(catalogReads, reads); assert.equal(providerTurns, turns);
+                  assert.equal([...issueFixtures.values()].reduce((count, fixture) => count + fixture.writes.length, 0), writes);
+                  const memory = process.memoryUsage();
+                  return { navigationMs, controlMs: timing.controlMs, rssBytes: memory.rss, heapUsedBytes: memory.heapUsed };
+                } }),
               write: value => {
                 const line = Buffer.from(JSON.stringify({ ...value, wallElapsedMs: Date.now() - wallBegan,
                   catalogRequests: catalogReads - reads, fixtureProviderTurns: providerTurns - turns,
@@ -851,9 +866,10 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
               } });
             measurements.push({ interaction: '24-hour-foreground-synthetic-cache-idle-service-soak', ...result, wallElapsedMs: Date.now() - wallBegan,
               catalogRequests: catalogReads - reads, fixtureProviderTurns: providerTurns - turns, samplesPath: file, samplesBytes: bytes,
-              samplesSha256: require('node:crypto').createHash('sha256').update(readFileSync(file)).digest('hex') });
+              samplesSha256: require('node:crypto').createHash('sha256').update(readFileSync(file)).digest('hex'),
+              phaseEvidencePath: phaseFile, phaseEvidenceBytes: phaseBytes, phaseEvidenceSha256: require('node:crypto').createHash('sha256').update(readFileSync(phaseFile)).digest('hex') });
             assert(result.elapsedMs >= soakDurationMs); assert(result.navigationP95Ms < 2000); assert(result.controlP95Ms < 150);
-          } finally { window.removeListener('closed', abort); closeSync(fd); }
+          } finally { window.removeListener('closed', abort); closeSync(fd); if (phaseFd !== undefined) closeSync(phaseFd); }
         }
       } finally {
         for (const [id, rows] of saved) { const fixture = issueFixtures.get(id); fixture.issues.splice(0, fixture.issues.length, ...rows); }

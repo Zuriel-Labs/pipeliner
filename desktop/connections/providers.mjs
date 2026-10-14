@@ -121,8 +121,9 @@ export function codexAdapter({ directory, openBrowser, initialize = initializeCo
     signal?.throwIfAborted();
     const home = await protectedCodexHome(directory), requests = [], first = Promise.withResolvers(), controller = new AbortController(); let overflow = false;
     const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
-    let closed = false;
+    let closed = false, closing;
     const server = await initialize(home, { captureTool(params) { if (requests.length >= 8) overflow = true; else requests.push(params); first.resolve(); } });
+    const close = () => closing ??= server.close();
     try {
       const verified = await inspect(server, home, combined, value);
       if (!verified.view.models.some(entry => entry.id === model)) throw Error('model-unavailable');
@@ -141,7 +142,7 @@ export function codexAdapter({ directory, openBrowser, initialize = initializeCo
       if (outcome === null) await server.request('turn/interrupt', { threadId, turnId }, 30000);
       const end = outcome ?? await terminal;
       combined.throwIfAborted();
-      await server.close(); closed = true;
+      await close(); closed = true;
       await codexHome(directory, false); combined.throwIfAborted();
       if (overflow || server.unexpectedRequests.length || end.turn.status !== (requests.length ? 'interrupted' : 'completed')) throw Error('capability-unverified');
       const calls = new Set(), tool_calls = requests.map(params => {
@@ -158,7 +159,7 @@ export function codexAdapter({ directory, openBrowser, initialize = initializeCo
       return result;
     } finally {
       controller.abort();
-      if (!closed) { await server.close(); await codexHome(directory, false); }
+      if (!closed) { await close(); await codexHome(directory, false); }
       signal?.throwIfAborted();
     }
   }

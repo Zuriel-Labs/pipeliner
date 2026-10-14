@@ -96,9 +96,9 @@ export function createIssueManager({ store, policy, connections, api = github, n
     if (value.issues.some(issue => issue.itemId && !issue.status && issue.id !== creating)) throw new Error('issue-state-incomplete');
     const run = policy.runtime.status(target.id);
     if (run && (value.active.length !== 1 || value.active[0].number !== run.issue)) throw new Error('issue-state-conflict');
-    const drift = [];
-    for (const issue of value.issues) if (store.observeReady(target.id, issue.id, issue.ready, now(), issue.id === own).drift) drift.push(issue.number);
-    value.drift = drift; value.observedAt = now(); catalogs.set(target.id, value);
+    const observedAt = now(), observations = store.observeReadyBatch(target.id, value.issues.map(issue => ({ issue: issue.id, ready: issue.ready, own: issue.id === own })), observedAt);
+    const drift = value.issues.filter((_issue, index) => observations[index].drift).map(issue => issue.number);
+    value.drift = drift; value.observedAt = observedAt; catalogs.set(target.id, value);
     if (drift.length) messages.set(target.id, 'Ready changed outside Pipeliner for ' + drift.map(number => '#' + number).join(', ') + '. Current labels are shown; active work keeps its claim.');
     return { ...value, localRun: run };
   }
@@ -289,7 +289,7 @@ export function createIssueManager({ store, policy, connections, api = github, n
     }
     throw new Error('issue-unavailable');
   }
-  return Object.freeze({ status, dispatch, sync() { sync(); publish(); }, async idle() { await Promise.allSettled([...tasks.values()].map(task => task.done)); },
+  return Object.freeze({ status, dispatch, busy: () => tasks.size > 0, sync() { sync(); publish(); }, async idle() { await Promise.allSettled([...tasks.values()].map(task => task.done)); },
     agent: Object.freeze({
       propose(binding, targetId, values) {
         const target = workspace(targetId); agentAuthority(binding, target, false);

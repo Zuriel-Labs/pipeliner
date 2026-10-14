@@ -2,21 +2,33 @@ import { DatabaseSync } from 'node:sqlite';
 import { constants, openSync, closeSync, fstatSync, fsyncSync, writeFileSync, readFileSync, lstatSync, statfsSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
-import { protectedFile } from './storage.mjs';
+import { protectedFile, captureRecoveryDatabase } from './storage.mjs';
 import { canonicalJSON, immutable, record } from './settings.mjs';
 import { workspaceData, workspaceCandidate } from './identity.mjs';
 import { transact, runtimeDeveloperAllowed } from './runtime.mjs';
 import { openWorkerEnvironment, restrictedWorkerArgs } from './worker.mjs';
 import { developmentWorkerProgram } from '../development/worker-tools.mjs';
+import { inspectDevelopmentRecovery } from '../development/state.mjs';
+import { inspectWorkspaceRecovery } from '../repositories/store.mjs';
+import { inspectPolicyRecovery } from './policy.mjs';
 
 const digest = value => createHash('sha256').update(canonicalJSON(value)).digest('hex');
 const bytesHash = value => createHash('sha256').update(value).digest('hex');
 const filename = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/.test(value);
 const failure = error => typeof error.message === 'string' && /^[A-Za-z][A-Za-z ;,-]{0,159}$/.test(error.message) ? error.message : 'Execution could not be verified; local recovery required';
 
+function executionRecord(row) {
+  if (!row) return null;
+  const data = JSON.parse(row.document);
+  if (digest(data) !== row.hash || data.manifest.runId !== row.run_id || data.manifest.epoch !== row.epoch || data.manifest.repository !== row.repository
+    || !['starting', 'created', 'running', 'exited', 'stopping', 'stopped', 'blocked'].includes(row.state)) throw new Error('Execution resource integrity failed');
+  return { ...row, data };
+}
+
 // ponytail: one trusted broker per local app store; it may supervise several repository slots.
-export function acquireExecutionOwner(directory) {
-  const path = protectedFile(directory, 'owner.sqlite');
+export function acquireExecutionOwner(directory, { existingOnly = false } = {}) {
+  if (typeof existingOnly !== 'boolean') throw new Error('Invalid execution ownership option');
+  const path = protectedFile(directory, 'owner.sqlite', { create: !existingOnly });
   // Qualified local filesystems only. SQLite advisory locks do not qualify network storage.
   if (![26, 17, 1, 0xef53, 0x794c7630].includes(statfsSync(directory).type)) throw new Error('Execution owner requires qualified local storage');
   const db = new DatabaseSync(path, { allowExtension: false, timeout: 0 });
@@ -26,7 +38,52 @@ export function acquireExecutionOwner(directory) {
   return Object.freeze({ close() { if (!closed) { db.close(); closed = true; } } });
 }
 
-export function openExecutionSupervisor(directory, { store }) {
+// Recorded state is necessary, never sufficient, for native idle verification.
+export function captureRecoveryWork(directory, { scratch, vault, checkpoint }) {
+  if (typeof checkpoint !== 'function') throw Error('Recovery ownership checkpoint required');
+  const owner = acquireExecutionOwner(directory, { existingOnly: true }), snapshots = [];
+  let closed = false, inspecting = false;
+  function verify() {
+    if (closed) throw Error('Recovery work inspection closed');
+    for (const snapshot of snapshots) snapshot.verify();
+    return true;
+  }
+  function close() {
+    if (inspecting) throw Error('Recovery native inspection still active');
+    if (closed) return; closed = true; let failed = false;
+    for (const snapshot of snapshots) try { snapshot.close(); } catch { failed = true; }
+    try { owner.close(); } catch { failed = true; }
+    if (failed) throw Error('Recovery work inspection cleanup required');
+  }
+  try {
+    for (const [name, read] of [['policy.sqlite', inspectPolicyRecovery], ['workspaces.sqlite', inspectWorkspaceRecovery], ['development.sqlite', inspectDevelopmentRecovery]]) {
+      const snapshot = captureRecoveryDatabase(directory, name, { scratch, checkpoint, read: db => read(db, { vault }) }); snapshots.push(snapshot);
+      if (Object.values(snapshot.value).some(count => !Number.isSafeInteger(count) || count !== 0)) throw Error('Recorded work requires recovery');
+    }
+    const workers = captureRecoveryDatabase(directory, 'execution.sqlite', { scratch, checkpoint, read(db) {
+      if (db.prepare('PRAGMA user_version').get().user_version !== 1) throw Error('Unsupported execution inventory');
+      const rows = db.prepare('SELECT * FROM workers ORDER BY run_id,epoch LIMIT 10001').all();
+      if (rows.length > 10000) throw Error('Execution recovery inventory needs bounded archival');
+      return immutable(rows.map(binding => {
+        const row = executionRecord(binding); restrictedWorkerArgs(row.data.manifest, row.data.program);
+        if (!['stopped', 'exited'].includes(row.state)) throw Error('Recorded work requires recovery');
+        if (row.cid !== null && (typeof row.cid !== 'string' || !/^[a-f0-9]{64}$/.test(row.cid)) || row.state === 'exited' && row.cid === null) throw Error('Execution resource integrity failed');
+        return { manifest: row.data.manifest, state: row.state, cid: row.cid };
+      }));
+    } });
+    snapshots.push(workers); verify();
+    return Object.freeze({ workers: workers.value, verify, close, async verifyIdle(signal) {
+      verify(); if (inspecting) throw Error('Recovery native inspection still active');
+      const environment = openWorkerEnvironment(directory, { inspectionOnly: true });
+      inspecting = true;
+      try { return await environment.verifyIdle(workers.value, { signal, checkpoint: verify }); }
+      finally { inspecting = false; }
+    } });
+  } catch (error) { close(); throw error; }
+}
+
+export function openExecutionSupervisor(directory, { store, maintenance = () => false }) {
+  if (typeof maintenance !== 'function') throw Error('Execution maintenance inspection unavailable');
   const owner = acquireExecutionOwner(directory);
   let db, environment, closed = false, foregroundPausing = false, foregroundError = null;
   try {
@@ -50,12 +107,7 @@ export function openExecutionSupervisor(directory, { store }) {
   let monitorWork = null;
   const requireOpen = () => { if (closed) throw new Error('Execution supervisor closed'); };
   function rowFor(binding) {
-    const row = db.prepare('SELECT * FROM workers WHERE run_id=? AND epoch=?').get(binding.runId, binding.epoch);
-    if (!row) return null;
-    const data = JSON.parse(row.document);
-    if (digest(data) !== row.hash || data.manifest.runId !== row.run_id || data.manifest.epoch !== row.epoch || data.manifest.repository !== row.repository
-      || !['starting', 'created', 'running', 'exited', 'stopping', 'stopped', 'blocked'].includes(row.state)) throw new Error('Execution resource integrity failed');
-    return { ...row, data };
+    return executionRecord(db.prepare('SELECT * FROM workers WHERE run_id=? AND epoch=?').get(binding.runId, binding.epoch));
   }
   function update(binding, state, cid, error = null) { transact(db, () => db.prepare('UPDATE workers SET state=?,cid=?,error=? WHERE run_id=? AND epoch=?').run(state, cid, error, binding.runId, binding.epoch)); }
   function current(binding, running = false) {
@@ -64,7 +116,7 @@ export function openExecutionSupervisor(directory, { store }) {
     const repository = db.prepare('SELECT repository FROM workers WHERE run_id=? ORDER BY epoch DESC LIMIT 1').get(binding.runId)?.repository;
     const run = repository ? store.runtime.status(repository) : [...identities.keys()].map(repo => store.runtime.status(repo)).find(value => value?.id === binding.runId);
     if (!run || run.id !== binding.runId || run.epoch !== binding.epoch) throw new Error('Stale execution epoch');
-    if (running && (foregroundPausing || run.control !== 'running')) throw new Error('Execution paused, stopped or recovery-required');
+    if (running && (maintenance() || foregroundPausing || run.control !== 'running')) throw new Error('Execution paused, stopped or recovery-required');
     if (running) { const authority = store.worker.authority(run.repository, run.policyRevision); if (!runtimeDeveloperAllowed(authority, run.dev) || !authority.capabilities.includes('worker.exec')) throw new Error('Execution authority unavailable or revoked'); }
     return run;
   }
@@ -87,7 +139,22 @@ export function openExecutionSupervisor(directory, { store }) {
   }
   const supervisor = {
     attach(identity) { requireOpen(); const workspace = workspaceData(identity); identities.set(workspace.repository, identity); },
-    prepare: () => environment.prepare(),
+    prepare() { requireOpen(); if (maintenance()) throw Error('Execution maintenance fence active'); return environment.prepare(); },
+    async verifyIdle(signal) {
+      requireOpen(); if (maintenance() !== true) throw Error('Execution maintenance fence required');
+      const idle = () => {
+        requireOpen(); signal?.throwIfAborted();
+        if (maintenance() !== true || inFlight.size || pendingControls.size || monitorWork || foregroundPausing || foregroundError
+          || db.prepare("SELECT 1 FROM workers WHERE state NOT IN ('stopped','exited') LIMIT 1").get()) throw Error('Execution remains busy or unverified');
+      };
+      idle();
+      const inventory = () => db.prepare('SELECT * FROM workers ORDER BY run_id,epoch').all();
+      const rows = inventory(), snapshot = canonicalJSON(rows);
+      const checkpoint = () => { idle(); if (canonicalJSON(inventory()) !== snapshot) throw Error('Execution inventory changed'); };
+      const workers = rows.map(binding => { const row = executionRecord(binding); return { manifest: row.data.manifest, state: row.state, cid: row.cid }; });
+      await environment.verifyIdle(workers, { signal, checkpoint });
+      checkpoint(); return true;
+    },
     async start(identity, binding, { candidate, program, allowedPath }) {
       this.attach(identity); const run = current(binding, true); candidateCheck(identity, candidate);
       if (!filename(allowedPath)) throw new Error('Invalid scoped effect target');
@@ -225,6 +292,7 @@ export function openExecutionSupervisor(directory, { store }) {
     control(binding, operation) {
       const run = current(binding);
       if (!['status', 'pause', 'resume', 'stop'].includes(operation)) throw new Error('Invalid execution control');
+      if (operation === 'resume' && maintenance()) throw Error('Execution maintenance fence active');
       if (operation === 'status') return this.status(run.repository);
       if (operation === 'resume' && foregroundPausing) throw new Error('Foreground execution is pausing');
       if ((operation === 'pause' && run.control === 'paused' || operation === 'stop' && run.control === 'stopped') && !inFlight.has(run.id)) return immutable({ received: true, verified: true });
@@ -290,7 +358,7 @@ export function openExecutionSupervisor(directory, { store }) {
   };
   // Inspect authority and elapsed budgets locally; no provider call or automatic resume.
   const monitor = setInterval(() => {
-    if (closed || monitorWork) return;
+    if (closed || monitorWork || maintenance()) return;
     monitorWork = (async () => {
       for (const resource of db.prepare("SELECT run_id,epoch,repository FROM workers WHERE state IN ('running','created')").all()) {
         if (inFlight.has(resource.run_id)) continue;

@@ -12,7 +12,7 @@ export const safeConnectionError = error => /^(http-\d{3}|graphql-(forbidden|rej
 
 // Host-only handle. Workers and renderer receive status, never this object or records.
 export function createConnectionManager({ vault, adapters, onChange = () => {}, initialRevision = 1 }) {
-  const tasks = new Map(), errors = new Map(), leases = new Map(); let revision = initialRevision, closed = false;
+  const tasks = new Map(), errors = new Map(), leases = new Map(), turns = new Set(); let revision = initialRevision, closed = false;
   const fence = id => { for (const lease of leases.get(id) ?? []) lease.abort(); };
   const changed = () => { revision++; onChange(status()); };
   const requireReady = id => { if (closed || !vault || !connectionIds.includes(id) || !adapters[id]) throw new Error('connection-unavailable'); };
@@ -26,7 +26,7 @@ export function createConnectionManager({ vault, adapters, onChange = () => {}, 
         repositories: view.repositories ?? [], projects: view.projects ?? [], installations: view.installations ?? [], owners: view.owners ?? [],
         resourceCompleteness: view.resourceCompleteness ?? null, permissions: view.permissions ?? [],
         models: view.models ?? [], selectedModel: view.selectedModel ?? null, capability: view.capability ?? null,
-        executionAvailable: Boolean(adapters[id]?.turn && !task && view.health === 'connected' && view.selectedModel && view.capability?.model === view.selectedModel
+        executionAvailable: Boolean(adapters[id]?.turn && (!adapters[id].qualified || adapters[id].qualified(value, view.selectedModel)) && !task && view.health === 'connected' && view.selectedModel && view.capability?.model === view.selectedModel
           && ['stream', 'toolLoop', 'resumed'].every(key => view.capability[key] === true)),
         credentialStatus: view.credentialStatus ?? (value ? 'Protected locally; rechecked before use' : 'No local credential'),
         error, busy: Boolean(task), cleanupPending: Boolean(value?.cleanupPending),
@@ -115,7 +115,7 @@ export function createConnectionManager({ vault, adapters, onChange = () => {}, 
       requireReady(id);
       if (!['ollama', 'codex'].includes(id) || typeof adapters[id].turn !== 'function') throw new Error('capability-unverified');
       const lease = await acquire(id, signal), view = lease.value.view;
-      if (view.health !== 'connected' || view.selectedModel !== model || view.capability?.model !== model || !view.models?.some(item => item.id === model)
+      if (adapters[id].qualified && !adapters[id].qualified(lease.value, model) || view.health !== 'connected' || view.selectedModel !== model || view.capability?.model !== model || !view.models?.some(item => item.id === model)
         || !Number.isSafeInteger(view.capability.testedAt) || view.capability.testedAt < 1 || !['stream', 'toolLoop', 'resumed'].every(key => view.capability[key] === true)) {
         lease.close(); throw new Error('capability-unverified');
       }
@@ -126,7 +126,7 @@ export function createConnectionManager({ vault, adapters, onChange = () => {}, 
           if (pending) throw new Error('provider-turn-pending');
           if (!input || Object.keys(input).sort().join(',') !== 'maxOutput,messages,tools' || !Array.isArray(input.messages) || !Array.isArray(input.tools)
             || !Number.isSafeInteger(input.maxOutput) || input.maxOutput < 1 || input.maxOutput > 8192 || Buffer.byteLength(JSON.stringify(input)) > 1024 * 1024) throw new Error('provider-input-invalid');
-          pending = true;
+          pending = true; const settlement = Promise.withResolvers(); turns.add(settlement.promise);
           try {
             const result = await adapters[id].turn({ ...input, value: lease.value, model, signal: lease.signal });
             lease.check(); return result;
@@ -138,11 +138,11 @@ export function createConnectionManager({ vault, adapters, onChange = () => {}, 
               vault.save(id, epoch, { ...lease.value, view: { ...view, health: ['http-401', 'reauthentication-required', 'account-changed'].includes(code) ? 'reauthentication' : 'offline', capability: null } }); changed();
             }
             throw error;
-          } finally { pending = false; }
+          } finally { pending = false; turns.delete(settlement.promise); settlement.resolve(); }
         },
       });
     },
     epoch(id) { requireReady(id); return vault.get(id).epoch; },
-    async close() { if (tasks.get('codex')?.operation === 'connect') disconnect('codex'); closed = true; for (const id of leases.keys()) fence(id); for (const task of tasks.values()) task.controller.abort(); await Promise.allSettled([...tasks.values()].map(task => task.done)); },
+    async close() { if (tasks.get('codex')?.operation === 'connect') disconnect('codex'); closed = true; for (const id of leases.keys()) fence(id); for (const task of tasks.values()) task.controller.abort(); await Promise.allSettled([...Array.from(tasks.values(), task => task.done), ...turns]); },
   });
 }

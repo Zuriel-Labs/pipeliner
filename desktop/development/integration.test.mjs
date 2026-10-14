@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { openTestVault } from '../connections/test-vault.mjs';
 import assert from 'node:assert/strict';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -74,7 +75,7 @@ test('Showcase derives actual checks and findings, with an honest source-only ta
 test('merge journals dispatch once, verifies lost or external replies, and retains denied or revoked outcomes', async () => {
   for (const gated of [true, false]) {
   for (const scenario of ['lost', 'squash-lost', 'external', 'denied', 'revoked']) {
-    const f = fixture(), root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-integration-'))), store = openWorkspaceStore(root);
+    const f = fixture(), root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-integration-'))), vault = await openTestVault(root), store = openWorkspaceStore(root, { vault });
     const method = scenario === 'squash-lost' ? 'squash' : 'merge'; f.method(method);
     const run = { id: 'run-one', repository: 'repo-one', issue: 7, epoch: 1, createdAt: Date.now(), limits: { 'limits.agentSeconds': 30 }, policyRevision: 1, policyHash: 'e'.repeat(64), pipelineHash: 'f'.repeat(64) },
       state = { state: 'candidate', step: 'integrate', candidate: { sourceCommit: base, gitTree: tree }, ...(gated ? { qa: { decision: 'approve', hash: 'e'.repeat(64), showcase: { candidate: f.publication.candidate } } } : {}) };
@@ -110,7 +111,7 @@ test('merge journals dispatch once, verifies lost or external replies, and retai
         await mergeDevelopmentCandidate(input); assert.equal(dispatches, 1); assert.equal(f.writes(), scenario === 'external' ? 0 : 1);
         assert.equal(store.pending('development').length, 0);
       }
-    } finally { store.close(); rmSync(root, { recursive: true }); }
+    } finally { store.close(); vault.close(); rmSync(root, { recursive: true }); }
   }
   }
 });

@@ -14,6 +14,7 @@ import { openDevelopmentStore, documentHTML, validateDevelopmentOutput } from '.
 import { createDevelopmentManager, developmentPermissions } from '../desktop/development/manager.mjs';
 import { snapshotWorkspace, sourceTree } from '../desktop/development/source.mjs';
 import { openWorkspaceStore } from '../desktop/repositories/store.mjs';
+import { openTestVault } from '../desktop/connections/test-vault.mjs';
 import { issueFixture } from '../desktop/issues/fixture.mjs';
 import { presetChanges } from '../desktop/pipelines/model.mjs';
 import { catalog as providerCatalog, selectedModel, chat } from '../desktop/ollama/qualify.mjs';
@@ -36,7 +37,7 @@ const directory = realpathSync(mkdtempSync('/private/tmp/pipeliner-autonomous-')
 const marker = '/tmp/pipeliner-46-autonomous-' + owner.run + '.json', localMarker = join(directory, 'qualification-owner.json');
 const saveOwner = () => { writeFileSync(marker, JSON.stringify(owner), { mode: 0o600 }); writeFileSync(localMarker, JSON.stringify(owner), { mode: 0o600 }); };
 writeFileSync(marker, JSON.stringify(owner), { flag: 'wx', mode: 0o600 }); writeFileSync(localMarker, JSON.stringify(owner), { flag: 'wx', mode: 0o600 });
-let policy, supervisor, ledger, store, manager, fixtureIssue, pull, failed = null, cleanup = null, providerTurns = 0, mergeWrites = 0, lastStep, lastPull, ownedRunId, verification = 'setup';
+let policy, supervisor, ledger, store, vault, manager, fixtureIssue, pull, failed = null, cleanup = null, providerTurns = 0, mergeWrites = 0, lastStep, lastPull, ownedRunId, verification = 'setup';
 function measureWorker(run) {
   const environment = JSON.parse(readFileSync(join(directory, 'environment.json'), 'utf8'));
   const db = new DatabaseSync(join(directory, 'execution.sqlite'), { readOnly: true }); let row;
@@ -49,6 +50,7 @@ function measureWorker(run) {
 const started = performance.now();
 try {
   const checkout = join(directory, 'repository'), state = join(directory, 'state'); mkdirSync(checkout); mkdirSync(state, { mode: 0o700 });
+  vault = await openTestVault(state);
   const git = (args, input) => execFileSync('/usr/bin/git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'commit.gpgsign=false', '-C', checkout, ...args],
     { input, env: { PATH: '/usr/bin:/bin', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', LC_ALL: 'C' }, encoding: 'utf8', timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'] });
   git(['init', '-b', repo.default_branch]); git(['remote', 'add', 'origin', 'https://github.com/' + repo.full_name + '.git']);
@@ -87,7 +89,7 @@ try {
   assert.deepEqual(snapshot.candidate, owner.source);
   const workspace = { id: 'R_autonomous', repositoryId: repo.node_id, numericId: repo.id, slug: repo.full_name.toLowerCase(), name: 'Owned autonomous qualification', private: true,
     path: checkout, localKey: workspaceData(identity).localKey, connections: { setup: null }, project: { id: 'P_qualification', number: 1, owner: { login: repo.owner.login } } };
-  store = openWorkspaceStore(state); store.register(workspace); store.select(workspace.id);
+  store = openWorkspaceStore(state, { vault }); store.register(workspace); store.select(workspace.id);
   const fixture = issueFixture(workspace), issue = fixture.issues[0]; Object.assign(issue, { id: fixtureIssue.node_id, number: fixtureIssue.number, numericId: fixtureIssue.id, ready: true, title: fixtureIssue.title, body: fixtureIssue.body, labels: ['Ready for Development'] });
   const readIssue = async () => { const actual = gh(prefix + '/issues/' + fixtureIssue.number); assert.equal(actual.id, fixtureIssue.id); assert.equal(actual.node_id, fixtureIssue.node_id);
     return { ...structuredClone(issue), state: actual.state.toUpperCase(), title: actual.title, body: actual.body, labels: actual.labels.map(label => label.name), ready: actual.labels.some(label => label.name === 'Ready for Development'), assignees: actual.assignees.map(person => person.login) }; };
@@ -111,7 +113,7 @@ try {
   policy = openPolicyStore(state, { catalog: () => ({ repositories: [workspace.id], capabilities: developmentPermissions, maxConcurrency: 1, background: false,
     developers: [dev], connections: ['github', 'ollama'].map(id => ({ id, provider: id, repositories: [workspace.id], healthy: true })), extensions: [] }), inspectors: {
       repository: value => manager.observe(value), worker: binding => supervisor.inspectWorker(binding), effect: action => action.operation === 'github.pr.merge' ? manager.inspectIntegration(action) : supervisor.inspectEffect(action) } });
-  supervisor = openExecutionSupervisor(directory, { store: policy }); ledger = openDevelopmentStore(state);
+  supervisor = openExecutionSupervisor(directory, { store: policy }); ledger = openDevelopmentStore(state, { vault });
   manager = createDevelopmentManager({ store, policy, ledger, connections, supervisor, api, onChange: view => {
     if (view.run?.id) ownedRunId = view.run.id;
     if (view.development?.step === 'research' && view.execution?.worker === 'running' && !owner.worker) { owner.worker = measureWorker(view.run); saveOwner(); }
@@ -164,7 +166,7 @@ try {
   owner.failed = failed; saveOwner(); console.log(JSON.stringify({ passed: false, error: failed, verification: owner.verification ?? null })); }
 finally {
   const failures = [];
-  for (const close of [async () => manager ? manager.close() : supervisor?.shutdown(), () => ledger?.close(), () => policy?.close(), () => store?.close(), async () => { cleanup = await openWorkerEnvironment(directory).destroy(); }]) {
+  for (const close of [async () => manager ? manager.close() : supervisor?.shutdown(), () => ledger?.close(), () => policy?.close(), () => store?.close(), () => vault?.close(), async () => { cleanup = await openWorkerEnvironment(directory).destroy(); }]) {
     try { await close(); } catch { failures.push('owned-native-teardown'); }
   }
   try {

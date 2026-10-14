@@ -10,6 +10,24 @@ import { createConnectionControlChannel } from '../core/control.mjs';
 
 const wrap = { available: async () => true, encrypt: async x => Buffer.from(x), decrypt: async x => ({ result: x.toString() }) };
 const connected = { credential: { accessToken: 'ghu_syntheticFixtureOnly123' }, view: { account: 'fixture', models: [{ id: 'synthetic-model', name: 'Synthetic model' }], health: 'connected', lastVerified: 1, capability: null } };
+
+test('provider bridge qualification controls visible Dev eligibility and acquisition', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-54-bridge-eligibility-'))), vault = await openVault(root, wrap);
+  const value = { credential: null, view: { health: 'connected', selectedModel: 'test-model', models: [{ id: 'test-model' }],
+    capability: { model: 'test-model', testedAt: 1, stream: true, toolLoop: true, resumed: true } } };
+  let qualified = false, calls = 0;
+  const adapter = { qualified: (record, model) => qualified && record.view.selectedModel === model, noPrompts: true,
+    refresh: async ({ value }) => value, turn: async () => { calls++; return { content: 'synthetic result' }; } };
+  const manager = createConnectionManager({ vault, adapters: { codex: adapter } });
+  try {
+    vault.save('codex', vault.begin('codex'), value);
+    assert.equal(manager.status().connections.find(c => c.id === 'codex').executionAvailable, false); assert.equal(manager.developers().length, 0);
+    await assert.rejects(manager.acquireProvider('codex', 'test-model'), /capability-unverified/); assert.equal(calls, 0);
+    qualified = true; assert.equal(manager.developers().length, 1);
+    const lease = await manager.acquireProvider('codex', 'test-model'); lease.check(); lease.close();
+    qualified = false; assert.equal(manager.developers().length, 0);
+  } finally { await manager.close(); vault.close(); rmSync(root, { recursive: true }); }
+});
 test('disconnect fences late sign-in and refresh; revocation blocks further tests', async () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-connections-test-'))); chmodSync(root, 0o700);
   const vault = await openVault(root, wrap); let finish, requests = 0;
@@ -121,4 +139,31 @@ test('provider lease binds a tested model, hides credentials and discards late o
     assert.equal(manager.status().connections.find(c => c.id === 'ollama').health, 'reauthentication');
     assert.throws(() => next.check()); await assert.rejects(manager.acquireProvider('ollama', 'test-model')); next.close();
   } finally { await manager.close(); vault.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('connection shutdown waits for dispatched provider turns after lease cancellation and preserves credential state', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-provider-shutdown-')));
+  const vault = await openVault(root, wrap), releases = new Map(), signals = new Map();
+  const value = { credential: 'synthetic-only', view: { health: 'connected', selectedModel: 'test-model', models: [{ id: 'test-model' }],
+    capability: { model: 'test-model', testedAt: 1, stream: true, toolLoop: true, resumed: true } } };
+  const adapters = Object.fromEntries(['ollama', 'codex'].map(id => [id, { refresh: async ({ value }) => value,
+    turn: ({ signal }) => { signals.set(id, signal); return new Promise(resolve => releases.set(id, resolve)); } }]));
+  const manager = createConnectionManager({ vault, adapters }); let closing;
+  try {
+    for (const id of ['ollama', 'codex']) vault.save(id, vault.begin(id), { ...value, credential: id === 'codex' ? null : value.credential });
+    const leases = await Promise.all(['ollama', 'codex'].map(id => manager.acquireProvider(id, 'test-model')));
+    const before = vault.connectionInventory(), input = { messages: [{ role: 'user', content: 'Synthetic only' }], tools: [], maxOutput: 16 };
+    const rejected = leases.map(lease => assert.rejects(lease.turn(input)));
+    leases[0].close(); let settled = false; closing = manager.close().then(() => { settled = true; });
+    await new Promise(setImmediate);
+    assert.equal(signals.size, 2); assert.equal([...signals.values()].every(signal => signal.aborted), true);
+    assert.equal(settled, false); assert.throws(() => manager.start('ollama', 'refresh'), /connection-unavailable/);
+    releases.get('ollama')({ content: 'late first result' }); await rejected[0]; await new Promise(setImmediate);
+    assert.equal(settled, false);
+    releases.get('codex')({ content: 'late second result' }); await rejected[1]; await closing;
+    assert.deepEqual(vault.connectionInventory(), before); assert.equal(settled, true);
+  } finally {
+    for (const release of releases.values()) release({ content: 'synthetic cleanup' });
+    await closing; await manager.close(); vault.close(); rmSync(root, { recursive: true });
+  }
 });

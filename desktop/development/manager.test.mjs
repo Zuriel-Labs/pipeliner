@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { openTestVault } from '../connections/test-vault.mjs';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -17,6 +18,9 @@ import { issueFixture } from '../issues/fixture.mjs';
 import { createDevelopmentControlChannel } from '../core/control.mjs';
 import { developmentCommand } from './commands.mjs';
 import { presetChanges } from '../pipelines/model.mjs';
+import { openToolStore } from '../tools/store.mjs';
+import { toolPackage } from '../tools/package.mjs';
+import { starterSkills } from './starter.mjs';
 
 test('ordinary direct QA decisions never infer approval from praise, quotes, secrets or control instructions', () => {
   for (const text of ['Approved', 'I approve', 'I approve this tested version.', 'Merge it', 'Looks good, merge it']) assert.equal(developmentCommand(text).operation, 'qa-approve');
@@ -35,44 +39,75 @@ test('background pause retains ownership, verifies runtime control and preserves
   assert.equal(manager.status().storageAvailable, true); await manager.close(); assert.equal(shutdowns, 1);
 });
 
-test('known incompatible autonomous paths block before activation, reservation, worker or model requests', async () => {
-  for (const failure of ['migration', 'prompt', 'provider', 'method', 'protected', 'base', 'delivery', 'permission', 'schedule-hash', 'schedule-disabled', 'schedule-qualified']) {
+test('permission settlement pauses only revoked captured runs and preserves unrelated repository work', async () => {
+  const capabilities = ['workspace.read', 'workspace.write', 'worker.exec'], runs = new Map(['first', 'second'].map(repository => [repository, { id: 'run-' + repository, repository, issue: 7, epoch: 2, policyRevision: 0, control: 'running' }]));
+  const paused = [], suspended = []; let fail = false, revokeSecond = false;
+  const policy = { worker: { read: () => ({ bindings: { capabilities }, values: { ...Object.fromEntries(Object.entries(defaults).map(([id, value]) => [id, { value, configuredValue: value }])),
+    'permissions.grants': { value: capabilities, configuredValue: capabilities }, 'permissions.ceiling': { value: capabilities, configuredValue: capabilities } } }),
+    authority: repository => ({ capabilities: repository === 'first' || revokeSecond ? ['workspace.read', 'worker.exec'] : capabilities, resources: [] }) },
+    runtime: { status: repository => runs.get(repository), requestControl(binding) { const row = [...runs.values()].find(run => run.id === binding.runId); row.control = 'pause-requested'; } } };
+  const manager = createDevelopmentManager({ store: { selected: () => null, workspaces: () => [...runs.keys()].map(id => ({ id })), pending: () => [] }, policy,
+    ledger: { status: id => ({ epoch: [...runs.values()].find(run => run.id === id).epoch }), suspend: binding => suspended.push(binding.runId) }, connections: { developers: () => [] },
+    supervisor: { status: () => null, control(binding) { if (fail && binding.runId === 'run-first') throw Error('private termination failure'); const row = [...runs.values()].find(run => run.id === binding.runId); row.control = 'paused'; paused.push(row.repository); },
+      async settle() {}, async pauseForeground() { for (const run of runs.values()) run.control = 'paused'; }, async shutdown() {} } });
+  try {
+    await manager.permissionsChanged(['first', 'second']); assert.deepEqual(paused, ['first']); assert.deepEqual(suspended, ['run-first']); assert.equal(runs.get('second').control, 'running');
+    await manager.permissionsChanged(['first']); assert.deepEqual(paused, ['first']);
+    runs.get('first').control = 'running'; fail = true; await assert.rejects(manager.permissionsChanged(['first']), /verification/); assert.equal(runs.get('second').control, 'running');
+    assert.equal(runs.get('first').id, 'run-first'); assert.equal(runs.get('first').issue, 7);
+    revokeSecond = true; await assert.rejects(manager.permissionsChanged(['first', 'second']), /verification/); assert.equal(runs.get('second').control, 'paused');
+    await assert.rejects(manager.permissionsChanged(['unknown'])); fail = false; await manager.permissionsChanged(['first']); assert.equal(runs.get('first').control, 'paused');
+  } finally { await manager.close(); }
+});
+
+test('Development preflight rejects incompatible paths before activation and captures qualified schedules and custom tools', async () => {
+  for (const failure of ['migration', 'prompt', 'provider', 'method', 'protected', 'base', 'delivery', 'permission', 'schedule-hash', 'schedule-disabled', 'schedule-qualified',
+    'tool-qualified', 'tool-denied', 'tool-data', 'tool-missing', 'tool-schema', 'tool-revision', 'tool-mcp', 'skill-missing']) {
+    const qualified = failure.endsWith('-qualified'), custom = failure.startsWith('tool-');
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-preflight-'))), checkout = join(root, 'repository'); mkdirSync(checkout);
     const profile = JSON.parse(readFileSync(new URL('../../pipeliner.config.json', import.meta.url), 'utf8'));
     profile.repository.owner = 'fixture'; profile.repository.name = 'repo'; profile.project.owner = 'fixture'; profile.project.number = 1;
-    if (failure === 'schedule-qualified') profile.qa.developers[0].github = 'fixture';
+    if (qualified) profile.qa.developers[0].github = 'fixture';
     if (failure === 'delivery') profile.release.strategy = 'direct-production';
     writeFileSync(join(checkout, 'pipeliner.config.json'), JSON.stringify(profile));
     const git = args => execFileSync('/usr/bin/git', ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false', '-C', checkout, ...args], { encoding: 'utf8', stdio: 'pipe' });
     git(['init', '-b', 'main']); git(['add', '--', '.']); git(['-c', 'user.name=Synthetic', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'Synthetic source']); git(['remote', 'add', 'origin', 'https://github.com/fixture/repo.git']);
     const identity = inspectWorkspace(checkout, { repository: 'repo-one', owner: 'fixture', name: 'repo' }), snapshot = snapshotWorkspace(identity);
     const workspace = { id: 'repo-one', repositoryId: 'R1', numericId: 1, slug: 'fixture/repo', name: 'Fixture', path: checkout, localKey: workspaceData(identity).localKey, connections: { setup: null }, project: { id: 'P1', number: 1, owner: { login: 'fixture' } } };
-    const store = openWorkspaceStore(root); store.register(workspace); store.select(workspace.id);
+    const vault = await openTestVault(root), store = openWorkspaceStore(root, { vault }); store.register(workspace); store.select(workspace.id);
     const fixture = issueFixture(workspace); fixture.issues[0].ready = true;
+    const tools = custom ? openToolStore(root) : null;
+    const pack = tools?.install(toolPackage({ name: 'check', purpose: 'Scoped fixture', version: '1', license: 'MIT', dataCategories: failure === 'tool-data' ? ['issue.body'] : ['issue.title'],
+      ...(failure === 'tool-mcp' ? { mcp: { endpoint: 'https://example.com/mcp', protocolVersion: '2026-07-28', tool: { name: 'check', inputSchema: { type: 'object' } } } }
+        : { command: { script: 'printf done', timeoutSeconds: 30, inputSchema: { type: failure === 'tool-schema' ? 'unsupported-type' : 'object' } } }) }), 0);
     const dev = { id: 'dev-one', connection: 'ollama', model: 'test-model', metrics: [], noPrompts: failure !== 'prompt' };
     let prepares = 0, providerCalls = 0, providerClosed = 0;
     const lease = { check() {}, close() {}, signal: new AbortController().signal, value: { credential: { accessToken: 'synthetic-app' }, account: { login: 'fixture' } },
       send: async (url, request) => {
-        if (failure === 'schedule-qualified' && request.method === 'PATCH') { assert.equal(new URL(url).pathname, '/repos/fixture/repo/issues/7'); fixture.issues[0].assignees = ['fixture']; return Response.json(fixture.issues[0]); }
+        if (qualified && request.method === 'PATCH') { assert.equal(new URL(url).pathname, '/repos/fixture/repo/issues/7'); fixture.issues[0].assignees = ['fixture']; return Response.json(fixture.issues[0]); }
         assert.equal(request.method, 'GET');
         if (new URL(url).pathname === '/repos/fixture/repo') return Response.json({ id: 1, node_id: 'R1', allow_merge_commit: failure !== 'method', allow_squash_merge: false });
         assert.match(new URL(url).pathname, /\/branches\/main$/);
         return Response.json({ name: 'main', commit: { sha: failure === 'base' ? 'f'.repeat(40) : snapshot.candidate.sourceCommit }, protected: failure === 'protected' }); } };
     const connections = { developers: () => [dev], acquire: async () => lease, async acquireProvider() {
+      if (failure === 'tool-revision') tools.remove(pack.name, tools.revision());
       providerCalls++; if (failure === 'provider') throw Error('capability-unverified'); return { check() {}, close() { providerClosed++; }, turn() { assert.fail('No model requests before qualification.'); } }; } };
     const policy = openPolicyStore(root, { catalog: () => ({ repositories: [workspace.id], capabilities: capabilityNames, maxConcurrency: 1, background: false,
-      developers: [dev], connections: ['github', 'ollama'].map(id => ({ id, provider: id, repositories: [workspace.id], healthy: true })), extensions: [] }),
+      developers: [dev], connections: ['github', 'ollama'].map(id => ({ id, provider: id, repositories: [workspace.id], healthy: true })), extensions: [], ...(tools ? { tools: tools.catalog() } : {}) }),
       inspectors: { repository: async () => ({ repository: workspace.id, issue: 7, state: 'OPEN', status: 'In Progress', active: [{ issue: 7, status: 'In Progress' }], observedAt: Date.now() }), worker: async binding => ({ ...binding, state: 'stopped', observedAt: Date.now() }) } });
     let stopping;
-    const ledger = openDevelopmentStore(root), supervisor = { status: () => null, async prepare() { prepares++; if (failure !== 'schedule-qualified') assert.fail('No worker before qualified preflight.'); },
+    const ledger = openDevelopmentStore(root, { vault }), supervisor = { status: () => null, async prepare() { prepares++; if (!qualified) assert.fail('No worker before qualified preflight.'); },
       async start() { throw new Error('Development synthetic worker deliberately stops after reservation qualification.'); },
       control(binding) { policy.runtime.requestControl(binding, 'pause'); stopping = policy.runtime.verifyControl(binding); }, async settle() { await stopping; }, async shutdown() {} };
-    const manager = createDevelopmentManager({ store, policy, ledger, connections, supervisor, api: fixture.api });
+    const manager = createDevelopmentManager({ store, policy, ledger, connections, supervisor, tools: failure === 'tool-missing' ? null : tools, api: fixture.api });
     try {
       const preset = presetChanges('pm-autonomous'); if (failure === 'migration') preset['autonomy.scenario'] = null;
       if (failure === 'permission') preset['pipelines.development'].steps[0].permissions = ['artifact.publish'];
       if (failure === 'schedule-qualified') Object.assign(preset, presetChanges('scheduled-autonomous'), { 'scheduling.enabled': true });
-      for (const [scope, target, changes] of [['host', null, { 'permissions.ceiling': developmentPermissions }], ['repository', workspace.id, { ...preset, 'permissions.grants': developmentPermissions, 'agents.dev': dev.id, 'connections.github': 'github', 'connections.ollama': 'ollama' }]]) {
+      if (custom || failure === 'skill-missing') { const step = preset['pipelines.development'].steps[1]; step.kind = 'extension';
+        step.extension = { kind: pack?.kind ?? 'skill', pin: pack?.id ?? starterSkills[0].id, bindings: [{ path: ['title'], source: 'issue.title' }], constants: {} }; }
+      const permissions = custom && failure !== 'tool-denied' ? [...developmentPermissions, 'extension.invoke'] : developmentPermissions;
+      for (const [scope, target, changes] of [['host', null, { 'permissions.ceiling': permissions }], ['repository', workspace.id, { ...preset, 'permissions.grants': permissions, 'agents.dev': dev.id, 'connections.github': 'github', 'connections.ollama': 'ollama', ...(pack ? { 'tools.extensions': [pack.id] } : {}) }]]) {
         const input = policy.control.capture({ commandId: scope, conversationId: 'fixture', target, text: 'Synthetic preflight configuration.' });
         const preview = policy.control.prepare({ inputId: input.id, requestId: scope, scope, target, conversationId: 'fixture', changes, reset: [] });
         policy.control.apply({ commandId: scope + '-apply', proposalId: preview.id, hash: preview.hash, inputId: input.id, conversationId: 'fixture', target });
@@ -84,12 +119,13 @@ test('known incompatible autonomous paths block before activation, reservation, 
       } else manager.dispatch({ operation: 'start', number: 7 });
       await manager.idle();
       assert.ok(manager.status().error, failure);
-      if (failure === 'schedule-qualified') { const run = policy.runtime.status(workspace.id); assert.equal(run.control, 'paused'); assert.equal(run.issue, 7); assert.equal(run.policyHash, policy.worker.read(workspace.id).hash);
-        assert.deepEqual(ledger.captured(run.id).source, snapshot.candidate); assert.equal(prepares, 1); assert.deepEqual(fixture.writes, ['field-Status']); }
+      if (qualified) { const run = policy.runtime.status(workspace.id); assert.equal(run.control, 'paused'); assert.equal(run.issue, 7); assert.equal(run.policyHash, policy.worker.read(workspace.id).hash);
+        assert.deepEqual(ledger.captured(run.id).source, snapshot.candidate); assert.equal(prepares, 1); assert.deepEqual(fixture.writes, ['field-Status']);
+        if (pack) { assert.equal(ledger.captured(run.id).toolManifest[0].id, pack.id); assert.equal(ledger.captured(run.id).pipeline.steps[1].extension.pin, pack.id); } }
       else { assert.equal(policy.runtime.status(workspace.id), null); assert.equal(prepares, 0); assert.deepEqual(fixture.writes, []); }
-      assert.equal(providerCalls, ['provider', 'method', 'protected', 'base', 'schedule-qualified'].includes(failure) ? 1 : 0); assert.equal(providerClosed, ['method', 'protected', 'base', 'schedule-qualified'].includes(failure) ? 1 : 0);
+      assert.equal(providerCalls, ['provider', 'method', 'protected', 'base', 'schedule-qualified', 'tool-qualified', 'tool-revision'].includes(failure) ? 1 : 0); assert.equal(providerClosed, ['method', 'protected', 'base', 'schedule-qualified', 'tool-qualified', 'tool-revision'].includes(failure) ? 1 : 0);
       assert.equal(readFileSync(join(checkout, 'pipeliner.config.json'), 'utf8'), JSON.stringify(profile));
-    } finally { await manager.close(); ledger.close(); policy.close(); store.close(); rmSync(root, { recursive: true }); }
+    } finally { await manager.close(); ledger.close(); vault.close(); policy.close(); tools?.close(); store.close(); rmSync(root, { recursive: true }); }
   }
 });
 
@@ -105,7 +141,7 @@ for (const mode of ['supervised', 'autonomous', 'takeover']) test(mode === 'take
   const identity = inspectWorkspace(checkout, { repository: 'repo-one', owner: 'fixture', name: 'repo' }), snapshot = snapshotWorkspace(identity);
   const workspace = { id: 'repo-one', repositoryId: 'R1', numericId: 1, slug: 'fixture/repo', name: 'Fixture', path: checkout, localKey: workspaceData(identity).localKey,
     connections: { setup: null }, project: { id: 'P1', number: 1, owner: { login: 'fixture' } } };
-  const store = openWorkspaceStore(root); store.register(workspace); store.select(workspace.id);
+  const vault = await openTestVault(root), store = openWorkspaceStore(root, { vault }); store.register(workspace); store.select(workspace.id);
   const fixture = issueFixture(workspace), issue = fixture.issues[0]; issue.ready = true; issue.status = 'Pending Review'; issue.metadata.Status = issue.status;
   const dev = { id: 'dev-one', connection: 'ollama', model: 'test-model', metrics: [] }, head = 'a'.repeat(40), merged = 'b'.repeat(40), candidate = { sourceCommit: head, gitTree: snapshot.candidate.gitTree };
   const fallback = { ...dev, id: 'dev-two' }, developers = takeover ? [dev, fallback] : [dev];
@@ -129,7 +165,7 @@ for (const mode of ['supervised', 'autonomous', 'takeover']) test(mode === 'take
   const policy = openPolicyStore(root, { catalog: () => ({ repositories: [workspace.id], capabilities: developmentPermissions, maxConcurrency: 1, background: false,
     developers, connections: ['github', 'ollama'].map(id => ({ id, provider: id, repositories: [workspace.id], healthy: true })), extensions: [] }),
     inspectors: { repository: value => manager.observe(value), effect: action => manager.inspectIntegration(action), worker: binding => ({ ...binding, state: 'stopped', observedAt: Date.now() }) } });
-  const ledger = openDevelopmentStore(root); let work;
+  const ledger = openDevelopmentStore(root, { vault }); let work;
   const supervisor = { status: () => ({ worker: 'stopped', pending: null, error: null }), attach() {}, control(binding, operation) {
     assert.equal(operation, 'pause'); policy.runtime.requestControl(binding, 'pause'); work = policy.runtime.verifyControl(binding); return { received: true }; },
     async settle() { await work; }, async cleanupRun() { if (cleanupFails) throw Error('Development owned cleanup failed.'); return { workspaceRemoved: true }; }, async shutdown() {} };
@@ -191,7 +227,7 @@ for (const mode of ['supervised', 'autonomous', 'takeover']) test(mode === 'take
     assert.equal(manager.status().error, null); assert.equal(policy.runtime.status(workspace.id), null); assert.equal(ledger.status(run.id).state, 'complete');
     assert.equal(issue.state, 'CLOSED'); assert.equal(issue.status, 'Done'); assert.equal(branch, false); assert.equal(store.pending('development').length, 0);
     assert.equal(mergeWrites, 1); assert.equal(closeWrites, 1); assert.equal(branchWrites, 1); assert.equal(readFileSync(join(checkout, 'app.mjs'), 'utf8'), 'export const value = 1;\n');
-  } finally { await manager.close(); ledger.close(); policy.close(); store.close(); rmSync(root, { recursive: true }); }
+  } finally { await manager.close(); ledger.close(); vault.close(); policy.close(); store.close(); rmSync(root, { recursive: true }); }
 });
 
 test('Dev and permission previews stay PM-controlled, scoped and stale-frame safe', async () => {
@@ -201,7 +237,7 @@ test('Dev and permission previews stay PM-controlled, scoped and stale-frame saf
   const store = { selected: () => workspace.id, workspaces: () => [workspace], pending: () => [], effects: () => [] };
   const policy = openPolicyStore(root, { catalog: () => ({ repositories: [workspace.id], capabilities: capabilityNames, maxConcurrency: 1, background: false,
     connections: [{ id: 'ollama', provider: 'ollama', repositories: [workspace.id], healthy: true }, { id: 'github', provider: 'github', repositories: [workspace.id], healthy: true }], developers: [dev], extensions: [] }) });
-  const ledger = openDevelopmentStore(root), manager = createDevelopmentManager({ store, policy, ledger, connections, supervisor: null });
+  const vault = await openTestVault(root), ledger = openDevelopmentStore(root, { vault }), manager = createDevelopmentManager({ store, policy, ledger, connections, supervisor: null });
   const frame = { parent: null, url: 'pipeliner://app/index.html' }, contents = { isDestroyed: () => false, mainFrame: frame }, event = { sender: contents, senderFrame: frame };
   const channel = createDevelopmentControlChannel(manager, { contents, url: frame.url, context: () => ({ revision: manager.status().revision }) });
   try {
@@ -221,5 +257,5 @@ test('Dev and permission previews stay PM-controlled, scoped and stale-frame saf
     assert.deepEqual(policy.worker.read(workspace.id).values['permissions.ceiling'].value, defaults['permissions.ceiling']);
     assert.throws(() => channel.dispatch(event, { operation: 'start', number: 1, Ready: true, contextRevision: manager.status().revision }));
     assert.equal(manager.status().run, null); assert.equal(manager.status().skills.every(skill => skill.license === 'MIT'), true);
-  } finally { await manager.close(); ledger.close(); policy.close(); rmSync(root, { recursive: true }); }
+  } finally { await manager.close(); ledger.close(); vault.close(); policy.close(); rmSync(root, { recursive: true }); }
 });

@@ -1,5 +1,5 @@
 export const capabilityNames = Object.freeze(['workspace.read', 'workspace.write', 'worker.exec', 'git.push', 'github.read', 'github.issue.write',
-  'github.pr.write', 'github.project.write', 'provider.turn', 'artifact.build', 'artifact.publish', 'extension.install', 'host.launch', 'host.install', 'host.automation']);
+  'github.pr.write', 'github.project.write', 'provider.turn', 'artifact.build', 'artifact.publish', 'extension.install', 'extension.invoke', 'host.launch', 'host.install', 'host.automation']);
 export function immutable(value) {
   if (value && typeof value === 'object') { for (const item of Object.values(value)) immutable(item); Object.freeze(value); }
   return value;
@@ -34,6 +34,30 @@ const choice = values => v => values.includes(v);
 const boolean = v => typeof v === 'boolean';
 const reference = v => v === null || identifier(v);
 const capabilities = v => list(v, choice(capabilityNames));
+export const extensionInputNames = Object.freeze(['issue.title', 'issue.body', 'candidate.sourceCommit', 'candidate.gitTree', 'previous.structuredContent', 'pm.supplied']);
+const propertyPath = value => Array.isArray(value) && value.length > 0 && value.length <= 8 && value.every(key => typeof key === 'string'
+  && /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(key) && !['__proto__', 'constructor', 'prototype'].includes(key));
+export function validateExtension(value) {
+  try {
+    canonicalJSON(value); record(value, ['kind', 'pin', 'bindings', 'constants']);
+    if (!['skill', 'mcp', 'command'].includes(value.kind) || typeof value.pin !== 'string'
+      || !(value.kind === 'skill' ? /^(?:skill-[a-f0-9]{40}|pipeliner-(?:forge|motif|shape|lens))$/ : /^tool-[a-f0-9]{40}$/).test(value.pin)
+      || !Array.isArray(value.bindings) || value.bindings.length > 16 || !value.constants || typeof value.constants !== 'object' || Array.isArray(value.constants)
+      || canonicalJSON(value.constants).length > 16384) throw new Error();
+    function keys(item) { if (!item || typeof item !== 'object') return; for (const [key, child] of Object.entries(item)) { if (['__proto__', 'constructor', 'prototype'].includes(key)) throw new Error(); keys(child); } }
+    keys(value.constants); const paths = [];
+    for (const binding of value.bindings) {
+      record(binding, ['path', 'source'], ['step', 'selection']);
+      if (!propertyPath(binding.path) || !extensionInputNames.includes(binding.source) || binding.source === 'pm.supplied'
+        || Object.hasOwn(value.constants, binding.path[0])) throw new Error();
+      if (binding.source === 'previous.structuredContent') {
+        if (!identifier(binding.step) || binding.selection !== undefined && !propertyPath(binding.selection)) throw new Error();
+      } else if (binding.step !== undefined || binding.selection !== undefined) throw new Error();
+      const path = binding.path.join('.'); if (paths.some(previous => path === previous || path.startsWith(previous + '.') || previous.startsWith(path + '.'))) throw new Error(); paths.push(path);
+    }
+    return true;
+  } catch { throw new Error('Extension step needs an exact selected pin and safe typed data bindings.'); }
+}
 const step = (id, label, kind, next, feedback = 'blocked') => ({ id, label, kind, permissions: [], inputs: ['issue'],
   expectedResult: label, evidence: ['verified-result'], routes: { success: next, failure: 'blocked', feedback }, retryLimit: 0, visitLimit: 4 });
 export const developmentTemplate = immutable({ entry: 'research', steps: [
@@ -55,7 +79,7 @@ export function validatePipeline(value, development = false, requireQa = false) 
     if (!identifier(value.entry) || !Array.isArray(value.steps) || !value.steps.length || value.steps.length > 64) throw new Error();
     const steps = new Map(), labels = new Set();
     for (const s of value.steps) {
-      record(s, ['id', 'label', 'kind', 'permissions', 'inputs', 'expectedResult', 'evidence', 'routes', 'retryLimit', 'visitLimit'], ['timeoutSeconds']);
+      record(s, ['id', 'label', 'kind', 'permissions', 'inputs', 'expectedResult', 'evidence', 'routes', 'retryLimit', 'visitLimit'], ['timeoutSeconds', 'extension']);
       record(s.routes, ['success', 'failure', 'feedback']);
       if (!identifier(s.id) || ['complete', 'blocked'].includes(s.id) || steps.has(s.id) || !text(s.label) || !text(s.expectedResult)
         || !['agent', 'check', 'pm-qa', 'pr-integration', 'build', 'artifact-verify', 'retain', 'publish', 'extension'].includes(s.kind)
@@ -64,8 +88,14 @@ export function validatePipeline(value, development = false, requireQa = false) 
       const label = s.label.normalize('NFKC').trim().toLowerCase();
       if (!label || labels.has(label)) throw new Error('Pipeline step names must be nonempty and unique');
       labels.add(label); steps.set(s.id, s);
+      if (s.extension !== undefined) {
+        validateExtension(s.extension);
+        if (s.kind !== 'extension' || s.extension.kind === 'mcp' && s.retryLimit !== 0) throw new Error('Extension MCP steps cannot replay automatically.');
+      }
     }
     if (!steps.has(value.entry) || [...steps.values()].some(s => Object.values(s.routes).some(r => !steps.has(r) && !['complete', 'blocked'].includes(r)))) throw new Error();
+    for (const s of steps.values()) for (const binding of s.extension?.bindings ?? []) if (binding.source === 'previous.structuredContent'
+      && (binding.step === s.id || !steps.has(binding.step))) throw new Error('Extension prior-result step unavailable.');
     const reached = new Set(), visited = new Set(); let completion = false;
     function walk(id, integrated, qaPassed) {
       if (id === 'blocked') return;
@@ -125,6 +155,8 @@ const entries = [
   ['skills.bundledEnabled', 'S-09', 'Bundled skills', 'repository', true, boolean, 'tightening-now-expansion-new-run'],
   ['skills.extensions', 'S-09', 'Approved pinned extensions', 'repository', [], list, 'new-run'],
   ['skills.disabled', 'S-09', 'Disabled extension references', 'repository', [], list, 'tightening-now-expansion-new-run'],
+  ['tools.extensions', 'S-09', 'Selected pinned tools', 'repository', [], list, 'new-run'],
+  ['tools.disabled', 'S-09', 'Disabled tool references', 'repository', [], list, 'tightening-now-expansion-new-run'],
   ['testing.requiredChecks', 'S-10', 'Required check references', 'repository', [], list, 'new-run'],
   ['testing.instructions', 'S-10', 'PM testing actions and expected results', 'repository', [], v => Array.isArray(v) && v.length <= 64 && v.every(s => { record(s, ['action', 'expected']); return text(s.action) && text(s.expected); }), 'new-run'],
   ['delivery.output', 'S-11', 'Local output folder reference', 'repository', null, reference, 'new-run'],
@@ -145,6 +177,7 @@ const entries = [
   ['appearance.textScale', 'S-13', 'Text scale', 'host', 1, v => Number.isFinite(v) && v >= 1 && v <= 2, 'immediate'],
   ['appearance.motion', 'S-13', 'Motion preference', 'host', 'system', choice(['system', 'reduced']), 'immediate'],
   ['appearance.technicalDetails', 'S-13', 'Technical details', 'host', false, boolean, 'immediate'],
+  ['appearance.layout', 'S-13', 'Current work placement', 'host', 'above', choice(['above', 'beside']), 'immediate'],
   ['appearance.osNotifications', 'S-13', 'OS notifications', 'host', false, boolean, 'verified-host-action'],
   ['appearance.repositoryNotifications', 'S-13', 'Repository in-app notifications', 'repository', true, boolean, 'immediate'],
   ['updates.channel', 'S-14', 'Desktop update channel', 'host', 'stable', choice(['stable', 'beta', 'alpha']), 'next-check'],
@@ -161,17 +194,21 @@ export function validateValue(id, value) {
   const f = fields.get(id); if (!f) throw new Error('Unknown policy field');
   if (!f.validate(value)) throw new Error(`Invalid ${f.label}`);
 }
-// Additive safe defaults do not rewrite or rehash captured schema-1 policy versions.
-export const legacyDefaults = immutable(Object.fromEntries(Object.entries(defaults).filter(([id]) => !['scheduling.mode', 'scheduling.calendar'].includes(id))));
+// Exact old defaults stay part of their immutable policy hashes. Safe additions apply only in the resolved view.
+export const versionThreeDefaults = immutable(Object.fromEntries(Object.entries(defaults).filter(([id]) => id !== 'appearance.layout')));
+export const versionTwoDefaults = immutable(Object.fromEntries(Object.entries(versionThreeDefaults).filter(([id]) => !id.startsWith('tools.'))));
+export const legacyDefaults = immutable(Object.fromEntries(Object.entries(versionTwoDefaults).filter(([id]) => !['scheduling.mode', 'scheduling.calendar'].includes(id))));
 export function rawValues(state, target) { return { ...defaults, ...state.defaults, ...state.host, ...state.global, ...(target ? state.repositories[target] : {}) }; }
 export function validateState(state) {
   canonicalJSON(state); record(state, ['schemaVersion', 'defaults', 'host', 'global', 'repositories']);
-  if (![1, 2].includes(state.schemaVersion) || canonicalJSON(state.defaults) !== canonicalJSON(state.schemaVersion === 1 ? legacyDefaults : defaults)) throw new Error('Unsupported policy schema or defaults');
+  if (![1, 2, 3, 4].includes(state.schemaVersion) || canonicalJSON(state.defaults) !== canonicalJSON(state.schemaVersion === 1 ? legacyDefaults : state.schemaVersion === 2 ? versionTwoDefaults : state.schemaVersion === 3 ? versionThreeDefaults : defaults)) throw new Error('Unsupported policy schema or defaults');
   for (const [scope, values] of [['host', state.host], ['global', state.global], ...Object.entries(state.repositories).map(([id, v]) => {
     if (!identifier(id)) throw new Error('Invalid repository identity'); return ['repository', v];
   })]) {
     if (!values || ![Object.prototype, null].includes(Object.getPrototypeOf(values))) throw new Error('Invalid policy scope');
     for (const [id, value] of Object.entries(values)) {
+      if (state.schemaVersion < 4 && id === 'appearance.layout') throw new Error('Layout preferences require the current policy schema');
+      if (state.schemaVersion < 3 && (id.startsWith('tools.') || ['permissions.ceiling', 'permissions.grants'].includes(id) && value.includes('extension.invoke'))) throw new Error('Tool permissions require the current policy schema');
       validateValue(id, value); const f = fields.get(id);
       if (f.scope === 'read-only' || (f.scope === 'host') !== (scope === 'host')) throw new Error('Invalid host or repository field scope');
     }

@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { lstatSync, realpathSync } from 'node:fs';
 import { resolve, join } from 'node:path';
+import { endpointURL } from '../tools/transport.mjs';
 
 function nativeEntry(helper, directory, signal, args) {
   const file = lstatSync(helper);
@@ -41,4 +42,11 @@ export async function nativeFolderEntry(helper, directory, signal, existing) {
   const value = await nativeEntry(helper, directory, signal, [existing ? '--folder-existing' : '--folder-parent']);
   if (typeof value.path !== 'string' || !value.path.startsWith('/') || value.path.length > 4096 || value.path.includes('\0')) throw new Error('native-entry-failed', { cause: { stage: 'folder-response', pathType: typeof value.path } });
   return value.path;
+}
+
+export async function nativeMCPEntry(helper, directory, endpoint, signal, qualify = false) {
+  endpointURL(endpoint);
+  const value = await nativeEntry(helper, directory, signal, ['--mcp', endpoint, ...(qualify ? ['--qualify', join(directory, 'mcp-secure-field.png')] : [])]);
+  if (typeof value.key !== 'string' || !/^[A-Za-z0-9._~+\/-]{8,4096}={0,2}$/.test(value.key)) throw new Error('native-entry-failed');
+  return value;
 }

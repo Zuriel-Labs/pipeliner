@@ -1,0 +1,42 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, realpath, chmod, writeFile, symlink, link, unlink, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { readGuestReport } from './bridge-data.mjs';
+import testStorage from '../test-storage.cjs';
+
+test('Guest reports reject stale, foreign, linked, oversized and hostile evidence without a host effect', { skip:process.platform !== 'darwin' || process.arch !== 'arm64' },async () => {
+  const root=await realpath(await mkdtemp(join(tmpdir(),'pipeliner-54-bridge-data-'))); await chmod(root,0o700);
+  const nonce='a'.repeat(32), path=join(root,'agent-result.json'), neighbor=join(root,'neighbor');
+  const value={nonce,clicked:true,guestLaunchEscapeContained:true};
+  let lease, returnedLease;
+  try {
+    await writeFile(path,JSON.stringify(value),{mode:0o600});
+    assert.deepEqual(await readGuestReport(root,'agent-result.json',nonce),value);
+    await assert.rejects(readGuestReport(root,'agent-result.json','b'.repeat(32)),/stale/);
+    await assert.rejects(readGuestReport(root,'../neighbor',nonce),/context-unqualified/);
+    await writeFile(path,JSON.stringify({...value,hostCommand:'unapproved'})); await assert.rejects(readGuestReport(root,'agent-result.json',nonce));
+    await writeFile(path,JSON.stringify({...value,clicked:'true'})); await assert.rejects(readGuestReport(root,'agent-result.json',nonce),/type-unqualified/);
+    await writeFile(path,JSON.stringify({nonce,clicked:true})); await assert.rejects(readGuestReport(root,'agent-result.json',nonce));
+    await writeFile(path,' '.repeat(16385)); await assert.rejects(readGuestReport(root,'agent-result.json',nonce),/file-unqualified/);
+    await unlink(path); await writeFile(neighbor,JSON.stringify(value),{mode:0o600});
+    if (process.env.TEST_ARTIFACT_RUN) lease = testStorage.negativeFixtureLease({ kind:'bridge', root }, import.meta.url);
+    await symlink(neighbor,path); lease?.aliasReady();
+    await assert.rejects(readGuestReport(root,'agent-result.json',nonce)); lease?.prepareHardlink(); await unlink(path); await link(neighbor,path); lease?.hardlinkReady();
+    await assert.rejects(readGuestReport(root,'agent-result.json',nonce),/file-unqualified/);
+    lease?.closing(); await unlink(path); lease?.release(); lease = undefined; await writeFile(path,JSON.stringify(value),{mode:0o644});
+    await chmod(path,0o644); // Exercise the unsafe mode even when the caller uses a restrictive umask.
+    await assert.rejects(readGuestReport(root,'agent-result.json',nonce),/file-unqualified/);
+    if (process.env.TEST_ARTIFACT_RUN) returnedLease = testStorage.negativeFixtureLease({ kind:'bridge-returned', root }, import.meta.url);
+    await symlink(neighbor,join(root,'returned-link.json')); returnedLease?.aliasReady();
+    await assert.rejects(readGuestReport(root,'returned-link.json',nonce),{code:'ELOOP'});
+    const ready={nonce,pid:2,window:1,buttonX:1023,buttonY:767,neighborReadDenied:true,neighborWriteDenied:true,
+      readOnlyWriteDenied:true,escapeLinkReadDenied:true,descendantDenied:true,targetBundle:`/Users/pipeliner/Library/Caches/pipeliner-54-app-${nonce}/Target.app`,signatureVerified:true,actualGuestWindowVerified:true};
+    const readyPath=join(root,'agent-ready.json');
+    await writeFile(readyPath,JSON.stringify(ready),{mode:0o600});assert.deepEqual(await readGuestReport(root,'agent-ready.json',nonce),ready);
+    for(const changes of [{buttonX:1024},{buttonY:-1},{buttonX:null},{pid:2.5},{window:0},{targetBundle:'/Applications/Foreign.app'},{actualGuestWindowVerified:'true'}]) {
+      await writeFile(readyPath,JSON.stringify({...ready,...changes}));await assert.rejects(readGuestReport(root,'agent-ready.json',nonce));
+    }
+  } finally { lease?.closing(); returnedLease?.closing(); await rm(root,{recursive:true}); lease?.release(); returnedLease?.release(); }
+});

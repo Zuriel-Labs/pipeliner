@@ -1,52 +1,127 @@
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, realpath, rm, access, writeFile, readFile, lstat } from 'node:fs/promises';
+import { mkdtemp, mkdir, realpath, rm, access, writeFile, readFile, lstat, readdir, rmdir } from 'node:fs/promises';
 import { tmpdir, homedir } from 'node:os';
 import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 
 const exec = promisify(execFile), root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const qualificationFlags = ['--qualify', '--qualify-issues', '--qualify-pipelines', '--qualify-development', '--qualify-scheduling', '--qualify-background'];
-const qualifying = process.argv.some(arg => qualificationFlags.includes(arg));
-if (process.argv.slice(2).some(arg => ![...qualificationFlags, '--retain-owned-capture'].includes(arg))) throw new Error('argument-denied');
+const qualificationFlags = ['--qualify', '--qualify-issues', '--qualify-soak', '--qualify-pipelines', '--qualify-development', '--qualify-scheduling', '--qualify-background', '--qualify-skills', '--qualify-tools', '--qualify-privacy', '--qualify-appearance', '--qualify-delivery', '--qualify-permissions'];
+if (process.argv.includes('--qualify-soak') && !process.argv.includes('--qualify-issues')) throw new Error('soak-requires-workload');
+const storageFixture = process.argv.includes('--storage-fixture');
+if (storageFixture && process.argv.some(arg => qualificationFlags.includes(arg) || arg === '--retain-owned-capture')) {
+  throw new Error('storage-fixture-native-option-conflict');
+}
+const qualifying = storageFixture || process.argv.some(arg => qualificationFlags.includes(arg));
+const started = performance.now(), progress = createRequire(import.meta.url)('../desktop/app/qualification-progress.cjs');
+const phase = name => { if (qualifying && !storageFixture) progress.phase(name, performance.now() - started); };
+if (process.argv.slice(2).some(arg => ![...qualificationFlags, '--retain-owned-capture', '--storage-fixture'].includes(arg))) throw new Error('argument-denied');
 if (process.platform !== 'darwin' || process.arch !== 'arm64') throw new Error('host-unqualified');
+const { qualificationContext, qualificationEnvironment, validateOwnedDataDirectory } = createRequire(import.meta.url)('../desktop/test-storage.cjs');
+const storage = qualificationContext();
+const chromiumEnvironment = qualificationEnvironment(storage, { ...process.env,
+  MAC_CHROMIUM_TMPDIR: process.env.MAC_CHROMIUM_TMPDIR ?? storage.paths.tmp });
+{
+  if (resolve(tmpdir()) !== storage.paths.tmp) throw new Error('test-storage-context-mismatch');
+  try { await mkdir(storage.paths.recordings, { mode: 0o700 }); }
+  catch (error) { if (error.code !== 'EEXIST') throw error; }
+  validateOwnedDataDirectory(storage, storage.paths.recordings);
+  if (process.argv.includes('--qualify-soak')) {
+    try { await mkdir(storage.paths.outputs, { mode: 0o700 }); }
+    catch (error) { if (error.code !== 'EEXIST') throw error; }
+    validateOwnedDataDirectory(storage, storage.paths.outputs);
+  }
+  if (storageFixture) {
+    const path = join(storage.paths.recordings, 'synthetic-storage-capture.bin');
+    await writeFile(path, Buffer.alloc(128, 112), { flag: 'wx', mode: 0o600 });
+    if ((await readFile(path)).length !== 128) throw new Error('storage-fixture-readback');
+    console.log(JSON.stringify({ syntheticStorageFixture: true, capture: path, repository: root }));
+    process.exit(0);
+  }
+}
 const temporary = await realpath(await mkdtemp(join(tmpdir(), 'pipeliner-app-'))), helper = join(temporary, 'secure-entry');
+const temporaryInfo = await lstat(temporary);
 const calendar = join(temporary, 'calendar');
-let child, timer, code = 1, report = '', errors = 0;
+let child, privacyExport, privacyExportInfo, nativeRoot, nativeRootInfo, code = 1, report = '', errors = 0, delivered = 0;
+let cancelled = false;
+const cancel = () => { cancelled = true; if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGTERM'); };
+process.on('SIGTERM', cancel); process.on('SIGINT', cancel);
 try {
+  if (qualifying) {
+    nativeRoot = await realpath(await mkdtemp(join(tmpdir(), 'pipeliner-native-workspace-')));
+    nativeRootInfo = await lstat(nativeRoot);
+    if (!nativeRootInfo.isDirectory() || nativeRootInfo.isSymbolicLink() || nativeRootInfo.uid !== process.getuid()
+      || (nativeRootInfo.mode & 0o777) !== 0o700 || nativeRootInfo.dev !== temporaryInfo.dev) throw new Error('native-fixture-root-invalid');
+  }
+  if (process.argv.includes('--qualify-privacy')) {
+    privacyExport = await realpath(await mkdtemp(join(tmpdir(), 'pipeliner-54-privacy-export-'))); privacyExportInfo = await lstat(privacyExport);
+  }
+  phase('helper-build-started');
   await exec('/usr/bin/clang', ['-fobjc-arc', '-framework', 'AppKit', '-mmacosx-version-min=13.0', ...(qualifying ? ['-DPIPELINER_QUALIFY'] : []), join(root, 'desktop/connections/secure-entry.m'), '-o', helper], { timeout: 30000 });
   await exec('/usr/bin/clang', ['-fobjc-arc', '-framework', 'Foundation', '-mmacosx-version-min=13.0', join(root, 'desktop/scheduling/calendar.m'), '-o', calendar], { timeout: 30000 });
+  phase('helper-build-finished');
   const electron = join(root, 'desktop/prototype/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron'); await access(electron);
-  child = spawn(electron, [join(root, 'desktop/app/main.cjs'), `--key-helper=${helper}`, `--calendar-helper=${calendar}`, ...(qualifying ? ['--qualify', ...process.argv.filter(arg => qualificationFlags.includes(arg) && arg !== '--qualify'), `--data-directory=${temporary}`] : [])], {
-    env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: homedir(), TMPDIR: temporary, LANG: 'en_US.UTF-8' }, stdio: ['ignore', 'pipe', 'pipe'],
+  if (cancelled) throw new Error('qualification-cancelled');
+  phase('app-launch-started');
+  child = spawn(electron, [join(root, 'desktop/app/main.cjs'), `--key-helper=${helper}`, `--calendar-helper=${calendar}`, ...(qualifying ? ['--qualify', ...process.argv.filter(arg => qualificationFlags.includes(arg) && arg !== '--qualify'), `--test-data-directory=${temporary}`] : [])], {
+    env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: homedir(), LANG: 'en_US.UTF-8', ...chromiumEnvironment, ...(nativeRoot ? { PIPELINER_NATIVE_WORKSPACE_ROOT: nativeRoot } : {}), ...(privacyExport ? { PIPELINER_PRIVACY_EXPORT_DIRECTORY: privacyExport } : {}) }, stdio: ['ignore', 'pipe', 'pipe'],
   });
-  if (qualifying) timer = setTimeout(() => child.kill('SIGTERM'), 180000);
-  child.stdout.setEncoding('utf8'); child.stdout.on('data', bytes => { report += bytes; if (Buffer.byteLength(report) > 262144) child.kill('SIGTERM'); });
+  child.stdout.setEncoding('utf8'); child.stdout.on('data', bytes => {
+    report += bytes; if (Buffer.byteLength(report) > 262144) child.kill('SIGTERM');
+    // Only exact fixture progress and panel stages are streamed; arbitrary child output stays suppressed.
+    const end = report.lastIndexOf('\n'); if (end < delivered) return;
+    for (const line of report.slice(delivered, end).split('\n')) {
+      const marker = progress.progress(line); if (marker) { console.log(JSON.stringify(marker)); continue; }
+      if (!line.startsWith('{"privacyNativePanel"')) continue;
+      try { const stage = JSON.parse(line), expected = privacyExport ?? (nativeRoot ? join(nativeRoot, 'repository') : join(homedir(), 'Documents', `pipeliner-36-native-${child.pid}`));
+        if (['save-cancel', 'save', 'open'].includes(stage.privacyNativePanel) && stage.directory === expected) console.log(JSON.stringify(stage));
+      } catch { /* Do not forward malformed native output. */ }
+    }
+    delivered = end + 1;
+  });
   child.stderr.on('data', bytes => { errors += bytes.length; }); // Provider and Electron raw logs never enter the handoff.
   code = await new Promise((resolveCode, reject) => { child.once('error', reject); child.once('close', value => resolveCode(value ?? 1)); });
   if (qualifying) {
     const line = report.split('\n').find(value => value.startsWith('{"desktopQualification"'));
     if (!line) throw new Error('native-report-missing');
     const result = JSON.parse(line); result.launcher = { pid: child.pid, exitCode: code, helperCompiledLocally: true, rawLogsSuppressed: true };
-    for (const [available, file, suffix, key] of [['captureAvailable', 'window-capture.png', '', 'capturePath'], ['nativeCaptureAvailable', 'secure-field.png', '-native', 'nativeCapturePath'], ['qaCaptureAvailable', 'qa-capture.png', '-qa', 'qaCapturePath']]) {
+    for (const [available, file, suffix, key] of [['captureAvailable', 'window-capture.png', '', 'capturePath'], ['nativeCaptureAvailable', 'secure-field.png', '-native', 'nativeCapturePath'], ['qaCaptureAvailable', 'qa-capture.png', '-qa', 'qaCapturePath'], ['layoutCaptureAvailable', 'layout-capture.png', '-layout', 'layoutCapturePath'], ['recoveryCaptureAvailable', 'recovery-capture.png', '-recovery', 'recoveryCapturePath']]) {
       if (!process.argv.includes('--retain-owned-capture') || !result[available]) continue;
       const source = join(temporary, file), info = await lstat(source);
       if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.uid !== process.getuid() || info.size > 10 * 1024 * 1024) throw new Error('capture-ownership-invalid');
-      const capture = join('/tmp', `pipeliner-${process.argv.includes('--qualify-background') ? 52 : process.argv.includes('--qualify-scheduling') ? 50 : process.argv.includes('--qualify-development') ? 42 : process.argv.includes('--qualify-pipelines') ? 40 : 36}-${child.pid}${suffix}.png`);
+      const capture = join(storage.paths.recordings, `pipeliner-${process.argv.includes('--qualify-skills') || process.argv.includes('--qualify-tools') || process.argv.includes('--qualify-privacy') || process.argv.includes('--qualify-appearance') || process.argv.includes('--qualify-delivery') || process.argv.includes('--qualify-permissions') ? 54 : process.argv.includes('--qualify-background') ? 52 : process.argv.includes('--qualify-scheduling') ? 50 : process.argv.includes('--qualify-pipelines') ? 40 : 36}-${child.pid}${suffix}.png`);
       await writeFile(capture, await readFile(source), { flag: 'wx', mode: 0o600 }); result[key] = capture;
     }
     console.log(JSON.stringify(result));
   }
 } finally {
-  clearTimeout(timer); if (child && child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await new Promise(resolveClose => child.once('close', resolveClose)); }
+  if (child && child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await new Promise(resolveClose => child.once('close', resolveClose)); }
+  process.removeListener('SIGTERM', cancel); process.removeListener('SIGINT', cancel);
   try {
     const record = JSON.parse(await readFile(join(temporary, 'native-ownership.json'), 'utf8'));
-    const expected = join(homedir(), 'Documents', `pipeliner-36-native-${child.pid}`), info = await lstat(expected);
+    const expected = join(nativeRoot, 'repository'), info = await lstat(expected);
     if (record.pid !== child.pid || record.path !== expected || info.dev + ':' + info.ino !== record.key || !info.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid() || await realpath(expected) !== expected) throw new Error('fixture-cleanup-unverified');
     await rm(expected, { recursive: true }); await access(expected).then(() => { throw new Error('fixture-cleanup-unverified'); }, error => { if (error.code !== 'ENOENT') throw error; });
     console.log(JSON.stringify({ cleanup: 'owned-native-workspace-removed', verified: true }));
   } catch (error) { if (error.code !== 'ENOENT') throw error; }
-  await rm(temporary, { recursive: true, force: true });
-  console.log(JSON.stringify({ cleanup: 'owned-app-root-removed', processesClosed: !child || child.exitCode !== null || child.signalCode !== null }));
+  if (nativeRoot) {
+    const info = await lstat(nativeRoot);
+    if (info.dev !== nativeRootInfo.dev || info.ino !== nativeRootInfo.ino || !info.isDirectory() || info.isSymbolicLink()
+      || info.uid !== process.getuid() || await realpath(nativeRoot) !== nativeRoot || (await readdir(nativeRoot)).length) throw new Error('native-fixture-root-cleanup-unverified');
+    await rmdir(nativeRoot);
+    console.log(JSON.stringify({ cleanup: 'owned-native-fixture-root-removed', verified: true }));
+  }
+  if (privacyExport) {
+    const info = await lstat(privacyExport);
+    if (info.dev !== privacyExportInfo.dev || info.ino !== privacyExportInfo.ino || !info.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid() || await realpath(privacyExport) !== privacyExport) throw new Error('export-fixture-cleanup-unverified');
+    await rm(privacyExport, { recursive: true }); await access(privacyExport).then(() => { throw new Error('export-fixture-cleanup-unverified'); }, error => { if (error.code !== 'ENOENT') throw error; });
+    console.log(JSON.stringify({ cleanup: 'owned-privacy-export-removed', verified: true }));
+  }
+  const info = await lstat(temporary);
+  if (info.dev !== temporaryInfo.dev || info.ino !== temporaryInfo.ino || !info.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid() || await realpath(temporary) !== temporary) throw Error('app-root-cleanup-unverified');
+  await rm(temporary, { recursive: true });
+  await access(temporary).then(() => { throw Error('app-root-cleanup-unverified'); }, error => { if (error.code !== 'ENOENT') throw error; });
+  console.log(JSON.stringify({ cleanup: 'owned-app-root-removed', verified: true, processesClosed: !child || child.exitCode !== null || child.signalCode !== null }));
 }
 process.exitCode = code;

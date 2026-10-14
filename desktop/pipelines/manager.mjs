@@ -1,14 +1,17 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { canonicalJSON, capabilityNames, record } from '../core/settings.mjs';
+import { canonicalJSON, capabilityNames, record, validateExtension, extensionInputNames } from '../core/settings.mjs';
 import { containsSecret } from '../connections/commands.mjs';
 import { pipelineCommand, pipelineShapes, stepTypes, inputNames, evidenceNames } from './commands.mjs';
 import { presetChanges, editDefinition, editTesting } from './model.mjs';
+import { validateToolBinding } from '../tools/bindings.mjs';
+import { toolDataNames } from '../tools/commands.mjs';
 
 const digest = value => createHash('sha256').update(canonicalJSON(value)).digest('hex');
 // Preserve generated binding identities; the secret heuristic also matches long hashes and step IDs.
 const safe = (value, key) => typeof value === 'string' ?
   (key === 'workspaceId' && /^[A-Za-z][A-Za-z0-9_-]{0,95}$/.test(value)
     || ['hash', 'pipelineHash'].includes(key) && /^[a-f0-9]{64}$/.test(value)
+    || key === 'pin' && /^(?:tool-[a-f0-9]{40}|skill-[a-f0-9]{40}|pipeliner-(?:forge|motif|shape|lens))$/.test(value)
     || ['id', 'inputId', 'entry', 'success', 'failure', 'feedback'].includes(key) && /^(?:step_[a-f0-9]{32}|[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})$/.test(value)) ? value
     : containsSecret(value) ? 'Sensitive text hidden' : value
   : Array.isArray(value) ? value.map(item => safe(item)) : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([key, value]) => [key, safe(value, key)])) : value;
@@ -17,9 +20,10 @@ const failure = error => /^(Pipeline |Development |Supervised |Fully Autonomous|
   ? error.message : 'Pipeline change blocked. Current configuration and saved drafts remain preserved.';
 
 // Host-only PM control. Workers may read/propose policy; they never receive this handle or its IPC channel.
-export function createPipelineManager({ store, policy, onChange = () => {}, onApplied = () => {}, initialRevision = 1 }) {
+export function createPipelineManager({ store, policy, skills, tools, onChange = () => {}, onApplied = () => {}, initialRevision = 1 }) {
   let workspaceId = store?.selected() ?? null, scope = workspaceId ? 'repository' : 'global', kind = 'development', revision = initialRevision;
   let conversation = randomUUID(), preview = null, applied = null, observed = policy?.worker.read(null).revision, closed = false, message = null, error = null, lastSnapshot;
+  let observedSkills = skills?.revision(), observedTools = tools?.revision();
   const target = () => scope === 'global' ? null : workspaceId;
   function invalidate() { if (preview) policy.control.invalidate(preview.inputId); preview = null; }
   function sync() {
@@ -28,7 +32,29 @@ export function createPipelineManager({ store, policy, onChange = () => {}, onAp
     const next = store?.selected() ?? null, version = policy?.worker.read(null).revision;
     if (next !== workspaceId) { invalidate(); workspaceId = next; scope = next ? 'repository' : 'global'; conversation = randomUUID(); applied = null; message = null; error = null; revision++; }
     if (version !== observed) { invalidate(); observed = version; revision++; }
+    const s = skills?.revision(), t = tools?.revision(); if (s !== observedSkills || t !== observedTools) { invalidate(); observedSkills = s; observedTools = t; revision++; }
     return revision !== before;
+  }
+  function extensionChoices() {
+    const view = policy?.worker.read(target()); if (!view) return [];
+    const result = [], selected = view.values['tools.extensions']?.value ?? [], disabled = view.values['tools.disabled']?.value ?? [];
+    for (const pin of selected.filter(pin => !disabled.includes(pin))) {
+      const item = tools?.get(pin); if (item && tools.available(pin)) result.push({ pin, name: item.name, kind: item.kind, purpose: item.purpose, permissions: item.permissions,
+        dataCategories: item.definition.dataCategories, inputSchema: (item.definition.mcp?.tool ?? item.definition.command).inputSchema });
+    }
+    if (skills) {
+      const disabled = view.values['skills.disabled'].value, items = skills.list().filter(item => item.kind === 'bundled' && view.values['skills.bundledEnabled'].value);
+      for (const pin of view.values['skills.extensions'].value) items.push(skills.get(pin));
+      for (const item of items.filter(item => !disabled.includes(item.name) && skills.available(item.id))) result.push({ pin: item.id, name: item.name, kind: 'skill', purpose: item.purpose,
+        permissions: [...new Set(['provider.turn', ...(item.requirements ?? [])])], dataCategories: extensionInputNames, inputSchema: { type: 'object' } });
+    }
+    return result;
+  }
+  function selectedExtension(extension) {
+    validateExtension(extension); const item = extensionChoices().find(item => item.pin === extension.pin && item.kind === extension.kind);
+    if (!item) throw new Error('Pipeline custom step needs an available selected pin in this scope.');
+    try { validateToolBinding(extension, { id: item.pin, kind: item.kind, definition: { dataCategories: item.dataCategories } }); }
+    catch { throw new Error('Pipeline custom step data exceeds its approved categories or typed bindings.'); } return item;
   }
   function status() {
     if (closed) return { ...lastSnapshot, storageAvailable: false, preview: null };
@@ -48,7 +74,7 @@ export function createPipelineManager({ store, policy, onChange = () => {}, onAp
     } catch { storageAvailable = false; }
     return lastSnapshot = safe({ revision, workspaceId, repositoryLabel: workspaces.find(value => value.id === workspaceId)?.name ?? null, scope, kind, storageAvailable,
       current, active, draft, staleDraft: Boolean(draft && draft.baseRevision !== current?.revision), preview, message, error, history,
-      options: { types: stepTypes, inputs: inputNames, evidence: evidenceNames, permissions: Object.fromEntries(capabilityNames.map(name => [name, name.replaceAll('.', ' ')])) } });
+      options: { types: stepTypes, inputs: inputNames, evidence: evidenceNames, permissions: Object.fromEntries(capabilityNames.map(name => [name, name.replaceAll('.', ' ')])), extensions: storageAvailable ? extensionChoices() : [], data: toolDataNames } });
   }
   function publish() { revision++; if (!closed) onChange(status()); }
   function ready() { sync(); if (closed || !store || !policy || scope === 'repository' && !workspaceId) throw new Error('Choose a repository or global template'); }
@@ -68,9 +94,13 @@ export function createPipelineManager({ store, policy, onChange = () => {}, onAp
     publicInput(draft);
     invalidate(); applied = null; store.savePipelineDraft(target(), kind, draft); message = 'Draft saved for ' + (scope === 'global' ? 'global templates' : 'this repository') + '. Review before applying; running versions remain unchanged.'; publish();
   }
+  function saveDefinition(draft, definition) {
+    save({ ...draft, definition, changes: { ...draft.changes, ['pipelines.' + kind]: definition, 'autonomy.scenario': 'custom', ...(kind === 'release' ? { 'delivery.publish': definition.steps.some(step => step.kind === 'publish') } : {}) }, reset: draft.reset.filter(key => key !== 'pipelines.' + kind) });
+  }
   function prepare() {
     const draft = store.pipelineDraft(target(), kind); if (!draft) throw new Error('Choose or edit a pipeline before review');
     if (draft.baseRevision !== policy.worker.read(target()).revision) throw new Error('Pipeline draft base changed. Refresh the draft, then review the full changes.');
+    for (const step of draft.definition.steps.filter(step => step.kind === 'extension')) selectedExtension(step.extension);
     invalidate();
     const input = policy.control.capture({ commandId: randomUUID(), conversationId: conversation, target: target(), text: 'Review ' + scope + ' ' + kind + ' pipeline draft ' + digest(draft) });
     try {
@@ -101,8 +131,36 @@ export function createPipelineManager({ store, policy, onChange = () => {}, onAp
         const changes = presetChanges(payload.scenario), draft = begin();
         save({ ...draft, definition: changes['pipelines.' + kind], changes: { ...draft.changes, ...changes }, reset: [] });
       } else if (payload.operation === 'edit') {
-        const draft = begin(), definition = editDefinition(draft.definition, payload.action);
-        save({ ...draft, definition, changes: { ...draft.changes, ['pipelines.' + kind]: definition, 'autonomy.scenario': 'custom', ...(kind === 'release' ? { 'delivery.publish': definition.steps.some(step => step.kind === 'publish') } : {}) }, reset: draft.reset.filter(key => key !== 'pipelines.' + kind) });
+        if (payload.action.field === 'extension') selectedExtension(payload.action.value);
+        const draft = begin(), definition = editDefinition(draft.definition, payload.action); saveDefinition(draft, definition);
+      } else if (payload.operation === 'bind') {
+        const item = extensionChoices().find(item => item.name === payload.name); if (!item) throw new Error('Pipeline custom step needs an available selected pin in this scope.');
+        const draft = begin(), definition = editDefinition(draft.definition, { operation: 'set', step: payload.step, field: 'extension', value: { kind: item.kind, pin: item.pin, bindings: [], constants: {} } });
+        definition.steps[payload.step - 1].permissions = [...item.permissions]; definition.steps[payload.step - 1].retryLimit = 0; saveDefinition(draft, definition);
+      } else if (payload.operation === 'input') {
+        const draft = begin(); if (!Number.isSafeInteger(payload.step) || !draft.definition.steps[payload.step - 1]?.extension) throw new Error('Pipeline input needs a bound custom step.');
+        const extension = structuredClone(draft.definition.steps[payload.step - 1].extension);
+        // Validate the destination path before reading or changing any supplied object.
+        validateExtension({ ...extension, bindings: [{ path: payload.path, source: 'issue.title' }], constants: {} });
+        const exact = binding => canonicalJSON(binding.path) === canonicalJSON(payload.path); extension.bindings = extension.bindings.filter(binding => !exact(binding));
+        let parent = extension.constants; const parents = [];
+        for (const key of payload.path.slice(0, -1)) {
+          if (!Object.hasOwn(parent, key)) { parent = undefined; break; } parents.push([parent, key]); parent = parent[key];
+          if (!parent || typeof parent !== 'object' || Array.isArray(parent)) throw new Error('Pipeline input path overlaps a supplied value.');
+        }
+        if (parent) delete parent[payload.path.at(-1)];
+        for (const [parent, key] of parents.reverse()) if (Object.keys(parent[key]).length === 0) delete parent[key]; else break;
+        if (payload.source === 'pm.supplied') {
+          if (!Object.hasOwn(payload, 'value')) throw new Error('Pipeline input needs an explicit supplied value.'); parent = extension.constants;
+          for (const key of payload.path.slice(0, -1)) parent = parent[key] ??= {}; parent[payload.path.at(-1)] = payload.value;
+        } else if (payload.source !== 'none') {
+          const binding = { path: payload.path, source: payload.source };
+          if (payload.source === 'previous.structuredContent') {
+            if (!Number.isSafeInteger(payload.previous) || payload.previous === payload.step || draft.definition.steps[payload.previous - 1]?.kind !== 'extension') throw new Error('Pipeline input needs another declared custom step.');
+            binding.step = draft.definition.steps[payload.previous - 1].id; if (payload.selection !== undefined) binding.selection = payload.selection;
+          } extension.bindings.push(binding);
+        }
+        selectedExtension(extension); const definition = editDefinition(draft.definition, { operation: 'set', step: payload.step, field: 'extension', value: extension }); saveDefinition(draft, definition);
       } else if (payload.operation === 'testing') {
         const draft = begin(), instructions = editTesting(draft.instructions, payload.action);
         save({ ...draft, instructions, changes: { ...draft.changes, 'testing.instructions': instructions }, reset: draft.reset.filter(key => key !== 'testing.instructions') });

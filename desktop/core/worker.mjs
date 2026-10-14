@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { canonicalJSON, record } from './settings.mjs';
 import { workerToolProgram, developmentWorkerProgram } from '../development/worker-tools.mjs';
 import { checkedFiles } from '../development/source.mjs';
+import { checkedJSON } from '../tools/schema.mjs';
 
 export const workerDisk = { url: 'https://cloud-images.ubuntu.com/releases/resolute/release-20260720/ubuntu-26.04-server-cloudimg-arm64.img', digest: 'sha256:7bcf159e29ad0000bfed9c57875908c39268f5ed1257f4958fa6a9f5f60edd54' };
 export const workerVMConfiguration = `vmType: vz
@@ -40,8 +41,8 @@ const hash = value => createHash('sha256').update(value).digest('hex');
 const cid = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const imageId = value => typeof value === 'string' && /^sha256:[a-f0-9]{64}$/.test(value);
 const workspacePath = value => typeof value === 'string' && /^\/home\/[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\/\.local\/share\/pipeliner\/workspaces\/[a-f0-9]{32}$/.test(value);
-function privateDirectory(path) {
-  if (!existsSync(path)) mkdirSync(path, { mode: 0o700 });
+function privateDirectory(path, create = true) {
+  if (!existsSync(path) && create) mkdirSync(path, { mode: 0o700 });
   const s = lstatSync(path);
   if (!s.isDirectory() || s.isSymbolicLink() || realpathSync(path) !== path || s.uid !== process.getuid() || (s.mode & 0o777) !== 0o700) throw new Error('Invalid private execution directory');
 }
@@ -74,25 +75,30 @@ export function restrictedWorkerArgs(manifest, program) {
 }
 
 // Host-only, app-owned environment. Never pass this handle to a renderer or worker.
-export function openWorkerEnvironment(directory) {
+export function openWorkerEnvironment(directory, { inspectionOnly = false } = {}) {
+  if (typeof inspectionOnly !== 'boolean') throw new Error('Execution inspection mode unavailable');
   if (process.platform !== 'darwin' || process.arch !== 'arm64') throw new Error('Restricted worker unavailable on this host');
-  privateDirectory(directory);
+  privateDirectory(directory, !inspectionOnly);
   const home = join(directory, 'home'), lima = join(directory, 'lima'), config = join(directory, 'worker.yaml'), marker = join(directory, 'environment.json');
-  privateDirectory(home); privateDirectory(lima);
-  if (Buffer.byteLength(join(lima, 'engine', 'ha.sock')) > 100) throw new Error('Execution state path exceeds the local socket limit');
-  if (!existsSync(marker)) persist(marker, { version: 1, nonce: randomUUID(), configuration: hash(workerVMConfiguration), image: null });
+  privateDirectory(home, !inspectionOnly); privateDirectory(lima, !inspectionOnly);
+  if (Buffer.byteLength(join(lima, 'engine', 'ssh.sock.1234567890123456')) >= 104) throw new Error('Execution state path exceeds the local socket limit');
+  if (!existsSync(marker) && !inspectionOnly) persist(marker, { version: 1, nonce: randomUUID(), configuration: hash(workerVMConfiguration), image: null });
   const ownership = privateJSON(marker);
   record(ownership, ['version', 'nonce', 'configuration', 'image']);
   if (ownership.version !== 1 || !/^[a-f0-9-]{36}$/.test(ownership.nonce) || ownership.configuration !== hash(workerVMConfiguration)
     || ownership.image !== null && !imageId(ownership.image)) throw new Error('Execution environment ownership mismatch');
-  if (!existsSync(config)) writeFileSync(config, workerVMConfiguration, { flag: 'wx', mode: 0o600 });
+  if (!existsSync(config) && !inspectionOnly) writeFileSync(config, workerVMConfiguration, { flag: 'wx', mode: 0o600 });
   const configStat = lstatSync(config);
   if (!configStat.isFile() || configStat.isSymbolicLink() || configStat.nlink !== 1 || configStat.uid !== process.getuid() || (configStat.mode & 0o777) !== 0o600
     || readFileSync(config, 'utf8') !== workerVMConfiguration) throw new Error('Execution VM configuration changed');
-  const env = { PATH: '/opt/homebrew/bin:/usr/bin:/bin', HOME: home, LIMA_HOME: lima, LC_ALL: 'C', LIMA_INSTANCE: 'engine' };
+  const env = { PATH: '/opt/homebrew/bin:/usr/bin:/bin', HOME: home, LIMA_HOME: lima, TMPDIR: directory, LC_ALL: 'C', LIMA_INSTANCE: 'engine' };
   const children = new Set();
-  async function command(args, { input, timeout = 30000, maximum = 65536, signal } = {}) {
-    signal?.throwIfAborted();
+  async function command(args, { input, timeout = 30000, maximum = 65536, signal, checkpoint } = {}) {
+    const check = () => {
+      signal?.throwIfAborted();
+      if (checkpoint && typeof checkpoint()?.then === 'function') throw Error('Synchronous execution checkpoint required');
+    };
+    check();
     return new Promise((resolve, reject) => {
       const child = spawn('/opt/homebrew/bin/limactl', args, { env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] }); children.add(child);
       let output = '', diagnostic = '', bytes = 0, failure = null, cancellationError = null, force;
@@ -111,20 +117,24 @@ export function openWorkerEnvironment(directory) {
       child.stderr.on('data', data => { diagnostic = `${diagnostic}${data}`.slice(-4096); });
       child.once('error', () => { signal?.removeEventListener('abort', abort); clearTimeout(timer); clearTimeout(force); children.delete(child); reject(new Error('Local execution command unavailable')); });
       // Reject only after actual command closure; a cancellation request is never termination evidence.
-      child.once('close', (code, exitSignal) => { signal?.removeEventListener('abort', abort); clearTimeout(timer); clearTimeout(force); children.delete(child); if (failure || exitSignal) reject(new Error(failure ?? 'Local execution command interrupted', { cause: cancellationError ? { cancellation: cancellationError } : undefined })); else resolve({ code, output, diagnostic }); });
+      child.once('close', (code, exitSignal) => {
+        signal?.removeEventListener('abort', abort); clearTimeout(timer); clearTimeout(force); children.delete(child);
+        if (failure || exitSignal) reject(new Error(failure ?? 'Local execution command interrupted', { cause: cancellationError ? { cancellation: cancellationError } : undefined }));
+        else { try { check(); resolve({ code, output, diagnostic }); } catch (error) { reject(error); } }
+      });
       child.stdin.on('error', () => {}); child.stdin.end(input);
     });
   }
   const guest = (args, options) => command(['shell', 'engine', '--', ...args], options);
   async function checked(args, options) { const result = await guest(args, options); if (result.code !== 0) throw new Error('Restricted guest command failed', { cause: { command: args.slice(0, 2), code: result.code, diagnostic: result.diagnostic } }); return result.output.trim(); }
-  async function inventory() {
-    const result = await command(['list', '--json']); if (result.code !== 0) throw new Error('Execution VM inventory unavailable');
+  async function inventory(options) {
+    const result = await command(['list', '--json'], options); if (result.code !== 0) throw new Error('Execution VM inventory unavailable');
     const rows = result.output.trim() ? result.output.trim().split('\n').map(row => JSON.parse(row)) : [];
-    if (rows.some(row => row.name !== 'engine')) throw new Error('Unexpected instance in the private execution scope');
+    if (rows.length > 1 || rows.some(row => row?.name !== 'engine')) throw new Error('Unexpected instance in the private execution scope');
     return rows[0] ?? null;
   }
-  async function verifyEnvironment() {
-    const instance = await inventory();
+  async function verifyEnvironment(options) {
+    const instance = await inventory(options);
     if (instance?.status !== 'Running') throw new Error('Execution VM not running');
     const configuration = instance.config;
     if (instance.vmType !== 'vz' || instance.arch !== 'aarch64' || instance.cpus !== 2 || instance.memory !== 1073741824 || instance.disk !== 8589934592
@@ -132,21 +142,21 @@ export function openWorkerEnvironment(directory) {
       || configuration?.containerd?.system !== false || configuration?.containerd?.user !== true || configuration?.propagateProxyEnv !== false
       || configuration?.images?.length !== 1 || configuration.images[0].digest !== workerDisk.digest || configuration.images[0].location !== workerDisk.url
       || configuration?.portForwards?.length !== 1 || configuration.portForwards[0].ignore !== true) throw new Error('Execution VM restrictions changed');
-    const mounts = await checked(['sh', '-c', 'findmnt -n -t virtiofs,9p,fuse.sshfs -o SOURCE,TARGET,FSTYPE; test ! -e /Users && test ! -e /private && test ! -S /run/host-services/ssh-auth.sock']);
+    const mounts = await checked(['sh', '-c', 'findmnt -n -t virtiofs,9p,fuse.sshfs -o SOURCE,TARGET,FSTYPE; test ! -e /Users && test ! -e /private && test ! -S /run/host-services/ssh-auth.sock'], options);
     if (mounts !== '') throw new Error('Host mounts or forwarded agent found');
-    const info = JSON.parse(await checked(['nerdctl', 'info', '--format', '{{json .}}']));
+    const info = JSON.parse(await checked(['nerdctl', 'info', '--format', '{{json .}}'], options));
     if (!info.SecurityOptions?.some(value => value.includes('rootless'))) throw new Error('Rootless worker runtime unavailable');
     return instance;
   }
-  async function inspect(manifest, expectedId = null) {
-    const instance = await inventory();
+  async function inspect(manifest, expectedId = null, options) {
+    const instance = await inventory(options);
     if (!instance || instance.status === 'Stopped') return { state: 'vm-stopped', id: null };
     if (instance.status !== 'Running') throw new Error('Execution VM state unknown');
-    const names = await checked(['nerdctl', 'ps', '-a', '--format', '{{.Names}}']);
+    const names = await checked(['nerdctl', 'ps', '-a', '--format', '{{.Names}}'], options);
     if (!names.split('\n').includes(manifest.name)) { if (expectedId) throw new Error('Owned container disappeared without verified cleanup'); return { state: 'absent', id: null }; }
-    const value = JSON.parse(await checked(['nerdctl', 'inspect', '--format', '{{json .}}', manifest.name]));
-    const native = JSON.parse(await checked(['nerdctl', 'inspect', '--mode=native', '--format', '{{json .}}', manifest.name]));
-    const actualImage = await checked(['nerdctl', 'image', 'inspect', '--mode=native', '--format', '{{.Image.Target.Digest}}', native.Image]);
+    const value = JSON.parse(await checked(['nerdctl', 'inspect', '--format', '{{json .}}', manifest.name], options));
+    const native = JSON.parse(await checked(['nerdctl', 'inspect', '--mode=native', '--format', '{{json .}}', manifest.name], options));
+    const actualImage = await checked(['nerdctl', 'image', 'inspect', '--mode=native', '--format', '{{.Image.Target.Digest}}', native.Image], options);
     const labels = value.Config?.Labels;
     if (!cid(value.Id) || expectedId && value.Id !== expectedId || value.Name.replace(/^\//, '') !== manifest.name || native.ID !== value.Id || actualImage !== manifest.image
       || labels?.['pipeliner.owner'] !== manifest.nonce || labels?.['pipeliner.run'] !== manifest.runId || labels?.['pipeliner.repository'] !== manifest.repository || labels?.['pipeliner.epoch'] !== String(manifest.epoch)) throw new Error('Owned container identity mismatch');
@@ -159,12 +169,70 @@ export function openWorkerEnvironment(directory) {
     if (!['created', 'running', 'exited'].includes(state)) throw new Error('Owned container state unknown');
     return { state, id: value.Id, exitCode: value.State.ExitCode, pid: value.State.Pid };
   }
+  async function verifyIdle(workers, { signal, checkpoint } = {}) {
+    if (!Array.isArray(workers) || workers.length > 10000 || typeof checkpoint !== 'function') throw Error('Execution recovery inventory unavailable');
+    const bindings = JSON.parse(canonicalJSON(workers)), names = new Map();
+    for (const binding of bindings) {
+      record(binding, ['manifest', 'state', 'cid']); restrictedWorkerArgs(binding.manifest, 'true');
+      if (!['stopped', 'exited'].includes(binding.state) || binding.cid !== null && !cid(binding.cid) || binding.state === 'exited' && !binding.cid
+        || names.has(binding.manifest.name)) throw Error('Execution recovery inventory invalid');
+      names.set(binding.manifest.name, binding.cid);
+    }
+    function custody() {
+      for (const path of [directory, home, lima]) privateDirectory(path, false);
+      const identities = [directory, home, lima, marker, config].map((path, index) => {
+        const value = lstatSync(path, { bigint: true });
+        if (index > 2 && (!value.isFile() || value.isSymbolicLink() || value.nlink !== 1n || value.uid !== BigInt(process.getuid()) || (value.mode & 0o777n) !== 0o600n)) throw Error('Execution environment changed');
+        if (path === config && value.size !== BigInt(Buffer.byteLength(workerVMConfiguration))) throw Error('Execution environment changed');
+        return (index < 3 ? ['dev', 'ino', 'uid', 'mode'] : ['dev', 'ino', 'uid', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs']).map(key => value[key].toString());
+      });
+      if (canonicalJSON(privateJSON(marker)) !== canonicalJSON(ownership) || readFileSync(config, 'utf8') !== workerVMConfiguration) throw Error('Execution environment changed');
+      return identities;
+    }
+    const captured = canonicalJSON(custody());
+    const options = { signal, checkpoint() {
+      if (typeof checkpoint()?.then === 'function') throw Error('Synchronous execution checkpoint required');
+      if (canonicalJSON(custody()) !== captured) throw Error('Execution environment changed');
+    } };
+    async function containerInventory() {
+      const raw = await checked(['nerdctl', 'namespace', 'ls', '--quiet'], options), namespaces = raw ? raw.split('\n').sort() : [];
+      if (namespaces.some(name => !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(name)) || new Set(namespaces).size !== namespaces.length) throw Error('Execution namespaces invalid');
+      const containers = [], observed = new Set();
+      for (const namespace of namespaces) {
+        const rawNames = await checked(['nerdctl', '--namespace', namespace, 'ps', '-a', '--no-trunc', '--format', '{{.ID}}\t{{.Names}}'], options);
+        const found = rawNames ? rawNames.split('\n').sort() : [];
+        for (const entry of found) {
+          const [id, name, extra] = entry.split('\t');
+          if (namespace !== 'default' || !cid(id) || !names.has(name) || names.get(name) !== id || extra !== undefined || observed.has(name)) throw Error('Unrecorded container in the private execution scope');
+          observed.add(name);
+        }
+        containers.push({ namespace, names: found });
+      }
+      return { snapshot: canonicalJSON(containers), names: observed };
+    }
+    const instance = await inventory(options);
+    if (!instance || instance.status === 'Stopped') return true;
+    if (instance.status !== 'Running') throw Error('Execution VM state unknown');
+    await verifyEnvironment(options);
+    const before = await containerInventory();
+    for (const binding of bindings) {
+      if (!before.names.has(binding.manifest.name)) {
+        if (binding.state !== 'stopped') throw Error('Owned container disappeared without verified cleanup');
+        continue;
+      }
+      const observed = await inspect(binding.manifest, binding.cid, options);
+      if (observed.state !== 'exited' || observed.pid !== 0 || observed.id !== binding.cid) throw Error('Owned worker still running or unverified');
+    }
+    if ((await containerInventory()).snapshot !== before.snapshot || (await inventory(options))?.status !== 'Running') throw Error('Execution inventory changed');
+    return true;
+  }
+  if (inspectionOnly) return Object.freeze({ inventory, inspect, verifyIdle });
   return Object.freeze({
     async prepare() {
       let instance = await inventory();
       if (!instance || instance.status === 'Stopped') {
         const result = await command(['start', '--tty=false', '--name=engine', ...(instance ? ['engine'] : [config])], { timeout: 600000, maximum: 1048576 });
-        if (result.code !== 0) throw new Error('Restricted execution VM provisioning failed');
+        if (result.code !== 0) throw new Error('Restricted execution VM provisioning failed', { cause: { command: ['start'], code: result.code, diagnostic: result.diagnostic } });
       }
       const verified = await verifyEnvironment();
       if (!ownership.image) {
@@ -183,7 +251,7 @@ export function openWorkerEnvironment(directory) {
       if (!/^\/home\/[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(guestHome)) throw new Error('Private guest workspace location unavailable');
       return { image: ownership.image, disk: workerDisk.digest, configuration: ownership.configuration, workspaceRoot: `${guestHome}/.local/share/pipeliner/workspaces` };
     },
-    inventory, inspect,
+    inventory, inspect, verifyIdle,
     async create(manifest, program) {
       await verifyEnvironment();
       if (manifest.image !== ownership.image || (await inspect(manifest)).state !== 'absent') throw new Error('Worker creation scope conflict');
@@ -197,7 +265,8 @@ export function openWorkerEnvironment(directory) {
     async tool(manifest, id, request, { signal, mayRestart = () => true } = {}) {
       const shapes = { seed: ['files'], list: [], read: ['path'], write: ['path', 'content', 'mode', 'beforeHash'], run: ['command', 'timeoutMs'], export: [] };
       if (!Object.hasOwn(shapes, request.operation)) throw new Error('Worker tool unavailable');
-      record(request, ['operation', ...shapes[request.operation]]);
+      record(request, ['operation', ...shapes[request.operation]], request.operation === 'run' ? ['input'] : []);
+      if (Object.hasOwn(request, 'input')) checkedJSON(request.input, 'data');
       if (request.operation === 'seed') checkedFiles(request.files);
       else canonicalJSON(request);
       if (request.operation === 'run' && (!Number.isSafeInteger(request.timeoutMs) || request.timeoutMs < 100 || request.timeoutMs > 300000)) throw new Error('Worker command deadline invalid');

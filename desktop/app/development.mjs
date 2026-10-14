@@ -1,8 +1,11 @@
 import { developmentCommand } from './development-commands.mjs';
 import { containsSecret } from './commands.mjs';
+import { createDevelopmentNotices } from './notices.mjs';
 
 export async function initDevelopment({ el, message }) {
-  let state, pending = false, lastMessage; const $ = id => document.getElementById(id);
+  let state, pending = false, lastMessage, preferences = null, notice = null, renderedNotice = null; const $ = id => document.getElementById(id);
+  const notices = createDevelopmentNotices();
+  const noticePanel = el('section'); noticePanel.id = 'development-notice'; noticePanel.setAttribute('aria-label', 'Development notice'); noticePanel.setAttribute('role', 'status'); $('composer').before(noticePanel);
   const feedbackDrafts = new Map();
   const devLabel = dev => dev?.model ? (dev.connection === 'codex' ? 'Codex' : 'Ollama Cloud') + ' · ' + dev.model : 'No Dev chosen';
   function button(text, operation, extra = {}, id) {
@@ -15,8 +18,7 @@ export async function initDevelopment({ el, message }) {
     card.append(el('h2', run ? 'Issue #' + run.issue + ' · Development' : 'Development'), el('p', state.repositoryLabel ?? 'Select a repository first.', 'small'));
     if (run) {
       card.append(el('p', run.control === 'paused' ? 'Paused · work preserved' : run.control === 'running' ? 'Running' : run.control, 'protected-state'),
-        el('p', development?.state === 'candidate' ? state.integrationReady ? 'Verifying exact candidate integration and closeout under captured authority.' : 'Candidate ready for the configured PM Testing step.' : development ? state.stepLabel + ' · ' + development.state : 'Preparing the captured run.'),
-        el('p', devLabel(state.runDeveloper) + ' · Worker: ' + (state.execution?.worker ?? 'not started'), 'small'));
+        el('p', development?.state === 'candidate' ? state.integrationReady ? 'Verifying exact candidate integration and closeout under captured authority.' : 'Candidate ready for the configured PM Testing step.' : development ? state.stepLabel + ' · ' + development.state : 'Preparing the captured run.'));
       const controls = el('div', undefined, 'connection-actions');
       for (const [operation, label] of [['pause', 'Pause'], ['resume', 'Resume'], ['stop', 'Stop']]) {
         const node = button(label, operation, {}, prefix + '-' + operation);
@@ -24,10 +26,19 @@ export async function initDevelopment({ el, message }) {
         node.disabled = pending || operation === 'resume' && (!['paused', 'stopped', 'recovery-required'].includes(run.control) || state.pending.length > 0 && !state.integrationReady && state.qa?.decision !== 'approve');
         controls.append(node);
       } card.append(controls);
-      if (development) card.append(el('p', 'Model turns: ' + development.turns + ' / ' + (run.limits?.['limits.issueTurns'] ?? 'captured limit') + ' per Issue · ' + (development.stepTurns ?? 0) + ' / ' + (run.limits?.['limits.stepTurns'] ?? 'captured limit') + ' for this step.', 'small'),
+      const technical = el('details', undefined, 'resources'), summary = el('summary', 'Technical details'); technical.id = prefix + '-technical'; summary.id = technical.id + '-summary';
+      const key = JSON.stringify([state.workspaceId, run.id]), old = $(technical.id);
+      const explicit = old?.dataset.runKey === key && old.dataset.explicit === 'true';
+      technical.dataset.runKey = key; technical.dataset.explicit = String(explicit);
+      technical.open = explicit ? old.open : preferences?.values?.['appearance.technicalDetails']?.value === true;
+      summary.addEventListener('click', () => { technical.dataset.explicit = 'true'; });
+      summary.addEventListener('keydown', event => { if (['Enter', ' '].includes(event.key)) technical.dataset.explicit = 'true'; });
+      technical.append(summary, el('p', devLabel(state.runDeveloper) + ' · Worker: ' + (state.execution?.worker ?? 'not started'), 'small'));
+      if (development) technical.append(el('p', 'Model turns: ' + development.turns + ' / ' + (run.limits?.['limits.issueTurns'] ?? 'captured limit') + ' per Issue · ' + (development.stepTurns ?? 0) + ' / ' + (run.limits?.['limits.stepTurns'] ?? 'captured limit') + ' for this step.', 'small'),
         el('p', 'Reported tokens: ' + (development.usage.input + development.usage.output) + (development.usage.unavailable ? ' · Some usage is unavailable.' : '.') + ' USD usage: unavailable.', 'small'),
         el('p', 'Remediation cycles: ' + (development.remediationCycles ?? 0) + ' · Dev takeovers: ' + (development.takeovers?.length ?? 0) + '. Recovery preserves these counters.', 'small'));
-      if (state.publication) card.append(el('p', 'PR #' + state.publication.number + ' prepared. Head: ' + state.publication.head, 'small'), button('Open candidate PR', 'open-candidate', {}, prefix + '-open-candidate'));
+      card.append(technical);
+      if (state.publication) { technical.append(el('p', 'Candidate head: ' + state.publication.head, 'small')); card.append(el('p', 'PR #' + state.publication.number + ' prepared.'), button('Open candidate PR', 'open-candidate', {}, prefix + '-open-candidate')); }
       if (state.qa) card.append(qaCard(prefix));
     } else if (state.workspaceId) {
       card.append(el('p', 'Select a Ready Issue in Issues, then start it here or ask “Start this Issue”. A start request does not add Ready.'), button('Start selected Ready Issue', 'start', {}, prefix + '-start'));
@@ -60,11 +71,25 @@ export async function initDevelopment({ el, message }) {
     const actions = el('div', undefined, 'connection-actions'); actions.append(approve, submit);
     card.append(field, actions, el('p', 'You can also say “I approve this tested version” or “Please fix …” in chat.', 'small')); return card;
   }
-  function render(snapshot) {
+  function render(snapshot, observe = true) {
     if (state && snapshot.revision < state.revision) return;
-    const focus = document.activeElement?.id, opened = new Set([...$('agent-settings').querySelectorAll('details[open]')].map(node => node.id));
-    if (state?.workspaceId !== snapshot.workspaceId) lastMessage = null;
+    const focus = document.activeElement?.id, opened = new Set([...$('agent-settings').querySelectorAll('details[open]')].filter(node => !node.id.endsWith('-technical')).map(node => node.id));
+    if (state?.workspaceId !== snapshot.workspaceId) { lastMessage = null; notice = null; }
     if (state?.qa?.hash !== snapshot.qa?.hash) feedbackDrafts.clear(); state = snapshot;
+    const enabled = preferences?.repository?.id === state.workspaceId && preferences.notificationsEnabled === true;
+    if (observe) notice = notices.observe(state, enabled) ?? notice;
+    if (!enabled) notice = null;
+    if (notice && (notice.kind === 'failure' && !state.error || notice.kind === 'action' && (!state.qa || state.qa.decision === 'approve') || notice.kind === 'ready' && state.development?.state !== 'candidate')) notice = null;
+    const noticeIdentity = notice?.target === state.workspaceId ? JSON.stringify(notice) : null;
+    if (noticeIdentity !== renderedNotice) {
+      const noticeNodes = [];
+      if (noticeIdentity) {
+        const card = el('article', undefined, 'setup-preview'), dismiss = el('button', 'Dismiss notice', 'secondary'); dismiss.type = 'button'; dismiss.id = 'development-notice-dismiss';
+        dismiss.addEventListener('click', () => { notice = null; renderedNotice = null; noticePanel.replaceChildren(); $('prompt').focus({ preventScroll: true }); });
+        card.append(el('p', notice.title, 'protected-state'), el('p', 'Inspect the current Development card for evidence and the next action.', 'small'), dismiss); noticeNodes.push(card);
+      }
+      noticePanel.replaceChildren(...noticeNodes); renderedNotice = noticeIdentity;
+    }
     $('development-status').replaceChildren(...(state.workspaceId ? [runCard('chat-development')] : []));
     const nodes = [el('h2', 'Agents and Models'), el('p', state.repositoryLabel ?? 'Select a repository to configure its Dev.', 'protected-state'),
       el('p', 'Choose a qualified provider and model. New runs pin that choice and any explicitly configured fallback order. Automatic takeover defaults off.', 'small')];
@@ -102,7 +127,7 @@ export async function initDevelopment({ el, message }) {
     try {
       const result = await window.pipeliner.developmentRequest({ ...payload, contextRevision: state.revision }); pending = false;
       if (target !== state.workspaceId) return;
-      if (text) { message(text, true, target); $('prompt').value = ''; }
+      if (text) message(text, true, target);
       if (result.snapshot) render(result.snapshot); if (result.message) message(result.message, false, target);
     } catch {
       pending = false; const latest = await window.pipeliner.developmentRequest({ operation: 'status' }); render(latest);
@@ -111,5 +136,10 @@ export async function initDevelopment({ el, message }) {
     if (!$('chat-view').hidden) $('prompt').focus();
   }
   window.pipeliner.onDevelopment(render); render(await window.pipeliner.developmentRequest({ operation: 'status' }));
-  return { chat: text => request({ operation: 'chat', text }, text), handles: text => Boolean(developmentCommand(text)) };
+  return { chat: text => request({ operation: 'chat', text }, text), handles: text => Boolean(developmentCommand(text)),
+    preferences(snapshot) {
+      const changed = preferences?.values?.['appearance.technicalDetails']?.value !== snapshot.values?.['appearance.technicalDetails']?.value
+        || preferences?.repository?.id !== snapshot.repository?.id || preferences?.notificationsEnabled !== snapshot.notificationsEnabled;
+      preferences = snapshot; if (state && changed) render(state, false);
+    } };
 }

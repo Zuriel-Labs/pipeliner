@@ -5,14 +5,31 @@ import { initPipelines } from './pipelines.mjs';
 import { initDevelopment } from './development.mjs';
 import { initScheduling } from './scheduling.mjs';
 import { initBackground } from './background.mjs';
+import { initSkills } from './skills.mjs';
+import { initTools } from './tools.mjs';
+import { initPrivacy } from './privacy.mjs';
+import { initAppearance } from './appearance.mjs';
+import { initDelivery } from './delivery.mjs';
+import { initUpdates } from './updates.mjs';
+import { initPermissions } from './permissions.mjs';
 
 let state = null, returnFocus = null; const drafts = new Map(), previousBusy = new Set();
 const $ = id => document.getElementById(id);
-let currentContext = null; const conversations = new Map();
+let currentContext = null, privacy, promptRevision = 0; const conversations = new Map();
+const atEnd = node => node.scrollHeight - node.clientHeight - node.scrollTop <= 1;
+function preserveReadingPosition() {
+  const log = $('transcript'), top = log.getBoundingClientRect().top, anchor = [...log.children].find(node => node.getBoundingClientRect().bottom > top),
+    offset = anchor?.getBoundingClientRect().top - top, scroll = log.scrollTop;
+  return () => { log.scrollTop = anchor?.parentElement === log ? log.scrollTop + anchor.getBoundingClientRect().top - log.getBoundingClientRect().top - offset : scroll; };
+}
+$('transcript').addEventListener('scroll', () => { if (atEnd($('transcript')) && document.activeElement !== $('chat-new-activity')) $('chat-new-activity').hidden = true; });
+$('chat-new-activity').addEventListener('click', () => { const log = $('transcript'); log.scrollTop = log.scrollHeight; log.focus({ preventScroll: true }); $('chat-new-activity').hidden = true; });
 function setContext(target, label) {
   if (target === currentContext) return;
-  conversations.set(currentContext, { nodes: [...$('transcript').childNodes], prompt: $('prompt').value }); currentContext = target;
+  conversations.set(currentContext, { nodes: [...$('transcript').childNodes], prompt: $('prompt').value, scroll: $('transcript').scrollTop, activity: !$('chat-new-activity').hidden }); currentContext = target;
   const saved = conversations.get(target); $('transcript').replaceChildren(...(saved?.nodes ?? [])); $('prompt').value = saved?.prompt ?? '';
+  $('transcript').scrollTop = saved?.scroll ?? 0; $('chat-new-activity').hidden = !saved?.activity;
+  promptRevision++; privacy?.context();
   $('chat-title').textContent = label ? label : 'Start with a conversation.';
   $('chat-scope').textContent = label ? 'This conversation and Issue controls apply to this repository. Connections remain installation settings.' : 'Connect your accounts here. Keys and sign-in stay in protected surfaces.';
   if (!saved) message(label ? 'Repository selected. Ask to show Issues, draft an Issue or mark a specific Issue Ready.' : 'Connect your accounts or import a project.');
@@ -24,12 +41,18 @@ function showSettings(show = true) {
   $('chat-view').hidden = show; $('settings-view').hidden = !show; $('workspace-view').hidden = true; $('issues-view').hidden = true;
   for (const [id, active] of [['chat-nav', !show], ['settings-nav', show], ['repositories-nav', false], ['issues-nav', false]]) { $(id).classList.toggle('current', active); if (active) $(id).setAttribute('aria-current', 'page'); else $(id).removeAttribute('aria-current'); }
 }
-function message(text, pm = false, target = currentContext) {
+function message(text, pm = false, target = currentContext, persist = true, receipt = crypto.randomUUID(), display = true) {
   const article = document.createElement('article'); article.className = `message ${pm ? 'pm' : 'assistant'}`;
+  article.dataset.receipt = receipt;
   const label = document.createElement('span'); label.className = 'message-label'; label.textContent = pm ? 'You' : 'Pipeliner';
   const content = document.createElement('p'); content.textContent = text; article.append(label, content);
-  if (target === currentContext) { $('transcript').append(article); article.scrollIntoView({ block: 'nearest' }); }
-  else { const saved = conversations.get(target) ?? { nodes: [], prompt: '' }; saved.nodes.push(article); conversations.set(target, saved); }
+  if (display && target === currentContext) {
+    const log = $('transcript'), follow = !$('chat-view').hidden && atEnd(log); log.append(article);
+    if (follow) log.scrollTop = log.scrollHeight;
+    else { if ($('chat-new-activity').hidden) $('announcement').textContent = 'New conversation activity. Use Jump to new activity when ready.'; $('chat-new-activity').hidden = false; }
+  } else if (display) { const saved = conversations.get(target) ?? { nodes: [], prompt: '' }; saved.nodes.push(article); saved.activity = true; conversations.set(target, saved); }
+  if (persist) privacy?.record(text, pm, target, receipt, content);
+  return article;
 }
 function el(tag, text, className) { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (className) node.className = className; return node; }
 function render(snapshot) {
@@ -85,7 +108,7 @@ async function request(payload, text) {
   returnFocus = document.activeElement?.id || 'prompt';
   try {
     const result = await window.pipeliner.request({ ...payload, contextRevision: state.revision });
-    if (text && !containsSecret(text)) { message(text, true, target); if (target === currentContext) $('prompt').value = ''; }
+    if (text && !containsSecret(text)) message(text, true, target);
     if (result.snapshot) render(result.snapshot);
     if (result.message) message(result.message, false, target);
     else if (result.accepted) message('Working on the selected connection. Continue in its protected surface, or use Cancel in Settings.', false, target);
@@ -98,6 +121,20 @@ async function request(payload, text) {
   if (!$('chat-view').hidden) $('prompt').focus();
   else if (returnFocus && $(returnFocus) && !$(returnFocus).disabled) { $(returnFocus).focus(); returnFocus = null; }
 }
+privacy = await initPrivacy({ el, message, context: () => currentContext, composer: () => ({ value: $('prompt').value, revision: promptRevision }),
+  show: (category = 'privacy') => { showSettings(); $('settings-' + category).click(); }, history: page => {
+    if (page.repository !== currentContext) return;
+    const restoreReading = preserveReadingPosition();
+    const before = page.replace ? [] : [...$('transcript').childNodes], known = new Set(before.map(node => node.dataset?.receipt));
+    const nodes = [];
+    for (const row of page.messages) {
+      if (known.has(row.id) || !['pm', 'app'].includes(row.value?.role) || typeof row.value.text !== 'string') continue;
+      nodes.push(message(row.value.text, row.value.role === 'pm', currentContext, false, row.id, false));
+    }
+    $('transcript').replaceChildren(...nodes, ...before);
+    restoreReading();
+    if (!page.older && promptRevision === page.edit && (page.replace || !$('prompt').value)) $('prompt').value = page.draft;
+  } });
 const workspaces = await initWorkspaces({ el, message, show: () => {
   $('chat-view').hidden = true; $('settings-view').hidden = true; $('workspace-view').hidden = false; $('issues-view').hidden = true;
   for (const id of ['chat-nav', 'settings-nav', 'repositories-nav', 'issues-nav']) { $(id).classList.toggle('current', id === 'repositories-nav'); if (id === 'repositories-nav') $(id).setAttribute('aria-current', 'page'); else $(id).removeAttribute('aria-current'); }
@@ -110,9 +147,28 @@ const pipelines = await initPipelines({ el, message });
 const development = await initDevelopment({ el, message });
 const scheduling = await initScheduling({ el, message });
 const background = await initBackground({ el, message });
+const skills = await initSkills({ el, message });
+const tools = await initTools({ el, message });
+const appearance = await initAppearance({ el, message, preserveReadingPosition, onPreferences: snapshot => development.preferences(snapshot), show: () => { showSettings(); $('settings-appearance').click(); } });
+const permissions = await initPermissions({ el, message, show: () => { showSettings(); $('settings-permissions').click(); } });
+const delivery = await initDelivery({ el, message, show: () => { showSettings(); $('settings-delivery').click(); },
+  editRelease: scope => { showSettings(); $('settings-pipelines').click(); pipelines.chat('Edit ' + scope + ' Release pipeline'); } });
+const updates = await initUpdates({ el, message, show: () => { showSettings(); $('settings-updates').click(); } });
+$('prompt').addEventListener('input', () => { promptRevision++; void privacy.draft($('prompt').value).catch(() => {}); });
 $('composer').addEventListener('submit', event => { event.preventDefault(); const text = $('prompt').value.trim(); if (!text) return;
-  if (containsSecret(text)) { $('prompt').value = ''; message('Use the protected connection surface for keys. Nothing was saved or sent.'); $('prompt').focus(); return; }
-  if (!connectionCommand(text).connection && background.handles(text)) background.chat(text);
+  if (containsSecret(text) && !(skills.handles(text) && skills.safe(text)) && !(tools.handles(text) && tools.safe(text))) { $('prompt').value = ''; promptRevision++; void privacy.draft('').catch(() => {}); message('Use the protected connection surface for keys. Nothing was sent; protected-looking text was not saved.'); $('prompt').focus(); return; }
+  const target = currentContext;
+  // Consume only the submitted text before IPC. A later reply must preserve a new draft.
+  $('prompt').value = ''; promptRevision++;
+  if (privacy.handles(text)) { privacy.chat(text); return; }
+  void privacy.draft('', target).catch(() => {});
+  if (!connectionCommand(text).connection && appearance.handles(text)) appearance.chat(text);
+  else if (!connectionCommand(text).connection && permissions.handles(text)) permissions.chat(text);
+  else if (!connectionCommand(text).connection && delivery.handles(text)) delivery.chat(text);
+  else if (!connectionCommand(text).connection && updates.handles(text)) updates.chat(text);
+  else if (!connectionCommand(text).connection && skills.handles(text)) skills.chat(text);
+  else if (!connectionCommand(text).connection && tools.handles(text)) tools.chat(text);
+  else if (!connectionCommand(text).connection && background.handles(text)) background.chat(text);
   else if (!connectionCommand(text).connection && scheduling.handles(text)) scheduling.chat(text);
   else if (!connectionCommand(text).connection && development.handles(text)) development.chat(text);
   else if (!connectionCommand(text).connection && pipelines.handles(text)) pipelines.chat(text);
@@ -121,11 +177,21 @@ $('composer').addEventListener('submit', event => { event.preventDefault(); cons
   else request({ operation: 'chat', text }, text);
 });
 $('chat-nav').addEventListener('click', () => showSettings(false)); $('settings-nav').addEventListener('click', () => showSettings());
-for (const category of ['connections', 'pipelines', 'agents', 'schedule', 'background']) $('settings-' + category).addEventListener('click', () => {
+for (const category of ['connections', 'pipelines', 'agents', 'schedule', 'background', 'skills', 'privacy', 'recovery', 'appearance', 'delivery', 'permissions', 'updates']) $('settings-' + category).addEventListener('click', () => {
   $('connection-settings').hidden = category !== 'connections'; $('pipeline-settings').hidden = category !== 'pipelines'; $('agent-settings').hidden = category !== 'agents'; $('schedule-settings').hidden = category !== 'schedule';
   $('background-settings').hidden = category !== 'background';
-  for (const name of ['connections', 'pipelines', 'agents', 'schedule', 'background']) $('settings-' + name).setAttribute('aria-pressed', String(name === category));
+  $('skill-settings').hidden = category !== 'skills';
+  $('tool-settings').hidden = category !== 'skills';
+  $('privacy-settings').hidden = category !== 'privacy';
+  $('recovery-settings').hidden = category !== 'recovery';
+  $('appearance-settings').hidden = category !== 'appearance';
+  $('delivery-settings').hidden = category !== 'delivery';
+  $('permission-settings').hidden = category !== 'permissions';
+  $('update-settings').hidden = category !== 'updates';
+  for (const name of ['connections', 'pipelines', 'agents', 'schedule', 'background', 'skills', 'privacy', 'recovery', 'appearance', 'delivery', 'permissions', 'updates']) $('settings-' + name).setAttribute('aria-pressed', String(name === category));
 });
 for (const button of document.querySelectorAll('[data-settings]')) button.addEventListener('click', () => showSettings());
 for (const button of document.querySelectorAll('[data-chat]')) button.addEventListener('click', () => request({ operation: 'chat', text: button.dataset.chat }, button.dataset.chat));
 window.pipeliner.onStatus(render); render(await window.pipeliner.request({ operation: 'status' }));
+$('prompt').disabled = false; $('chat-send').disabled = false;
+$('composer').removeAttribute('aria-busy'); $('chat-readiness').hidden = true;

@@ -9,6 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { openPolicyStore } from './policy.mjs';
 import { inspectWorkspace } from './identity.mjs';
 import { createRuntime, migrateRuntime, transact } from './runtime.mjs';
+import testStorage from '../test-storage.cjs';
 
 const repository = 'R_fixture';
 const remote = { repository, owner: 'PipelinerFixtures', name: 'qualification' };
@@ -16,7 +17,7 @@ const hash = 'a'.repeat(64);
 const candidate = { sourceCommit: 'b'.repeat(40), gitTree: 'c'.repeat(40) };
 const catalog = () => ({ repositories: [repository], capabilities: ['workspace.read', 'workspace.write', 'worker.exec', 'github.pr.write'], maxConcurrency: 1, background: false,
   connections: [{ id: 'codex-fixture', provider: 'codex', repositories: [repository] }], developers: [{ id: 'dev-fixture', connection: 'codex-fixture', metrics: [] }], extensions: [] });
-function fixture(t, extraCatalog = {}) {
+function fixture(t, extraCatalog = {}, withAlias = false) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-d08-'))), directory = join(root, 'state'), checkout = join(root, 'repository');
   mkdirSync(directory, { mode: 0o700 }); mkdirSync(checkout);
   const git = args => execFileSync('/usr/bin/git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'commit.gpgSign=false', '-C', checkout, ...args], { env: { PATH: '/usr/bin:/bin', HOME: root, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' }, stdio: 'pipe' });
@@ -31,18 +32,19 @@ function fixture(t, extraCatalog = {}) {
   };
   const facts = () => ({ ...catalog(), ...extraCatalog });
   const stores = [], open = () => { const store = openPolicyStore(directory, { catalog: facts, clock: () => now, inspectors }); stores.push(store); return store; };
-  const store = open(); let command = 0;
+  const store = open(); let command = 0, lease;
   const configure = (changes, scope = 'repository', target = repository) => {
     const input = store.control.capture({ commandId: `input-${++command}`, conversationId: 'fixture-chat', target, text: 'Configure synthetic fixture.' });
     const p = store.control.prepare({ inputId: input.id, requestId: `proposal-${command}`, scope, target, changes, reset: [] });
     return store.control.apply({ commandId: `apply-${command}`, proposalId: p.id, hash: p.hash, inputId: p.inputId, conversationId: p.conversationId, target: p.target });
   };
   configure({ 'agents.dev': 'dev-fixture' });
-  t.after(() => { for (const s of stores) s.close(); rmSync(root, { recursive: true }); assert.equal(existsSync(root), false); });
+  t.after(() => { lease?.closing(); for (const s of stores) s.close(); rmSync(root, { recursive: true }); assert.equal(existsSync(root), false); lease?.release(); });
+  if (withAlias && process.env.TEST_ARTIFACT_RUN) lease = testStorage.negativeFixtureLease({ kind: 'runtime', root }, import.meta.url);
   const identity = inspectWorkspace(checkout, remote);
   const reserve = (s = store, commandId = 'claim-one', issue = 1, workspace = identity) => s.runtime.reserve(workspace, { commandId, issue, pipeline: 'development' });
   const intent = (binding, extra = {}, s = store) => s.runtime.intent(binding, { commandId: 'write-one', step: 'implement', operation: 'workspace.write', candidate, requestHash: hash, preconditionsHash: hash, expectedHash: hash, ...extra });
-  return { store, open, root, directory, checkout, git, identity, reserve, intent, configure, inspectors, catalog: facts, observe: (id, result) => observations.set(id, result),
+  return { store, open, root, directory, checkout, git, identity, reserve, intent, configure, inspectors, catalog: facts, lease, observe: (id, result) => observations.set(id, result),
     advance: ms => { now += ms; }, setWorker: value => { worker = value; }, setIntegration: value => { integration = value; }, setStatus: (value, issues = [{ issue: 1, status: value }], issueState = 'OPEN') => { status = value; active = issues; state = issueState; } };
 }
 const binding = run => ({ runId: run.id, epoch: run.epoch });
@@ -89,7 +91,7 @@ test('ordered takeover requires stopped continuity, keeps one reservation and fe
 });
 
 test('aliases, worktrees and duplicate clients share one durable repository claim', async t => {
-  const f = fixture(t), alias = join(f.root, 'alias'), worktree = join(f.root, 'worktree'); symlinkSync(f.checkout, alias); f.git(['worktree', 'add', '--detach', worktree]);
+  const f = fixture(t, {}, true), alias = join(f.root, 'alias'), worktree = join(f.root, 'worktree'); symlinkSync(f.checkout, alias); f.lease?.aliasReady(); f.git(['worktree', 'add', '--detach', worktree]);
   const first = await f.reserve(); assert.equal(first.created, true); assert.equal(first.run.dev, 'dev-fixture'); assert.equal(first.run.policyRevision, 1);
   const second = f.open();
   for (const path of [alias, worktree]) { const result = await f.reserve(second, `alias-${path === alias ? 'one' : 'two'}`, 1, inspectWorkspace(path, remote)); assert.equal(result.created, false); assert.equal(result.run.id, first.run.id); assert.equal(result.run.epoch, first.run.epoch); }

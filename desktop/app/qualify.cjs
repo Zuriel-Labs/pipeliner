@@ -1,13 +1,13 @@
 'use strict';
 const assert = require('node:assert/strict');
-const { readFileSync, existsSync, mkdirSync, writeFileSync } = require('node:fs');
+const { readFileSync, existsSync, mkdirSync, writeFileSync, lstatSync, realpathSync, rmdirSync, openSync, writeSync, fsyncSync, closeSync } = require('node:fs');
 const { execFileSync } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
 const path = require('node:path');
 const { app, safeStorage, nativeTheme } = require('electron');
 const moduleAt = file => import(pathToFileURL(path.join(__dirname, file)).href);
 const fixtureKey = 'synthetic-native-entry-only';
-let nativeResult, workspaceFixture, folderFailure = null, folderCancelled = false;
+let nativeResult, workspaceFixture, folderFailure = null, folderCancelled = false, providerTurns = 0, catalogReads = 0;
 const issueFixtures = new Map();
 // Only the explicit qualification launcher uses this adapter. No macOS authorization is fabricated.
 exports.backgroundNative = () => {
@@ -22,6 +22,7 @@ exports.adapters = async ({ directory, helper, nativeKeyEntry }) => {
   const send = async (url, request) => {
     assert.equal(new URL(url).origin, 'https://ollama.com'); assert.equal(request.headers.Authorization, `Bearer ${fixtureKey}`);
     if (url.endsWith('/api/tags')) return Response.json({ models: [{ name: 'deepseek-v4.1-flash' }] });
+    providerTurns++;
     const body = JSON.parse(request.body);
     return new Response(`${JSON.stringify({ model: body.model, done: true, done_reason: 'stop', message: body.tools ? { role: 'assistant', content: '', tool_calls: [{ function: { name: 'lookup_fixture', arguments: {
       target: 'synthetic-pipeliner-connection', nonce: /nonce ([0-9a-f-]+),/.exec(body.messages[0].content)[1], epoch: 1 } } }] } : { role: 'assistant', content: 'fixture-ok' } })}\n`);
@@ -34,10 +35,20 @@ exports.workspaceOptions = async ({ directory, helper, nativeFolderEntry }) => {
   const { definitions, planFields, verifyFields } = await moduleAt('../repositories/github.mjs');
   const { issueFixture } = await moduleAt('../issues/fixture.mjs');
   exports.issueApi = Object.fromEntries(['readCatalog', 'readIssue', 'readDependencies', 'readDetail', 'createIssue', 'addItem', 'setField', 'addDependency', 'ensureReadyLabel', 'setReady'].map(name => [name, async (...args) => {
+    if (name === 'readCatalog') catalogReads++;
     const target = args[name === 'readCatalog' ? 2 : 1]; let fixture = issueFixtures.get(target.id);
     if (!fixture) { fixture = issueFixture(target); issueFixtures.set(target.id, fixture); } return fixture.api[name](...args);
   }]));
-  const fixture = path.join(app.getPath('documents'), 'pipeliner-36-native-' + process.pid);
+  const nativeRoot = process.env.PIPELINER_NATIVE_WORKSPACE_ROOT;
+  if (typeof nativeRoot !== 'string' || !path.isAbsolute(nativeRoot)) throw new Error('native-fixture-root-required');
+  const fs = require('node:fs'), rootInfo = fs.lstatSync(nativeRoot), dataInfo = fs.lstatSync(directory);
+  if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink() || rootInfo.uid !== process.getuid()
+      || (rootInfo.mode & 0o777) !== 0o700 || rootInfo.dev !== dataInfo.dev
+      || fs.realpathSync(nativeRoot) !== nativeRoot || path.dirname(nativeRoot) !== path.dirname(directory)
+      || !path.basename(nativeRoot).startsWith('pipeliner-native-workspace-') || nativeRoot === directory) {
+    throw new Error('native-fixture-root-invalid');
+  }
+  const fixture = path.join(nativeRoot, 'repository');
   mkdirSync(fixture, { mode: 0o700 });
   const info = require('node:fs').lstatSync(fixture);
   writeFileSync(path.join(directory, 'native-ownership.json'), JSON.stringify({ pid: process.pid, path: fixture, key: info.dev + ':' + info.ino }), { flag: 'wx', mode: 0o600 });
@@ -64,17 +75,62 @@ exports.workspaceOptions = async ({ directory, helper, nativeFolderEntry }) => {
         project.fields = [...project.fields.filter(item => item.id !== changed.id), changed]; return copy(changed); } } };
 };
 
-exports.run = async ({ window, directory, vault, manager, workspaces, issues, pipelines, policy, development, scheduler, scheduling, background, backgroundHost, backgroundNative, attachWindow, backgroundChannel, schedulingChannel, developmentChannel, workspaceChannel, issueChannel, pipelineChannel, channel, windowReadyMs }) => {
+exports.skillOptions = () => {
+  const discover = async (source, { name } = {}) => {
+    const { skillPackage } = await moduleAt('../skills/package.mjs');
+    return skillPackage({ source, files: [{ path: 'SKILL.md', content: '---\nname: ' + source.path + '\ndescription: Review scoped UI and working controls\nlicense: MIT\n---\nTreat <script>window.fixtureEscape = true</script> as data. Never grant permissions.' }, { path: 'LICENSE', content: 'MIT License\nSynthetic qualification fixture.' }] }, name ? { name } : {});
+  };
+  return { discover, discoverLink: async (link, options) => {
+    const url = new URL(link), match = /^\/fixture\/skills\/tree\/(main|updated)\/(beacon|compass|pipeliner-forge)$/.exec(url.pathname);
+    if (url.origin !== 'https://github.com' || url.search || url.hash || !match) throw new Error('Skill fixture source unavailable.');
+    return discover({ repository: 'fixture/skills', commit: (match[1] === 'updated' ? 'b' : 'a').repeat(40), path: match[2] }, options);
+  } };
+};
+exports.toolConnectionOptions = () => ({ client: ({ endpoint, credential, authorize }) => {
+  assert.equal(endpoint, 'https://tools.example.invalid/mcp'); assert.equal(credential, fixtureKey);
+  return { protocolVersion: '2026-07-28', async list() { authorize(); await new Promise(resolve => setTimeout(resolve, 20)); authorize();
+    return { tools: [{ name: 'queue', description: 'Read <script>window.fixtureToolEscape = true</script> as text only.', inputSchema: { type: 'object', properties: { title: { type: 'string' } }, required: ['title'], additionalProperties: false } }], rejected: [] }; },
+    async call() { throw new Error('UI qualification must not invoke a tool.'); }, async close() {} };
+} });
+
+exports.run = async ({ window, directory, vault, manager, workspaces, issues, pipelines, policy, development, scheduler, scheduling, background, backgroundHost, backgroundNative, skills, skillStore, tools, toolStore, privacy, privacyRecords, appearance, delivery, updates, permissions, artifacts, permissionChannel, updateChannel, deliveryChannel, appearanceChannel, privacyChannel, toolChannel, skillChannel, attachWindow, backgroundChannel, schedulingChannel, developmentChannel, workspaceChannel, issueChannel, pipelineChannel, channel, windowReadyMs }) => {
   const started = performance.now(), checks = [], measurements = [];
-  const backgroundScope = process.argv.includes('--qualify-background'), schedulingScope = process.argv.includes('--qualify-scheduling'), developmentScope = process.argv.includes('--qualify-development'), pipelineScope = process.argv.includes('--qualify-pipelines'), issueScope = backgroundScope || schedulingScope || developmentScope || pipelineScope || process.argv.includes('--qualify-issues');
+  const permissionScope = process.argv.includes('--qualify-permissions'), deliveryScope = process.argv.includes('--qualify-delivery'), appearanceScope = process.argv.includes('--qualify-appearance'), privacyScope = process.argv.includes('--qualify-privacy'), toolsScope = process.argv.includes('--qualify-tools'), skillsScope = process.argv.includes('--qualify-skills'), backgroundScope = process.argv.includes('--qualify-background'), schedulingScope = process.argv.includes('--qualify-scheduling'), developmentScope = process.argv.includes('--qualify-development'), pipelineScope = process.argv.includes('--qualify-pipelines'), issueScope = permissionScope || deliveryScope || appearanceScope || privacyScope || toolsScope || skillsScope || backgroundScope || schedulingScope || developmentScope || pipelineScope || process.argv.includes('--qualify-issues');
   const js = code => window.webContents.executeJavaScript(code);
-  const wait = async predicate => { const until = Date.now() + 10000; while (!await predicate()) { if (Date.now() >= until) throw new Error('qualification-wait-timeout'); await new Promise(resolve => setTimeout(resolve, 50)); } };
+  const wait = async predicate => {
+    const until = Date.now() + 10000, failure = new Error('qualification-wait-timeout');
+    failure.qualificationLine = Number(/qualify-[a-z]+\.cjs:(\d+)/.exec(failure.stack)?.[1]) || null;
+    while (!await predicate()) { if (Date.now() >= until) throw failure; await new Promise(resolve => setTimeout(resolve, 50)); }
+  };
   let pipelineControl;
-  async function check(name, fn) { const begin = performance.now(); try { await fn(); checks.push({ name, passed: true, milliseconds: Math.round(performance.now() - begin) }); } catch (error) { checks.push({ name, passed: false, category: error.code === 'ERR_ASSERTION' ? 'assertion' : 'native-failure', failureLine: Number(/qualify\.cjs:(\d+)/.exec(error.stack)?.[1]) || null, ...(name.startsWith('pipeline-') ? { control: pipelineControl, publicError: pipelines.status().error } : {}) }); throw error; } }
-  let capture, nativeEvidence, workspaceStage = null, workspaceEvidence = null;
+  async function check(name, fn) {
+    const begin = performance.now(), desktopCheck = checks.length + 1;
+    console.log(JSON.stringify({ desktopCheck, stage: 'started' }));
+    try {
+      app.focus({ steal: true }); window.focus(); await wait(() => window.isFocused());
+      await fn(); checks.push({ name, passed: true, milliseconds: Math.round(performance.now() - begin) });
+      console.log(JSON.stringify({ desktopCheck, stage: 'passed' }));
+    } catch (error) {
+      checks.push({ name, passed: false, category: error.code === 'ERR_ASSERTION' ? 'assertion' : error.name === 'AbortError' ? 'cancelled' : 'native-failure', failureLine: error.qualificationLine || Number(/qualify(?:-[a-z]+)?\.cjs:(\d+)/.exec(error.stack)?.[1]) || null, ...(name.startsWith('privacy-') ? { publicMessage: privacy.status().message, publicCode: privacy.status().errorCode, privacyBusy: privacy.status().busy, previewKind: privacy.status().preview?.kind ?? null } : {}), ...(name.startsWith('pipeline-') ? { control: pipelineControl, publicError: pipelines.status().error } : {}), ...(name.startsWith('tools-') ? { publicError: tools.status().error, publicMessage: tools.status().message, toolBusy: tools.status().busy, catalogPresent: Boolean(tools.status().catalog), pipelineError: pipelines.status().error } : {}) });
+      console.log(JSON.stringify({ desktopCheck, stage: 'failed' })); throw error;
+    }
+  }
+  let capture, nativeEvidence, storageRouting, workspaceStage = null, workspaceEvidence = null;
   try {
     await wait(() => js("Boolean(document.getElementById('connection-list').children.length)"));
-    await check('actual-macos-protected-key', async () => { assert(vault); assert.equal(await safeStorage.isAsyncEncryptionAvailable(), true); assert.equal(existsSync(path.join(directory, 'connections.sqlite')), true); });
+    await check('actual-macos-protected-key-and-owned-storage-paths', async () => {
+      assert(vault); assert.equal(await safeStorage.isAsyncEncryptionAvailable(), true);
+      assert.equal(existsSync(path.join(directory, 'connections.sqlite')), true);
+      const expected = { userData: directory, temp: path.join(directory, 'temporary'),
+        sessionData: path.join(directory, 'session'), crashDumps: path.join(directory, 'crashes'), logs: path.join(directory, 'logs') };
+      const observed = Object.fromEntries(Object.keys(expected).map(name => [name, app.getPath(name)]));
+      assert.deepEqual(observed, expected);
+      storageRouting = { appPathsVerified: true, paths: observed, osAndServiceScratch: 'unverified' };
+    });
+    if (privacyScope) await check('actual-macos-protected-legacy-workspace-development-migration', async () => {
+      const { qualifyProtectedMigration } = await moduleAt('../privacy/qualify-migration.mjs');
+      const result = qualifyProtectedMigration(directory, vault); assert.deepEqual(result.schemas, { workspaces: 5, development: 2 }); assert.equal(result.replayedEffects, 0);
+    });
     await check('renderer-restrictions', async () => { assert.equal(await js("typeof require + ':' + typeof process"), 'undefined:undefined'); assert.equal(await js("fetch('https://example.com').then(()=>false,()=>true)"), true); assert.equal(await js("document.querySelectorAll('iframe,webview').length"), 0); });
     await check('registered-frame-and-stale-context', async () => {
       const frame = window.webContents.mainFrame, sender = window.webContents, payload = { operation: 'connect', connection: 'github', contextRevision: manager.status().revision };
@@ -173,7 +229,7 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
       assert.equal(JSON.stringify(workspaces.status()).includes('ghu_synthetic_fixture'), false);
     });
     await check('actual-workspace-store-reopen-without-replay', async () => {
-      const { openWorkspaceStore } = await moduleAt('../repositories/store.mjs'), reopened = openWorkspaceStore(directory);
+      const { openWorkspaceStore } = await moduleAt('../repositories/store.mjs'), reopened = openWorkspaceStore(directory, { vault });
       try { assert.equal(reopened.workspaces()[0].project.fields.Status.options.find(option => option.name === 'Pending Review').name, 'Pending Review');
         assert.equal(reopened.selected(), workspaces.status().selected); assert.equal(reopened.pending().length, 0); assert.equal(workspaceFixture.writes, 4); }
       finally { reopened.close(); }
@@ -224,7 +280,7 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
       const first = workspaces.status().workspaces[0], before = issues.status(), secondPath = path.join(workspaceFixture.path, 'second'); mkdirSync(secondPath, { mode: 0o700 });
       workspaceFixture.git(['-C', secondPath, 'init', '-b', 'main']); workspaceFixture.git(['-C', secondPath, 'remote', 'add', 'origin', 'https://github.com/fixture/second.git']);
       const { inspectLocal } = await moduleAt('../repositories/local.mjs'); const inspected = await inspectLocal(secondPath, { repository: 'repo_qualification_second', owner: 'fixture', name: 'second' });
-      const { openWorkspaceStore } = await moduleAt('../repositories/store.mjs'), reopened = openWorkspaceStore(directory);
+      const { openWorkspaceStore } = await moduleAt('../repositories/store.mjs'), reopened = openWorkspaceStore(directory, { vault });
       try { reopened.register({ ...first, id: 'repo_qualification_second', repositoryId: 'R2', numericId: 4, slug: 'fixture/second', name: 'fixture/second', path: secondPath, localKey: inspected.identity.localKey, commonPath: inspected.identity.commonPath }); }
       finally { reopened.close(); }
       workspaces.dispatch({ operation: 'select', workspace: 'repo_qualification_second' }); await wait(() => js("document.getElementById('chat-title').textContent==='fixture/second'"));
@@ -294,7 +350,7 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
       await check('pipeline-durable-drafts-inheritance-stale-base-and-repository-switch', async () => {
         await pipelineChat('Edit global Release pipeline'); await pipelineChat('Rename step 1 to Build on the compatible host'); await pipelineChat('Review this pipeline'); await pipelineChat('Apply this pipeline');
         await pipelineChat('Edit repository Release pipeline'); assert.equal(pipelines.status().current.source, 'global'); await pipelineChat('Rename step 1 to Repository build');
-        const { openWorkspaceStore } = await moduleAt('../repositories/store.mjs'), reopened = openWorkspaceStore(directory);
+        const { openWorkspaceStore } = await moduleAt('../repositories/store.mjs'), reopened = openWorkspaceStore(directory, { vault });
         try { assert.equal(reopened.pipelineDraft(pipelines.status().workspaceId, 'release').definition.steps[0].label, 'Repository build'); }
         finally { reopened.close(); }
         const { openPolicyStore } = await moduleAt('../core/policy.mjs'); const ledger = openPolicyStore(directory, { catalog: () => policy.worker.read(null).bindings });
@@ -464,6 +520,153 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
         window.webContents.setZoomFactor(1); window.setSize(1180, 840);
       });
     }
+    if (skillsScope) {
+      const chat = async text => { await js(`document.getElementById('chat-nav').click();document.getElementById('prompt').value=${JSON.stringify(text)};document.getElementById('composer').requestSubmit()`); await wait(() => !skills.status().busy); };
+      const show = () => js("document.getElementById('settings-nav').click();document.getElementById('settings-skills').click()");
+      let firstPin, firstRevision;
+      await check('skills-frame-context-scope-and-defaults', async () => {
+        assert.equal(skills.status().inventory.length, 4); assert.equal(skills.status().inventory.every(item => item.enabled && item.available && item.permissions.length === 0), true);
+        const frame = window.webContents.mainFrame, event = { sender: window.webContents, senderFrame: frame }, payload = { operation: 'prepare', action: 'disable', name: 'pipeliner-motif', contextRevision: skills.status().revision };
+        assert.throws(() => skillChannel.dispatch({ ...event, sender: {} }, payload)); assert.throws(() => skillChannel.dispatch(event, { ...payload, contextRevision: 0 }));
+        assert.throws(() => skillChannel.dispatch(event, { ...payload, origin: 'pm' }));
+        await chat('"disable skill pipeliner-motif"'); assert.equal(skills.status().preview, null);
+      });
+      await check('skills-chat-preview-cancel-and-keyboard-disable', async () => {
+        await chat('disable skill pipeliner-motif'); await wait(() => Boolean(skills.status().preview)); assert.equal(skills.status().inventory.find(item => item.name === 'pipeliner-motif').enabled, true);
+        await chat('cancel this skill change'); await wait(() => !skills.status().preview);
+        await chat('disable skill pipeliner-motif'); await wait(() => Boolean(skills.status().preview)); await show();
+        await js("document.getElementById('skill-apply').focus()"); window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+        await wait(() => !skills.status().preview); assert.equal(skills.status().inventory.find(item => item.name === 'pipeliner-motif').enabled, false);
+        await chat('enable skill pipeliner-motif'); await wait(() => Boolean(skills.status().preview)); await chat('apply this skill change'); await wait(() => !skills.status().preview);
+      });
+      await check('skills-exact-source-and-install-permissions-without-runtime-gate', async () => {
+        await chat('add skill from https://github.com/fixture/skills/tree/main/compass'); await wait(() => Boolean(skills.status().preview));
+        const pin = skills.status().preview.item.id; assert.equal(skillStore.available(pin), false);
+        await show(); await js("document.getElementById('skill-authorize-source').click()"); await wait(() => skills.status().preview?.action === 'authorize');
+        await js("document.getElementById('skill-apply').click()"); await wait(() => !skills.status().preview); assert.equal(skillStore.available(pin), false);
+        await chat('allow host agent skill installs'); await wait(() => Boolean(skills.status().preview)); assert.equal(skills.status().preview.scope, 'host');
+        await chat('apply this skill change'); await wait(() => !skills.status().preview);
+        await chat('allow repository agent skill installs'); await wait(() => Boolean(skills.status().preview));
+        await chat('apply this skill change'); await wait(() => !skills.status().preview);
+        const workspace = skills.status().workspaceId, view = policy.worker.read(workspace), { installAuthorizedSkills } = await moduleAt('../skills/manager.mjs');
+        installAuthorizedSkills(skillStore, view, policy.worker.authority(workspace, view.revision)); skills.sync();
+        assert.equal(skillStore.available(pin), true); assert.equal(skills.status().preview, null);
+        await chat('deny repository agent skill installs'); await wait(() => Boolean(skills.status().preview)); await chat('apply this skill change'); await wait(() => !skills.status().preview);
+        assert.equal(policy.worker.authority(workspace, view.revision).capabilities.includes('extension.install'), false);
+      });
+      await check('skills-ordinary-link-exact-preview-install-and-text-security', async () => {
+        await show(); await js("document.getElementById('skill-link').value='https://github.com/fixture/skills/tree/main/beacon';document.getElementById('skill-source-form').requestSubmit()");
+        await wait(() => Boolean(skills.status().preview)); assert.equal(skillStore.list().some(item => item.name === 'beacon'), false);
+        assert.equal(skills.status().preview.item.source.commit, 'a'.repeat(40)); assert.equal(await js("document.getElementById('skill-preview').textContent.includes('Tools granted: none')"), true);
+        firstPin = skills.status().preview.item.id; await js("document.getElementById('skill-apply').click()"); await wait(() => !skills.status().preview);
+        assert.equal(skills.status().inventory.find(item => item.name === 'beacon').enabled, true); assert.equal(await js('typeof window.fixtureEscape'), 'undefined');
+        firstRevision = policy.worker.read(skills.status().workspaceId).revision;
+      });
+      await check('skills-update-future-pin-retains-captured-authority', async () => {
+        await chat('update skill from https://github.com/fixture/skills/tree/updated/beacon'); await wait(() => Boolean(skills.status().preview));
+        assert.equal(skills.status().preview.item.source.commit, 'b'.repeat(40)); await chat('apply this skill change'); await wait(() => !skills.status().preview);
+        const latest = skills.status().inventory.find(item => item.name === 'beacon'); assert.notEqual(latest.id, firstPin);
+        assert.equal(skillStore.get(firstPin).source.commit, 'a'.repeat(40)); assert.equal(policy.worker.authority(skills.status().workspaceId, firstRevision).extensions.includes(firstPin), true);
+      });
+      await check('skills-collision-single-word-choice-preserves-bundled-content', async () => {
+        await chat('add skill from https://github.com/fixture/skills/tree/main/pipeliner-forge'); await wait(() => Boolean(skills.status().collision));
+        const name = skills.status().collision.choices[0]; assert.match(name, /^[a-z]+$/); assert.equal(skills.status().preview, null);
+        await show(); await js(`document.getElementById('skill-choice-${name}').click()`); await wait(() => Boolean(skills.status().preview));
+        assert.equal(skills.status().preview.item.originalName, 'pipeliner-forge'); await js("document.getElementById('skill-apply').click()"); await wait(() => !skills.status().preview);
+        assert.equal(skillStore.list().filter(item => item.name === 'pipeliner-forge').length, 1); assert.equal(skillStore.list().some(item => item.name === name), true);
+      });
+      await check('skills-revocation-removal-and-protected-reopen', async () => {
+        await chat('disable skill beacon'); await wait(() => Boolean(skills.status().preview)); await chat('apply this skill change'); await wait(() => !skills.status().preview);
+        assert.equal(policy.worker.authority(skills.status().workspaceId, firstRevision).extensions.includes(firstPin), false);
+        await chat('remove skill beacon'); await wait(() => Boolean(skills.status().preview)); assert.match(skills.status().preview.timing, /every run/); await chat('apply this skill change'); await wait(() => !skills.status().preview);
+        assert.equal(skillStore.available(firstPin), false); const { openSkillStore } = await moduleAt('../skills/store.mjs'), reopened = openSkillStore(directory);
+        try { assert.equal(reopened.get(firstPin).source.commit, 'a'.repeat(40)); assert.equal(reopened.available(firstPin), false); } finally { reopened.close(); }
+      });
+      await check('skills-drafts-focus-labels-and-narrow-zoom', async () => {
+        await show(); await js("document.getElementById('skill-link').value='https://github.com/fixture/skills/tree/main/beacon';document.getElementById('skill-link').focus()");
+        await skills.dispatch({ operation: 'view' }); await new Promise(resolve => setTimeout(resolve, 50));
+        assert.equal(await js("document.getElementById('skill-link').value"), 'https://github.com/fixture/skills/tree/main/beacon'); assert.equal(await js('document.activeElement.id'), 'skill-link');
+        assert.equal(await js("Array.from(document.querySelectorAll('#skill-settings input,#skill-settings select')).every(input=>Array.from(document.querySelectorAll('#skill-settings label')).some(label=>label.htmlFor===input.id))"), true);
+        await js("document.getElementById('skill-install-permissions').open=true");
+        for (const zoom of [1, 2]) { window.setSize(420, 760); window.webContents.setZoomFactor(zoom); await new Promise(resolve => setTimeout(resolve, 100)); assert.equal(await js('document.documentElement.scrollWidth<=innerWidth'), true); }
+        window.webContents.setZoomFactor(1); window.setSize(1180, 840); await new Promise(resolve => setTimeout(resolve, 100));
+        assert.equal(await js("Array.from(document.querySelectorAll('#skill-settings button')).every(button=>button.getBoundingClientRect().height>=44)"), true);
+        nativeTheme.themeSource = 'dark'; await js('window.scrollTo(0,0)'); writeFileSync(path.join(directory, 'qa-capture.png'), (await window.webContents.capturePage()).toPNG(), { flag: 'wx', mode: 0o600 });
+      });
+    }
+    if (toolsScope) {
+      const show = () => js("document.getElementById('settings-nav').click();document.getElementById('settings-skills').click()");
+      const toolChat = async text => { await chat(text); await wait(() => !tools.status().busy); };
+      await check('tools-registered-frame-stale-context-and-secret-chat', async () => {
+        const frame = window.webContents.mainFrame, payload = { operation: 'view', contextRevision: tools.status().revision };
+        assert.throws(() => toolChannel.dispatch({ sender: {}, senderFrame: frame }, payload));
+        assert.throws(() => toolChannel.dispatch({ sender: window.webContents, senderFrame: frame }, { ...payload, contextRevision: payload.contextRevision - 1 }));
+        await toolChat('"disable tool queue"'); assert.equal(tools.status().preview, null);
+        await chat('Inspect tool server from https://tools.example.invalid/mcp with bearer secret-fixture');
+        assert.equal(await js("document.getElementById('transcript').textContent.includes('secret-fixture')"), false);
+      });
+      let originalPin;
+      await check('tools-chat-native-bearer-catalog-encryption-and-draft-preservation', async () => {
+        await toolChat('Inspect tool server from https://tools.example.invalid/mcp with a bearer credential'); await wait(() => Boolean(tools.status().catalog));
+        assert.equal(readFileSync(path.join(directory, 'connections.sqlite')).includes(fixtureKey), false);
+        assert.equal(JSON.stringify(tools.status()).includes(fixtureKey), false); assert.equal(toolStore.list().length, 0);
+        await show(); assert.equal(await js("document.getElementById('tool-catalog').textContent.includes('<script>')"), true);
+        assert.equal(await js('typeof window.fixtureToolEscape'), 'undefined');
+        await js("document.getElementById('chat-nav').click();document.getElementById('prompt').value='Inspect tool server from https://tools.example.invalid/mcp';document.getElementById('composer').requestSubmit();document.getElementById('prompt').value='Preserved next message'");
+        await wait(() => !tools.status().busy); assert.equal(await js("document.getElementById('prompt').value"), 'Preserved next message');
+      });
+      await check('tools-Settings-catalog-data-preview-keyboard-install-no-grant', async () => {
+        await show(); await js("document.getElementById('tool-select-queue').click()"); await wait(() => Boolean(tools.status().preview));
+        await js("document.getElementById('tool-preview-data').open=true;document.querySelector('#tool-preview-data input[value=\"issue.title\"]').checked=true;document.querySelector('#tool-preview-data form').requestSubmit()");
+        await wait(() => tools.status().preview.item.dataCategories.includes('issue.title')); originalPin = tools.status().preview.item.id;
+        await js("document.getElementById('tool-apply').focus()"); await wait(() => window.isFocused());
+        window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' }); await wait(() => !tools.status().preview);
+        assert.equal(tools.status().inventory.find(item => item.id === originalPin).enabled, true); assert.equal(tools.status().permissions.repository, false);
+        assert.equal(await js('typeof window.fixtureToolEscape'), 'undefined');
+      });
+      await check('tools-custom-pipeline-chat-binding-Settings-typed-input-and-preview', async () => {
+        await chat('Add an Extension step after step 2 called Read the queue'); await wait(() => pipelines.status().draft?.definition.steps.length === 7);
+        await chat('Use tool queue in step 3'); await wait(() => pipelines.status().draft.definition.steps[2].extension?.pin === originalPin);
+        await js("document.getElementById('settings-nav').click();document.getElementById('settings-pipelines').click();document.getElementById('pipeline-step-3').open=true;document.getElementById('pipeline-binding-3-path').value='title';document.getElementById('pipeline-binding-3-source').value='issue.title';document.getElementById('pipeline-binding-3-form').requestSubmit()");
+        await wait(() => pipelines.status().draft.definition.steps[2].extension.bindings.length === 1);
+        await chat('Review this pipeline'); await wait(() => Boolean(pipelines.status().preview));
+        assert.equal(pipelines.status().preview.after['pipelines.development'].value.steps[2].extension.pin, originalPin);
+        await chat('Apply this pipeline'); await wait(() => !pipelines.status().preview); assert.equal(pipelines.status().current.grantedPermissions.includes('extension.invoke'), false);
+        assert.equal(pipelines.status().current.definition.steps[2].retryLimit, 0);
+      });
+      await check('tools-permissions-separate-update-pin-and-immediate-disable', async () => {
+        await toolChat('Allow host tool calls'); await toolChat('Apply tool change'); await toolChat('Allow repository tool calls'); await toolChat('Apply tool change');
+        assert.equal(tools.status().permissions.host, true); assert.equal(tools.status().permissions.repository, true);
+        await toolChat('Set tool queue data to Issue title, PM supplied values'); await toolChat('Apply tool change');
+        assert.notEqual(tools.status().inventory.find(item => item.enabled).id, originalPin); assert.deepEqual(toolStore.get(originalPin).definition.dataCategories, ['issue.title']);
+        assert.equal(pipelines.status().current.definition.steps[2].extension.pin, originalPin);
+        await toolChat('Disable tool queue'); await toolChat('Apply tool change'); assert.equal(tools.status().inventory.some(item => item.enabled), false);
+        await toolChat('Enable tool queue'); await toolChat('Apply tool change');
+      });
+      await check('tools-advanced-command-shared-namespace-and-text-only-source', async () => {
+        await show(); await js("document.getElementById('tool-custom-command').open=true;document.getElementById('tool-command-name').value='pipeliner-forge';document.getElementById('tool-command-purpose').value='Check synthetic work';document.getElementById('tool-command-script').value='printf safe';document.getElementById('tool-command-script').form.requestSubmit()");
+        await wait(() => Boolean(tools.status().collision)); const name = tools.status().collision.choices[0]; assert.match(name, /^[a-z]+$/);
+        await js(`document.getElementById('tool-choice-${name}').click()`); await wait(() => Boolean(tools.status().preview));
+        await js("document.getElementById('tool-apply').click()"); await wait(() => !tools.status().preview);
+        assert.equal(skillStore.list().filter(item => item.name === 'pipeliner-forge').length, 1); assert.equal(toolStore.list().some(item => item.name === name), true);
+        assert.equal(development.status().run, null);
+      });
+      await check('tools-source-draft-focus-context-removal-and-reopen', async () => {
+        await show(); await js("document.getElementById('tool-endpoint').value='https://tools.example.invalid/mcp';document.getElementById('tool-endpoint').focus()");
+        await tools.dispatch({ operation: 'view' }); await new Promise(resolve => setTimeout(resolve, 50));
+        assert.equal(await js("document.getElementById('tool-endpoint').value"), 'https://tools.example.invalid/mcp'); assert.equal(await js('document.activeElement.id'), 'tool-endpoint');
+        await toolChat('Remove tool queue'); await toolChat('Apply tool change'); assert.equal(toolStore.available(originalPin), false);
+        const { openToolStore } = await moduleAt('../tools/store.mjs'), reopened = openToolStore(directory);
+        try { assert.equal(reopened.available(originalPin), false); assert.deepEqual(reopened.get(originalPin).definition.dataCategories, ['issue.title']); } finally { reopened.close(); }
+      });
+      await check('tools-labels-keyboard-narrow-zoom-and-native-capture', async () => {
+        await show(); await js("document.getElementById('tool-custom-command').open=true;document.getElementById('tool-permissions').open=true");
+        assert.equal(await js("Array.from(document.querySelectorAll('#tool-settings input,#tool-settings select,#tool-settings textarea')).every(input=>input.closest('label')||Array.from(document.querySelectorAll('#tool-settings label')).some(label=>label.htmlFor===input.id))"), true);
+        for (const zoom of [1, 2]) { window.setSize(420, 760); window.webContents.setZoomFactor(zoom); await new Promise(resolve => setTimeout(resolve, 100)); assert.equal(await js('document.documentElement.scrollWidth<=innerWidth'), true); }
+        window.webContents.setZoomFactor(1); window.setSize(1180, 840); nativeTheme.themeSource = 'dark'; await new Promise(resolve => setTimeout(resolve, 100));
+        await js("document.getElementById('tool-settings').scrollIntoView({block:'start'})"); writeFileSync(path.join(directory, 'qa-capture.png'), (await window.webContents.capturePage()).toPNG(), { flag: 'wx', mode: 0o600 });
+      });
+    }
     if (backgroundScope) {
       const chat = async text => { await js(`document.getElementById('chat-nav').click();document.getElementById('prompt').value=${JSON.stringify(text)};document.getElementById('composer').requestSubmit()`); await wait(() => !background.status().busy); };
       await check('background-frame-context-host-scope-fences', async () => {
@@ -519,6 +722,168 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
         window.webContents.setZoomFactor(1); window.setSize(1180, 840);
       });
     }
+    if (privacyScope) await require('./qualify-privacy.cjs').run({ window, directory, vault, privacy, records: privacyRecords, channel: privacyChannel, workspaces, policy, js, wait, check });
+    if (appearanceScope) await require('./qualify-appearance.cjs').run({ window, directory, appearance, channel: appearanceChannel, policy, development, js, wait, check, measurements });
+    if (deliveryScope) await require('./qualify-delivery.cjs').run({ window, directory, vault, privacy, delivery, updates, updateChannel, artifacts, appearance, channel: deliveryChannel, policy, js, wait, check, measurements });
+    if (permissionScope) await require('./qualify-permissions.cjs').run({ window, directory, permissions, appearance, channel: permissionChannel, policy, js, wait, check, measurements });
+    if (process.argv.includes('--qualify-issues')) await check('issues-cached-10000-row-bounded-search-pages-dependencies-and-native-keyboard', async () => {
+      const original = issues.status(), started = performance.now(), rows = Array.from({ length: 10000 }, (_, i) => ({ id: 'ScaleFixture' + (i + 1), number: i + 1, title: 'Synthetic cached Issue ' + (i + 1),
+        state: 'OPEN', ready: false, status: 'Backlog', metadata: { Status: 'Backlog', Priority: 'P2', Impact: 'Medium', Effort: 'Small' } }));
+      // Cached display only; these rows grant no host catalog, Ready or worker authority.
+      const display = { ...original, revision: original.revision + 1000, message: null, question: null, selected: null, detail: null,
+        catalog: { ...original.catalog, issues: rows }, draft: { id: 'scale-display-draft', state: 'choosing', values: { title: 'Synthetic cached draft', summary: 'Display only', acceptance: ['Preserve selected dependencies'], labels: [], dependencies: [10000] } } };
+      try {
+        window.webContents.send('issues:status', display); await wait(() => js("document.getElementById('issue-list-count').textContent.includes('10000 matching')"));
+        const cached = { interaction: 'cached-issue-navigation', cachedIssueInitialDisplayMs: performance.now() - started }; measurements.push(cached);
+        await js("document.getElementById('issues-nav').click()");
+        assert.equal(await js("document.querySelectorAll('#issue-list>article').length===50&&document.querySelectorAll('#draft-dependencies-results input').length===50"), true);
+        assert.equal(await js("document.getElementById('issue-draft').textContent.includes('Selected dependencies: #10000.')"), true);
+        cached.cachedIssuePageMs = await js("(()=>{const samples=[];for(let i=0;i<20;i++){const start=performance.now();document.getElementById(i%2?'issue-list-previous':'issue-list-next').click();document.getElementById('issue-list').offsetHeight;samples.push(performance.now()-start)}return samples})()");
+        const sorted = [...cached.cachedIssuePageMs].sort((a, b) => a - b); cached.cachedIssuePageP95Ms = sorted[Math.ceil(sorted.length * .95) - 1];
+        assert(cached.cachedIssuePageP95Ms < 150);
+        window.focus(); await js("document.getElementById('issue-list-next').focus({preventScroll:true})"); await wait(() => window.isFocused());
+        window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' }); window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+        await wait(() => js("document.querySelector('#issue-list h2').textContent.startsWith('#51 ')"));
+        assert.equal(await js("document.activeElement.id"), 'issue-list-next');
+        cached.cachedIssueSearchMs = await js("(()=>{const input=document.getElementById('issue-list-search');input.focus({preventScroll:true});const start=performance.now();input.value='#10000';input.dispatchEvent(new Event('input'));document.getElementById('issue-list').offsetHeight;return performance.now()-start})()");
+        assert.equal(await js("document.querySelectorAll('#issue-list>article').length===1&&document.querySelector('#issue-list h2').textContent.startsWith('#10000 ')&&document.activeElement.id==='issue-list-search'"), true);
+        await js("const input=document.getElementById('draft-dependencies-search');input.value='#10000';input.dispatchEvent(new Event('input'))");
+        assert.equal(await js("document.querySelectorAll('#draft-dependencies-results input').length===1&&document.querySelector('#draft-dependencies-results input').checked"), true);
+        assert.equal(issues.status().revision, original.revision); assert.equal(issues.status().catalog.issues.length, original.catalog.issues.length);
+        for (const zoom of [1, 2]) { window.setSize(420, 760); window.webContents.setZoomFactor(zoom); await new Promise(resolve => setTimeout(resolve, 100)); assert.equal(await js('document.documentElement.scrollWidth<=innerWidth'), true); }
+      } finally {
+        window.webContents.setZoomFactor(1); window.setSize(1180, 840);
+        await new Promise((resolve, reject) => { window.webContents.once('did-finish-load', resolve); window.webContents.once('did-fail-load', reject); window.reload(); });
+        await wait(() => js("Boolean(document.getElementById('appearance-form'))"));
+      }
+    });
+    if (process.argv.includes('--qualify-issues')) await check('issues-native-protected-25-workspace-10000-item-cache-and-warm-navigation', async () => {
+      const phase = name => require('./qualification-progress.cjs').phase(name, performance.now() - started);
+      await wait(() => js("Boolean(document.getElementById('connection-list').children.length)"));
+      const { openWorkspaceStore } = await moduleAt('../repositories/store.mjs'), { issueFixture } = await moduleAt('../issues/fixture.mjs');
+      const original = workspaces.status().selected, store = openWorkspaceStore(directory, { vault }), saved = new Map(), coldMs = [], warmMs = [], seeded = [];
+      let targets;
+      try {
+      try {
+        const present = store.workspaces(), first = present[0]; assert.equal(present.length, 2);
+        for (let index = present.length; index < 25; index++) {
+          const id = 'repo_workload_' + index, folder = path.join(path.dirname(workspaceFixture.path), 'workload-' + index);
+          mkdirSync(folder, { mode: 0o700 }); const info = lstatSync(folder), slug = 'fixture/workload-' + index; seeded.push({ folder, info });
+          // Synthetic imported metadata only; no Git or remote connection qualification is claimed.
+          store.register({ ...first, id, repositoryId: 'RWorkload' + index, numericId: 100 + index, slug, name: slug, path: folder,
+            localKey: info.dev + ':' + info.ino, commonPath: folder, project: { ...first.project, id: 'PWorkload' + index, title: 'Synthetic workload ' + index } });
+        }
+        targets = store.workspaces(); assert.equal(targets.length, 25);
+        for (const target of targets) {
+          const fixture = issueFixtures.get(target.id) ?? issueFixture(target); issueFixtures.set(target.id, fixture); saved.set(target.id, [...fixture.issues]);
+          const first = fixture.issues[0]; fixture.issues.splice(0, fixture.issues.length, ...Array.from({ length: 400 }, (_, index) => ({ ...first,
+            id: 'Scale_' + target.id + '_' + (index + 1), numericId: index + 1, number: index + 1, title: 'Synthetic ' + target.name + ' Issue ' + (index + 1),
+            itemId: 'ScaleItem_' + target.id + '_' + (index + 1), dependencies: [], url: 'https://github.com/' + target.slug + '/issues/' + (index + 1) })));
+        }
+      } finally { store.close(); }
+      try {
+        const writes = [...issueFixtures.values()].reduce((count, fixture) => count + fixture.writes.length, 0), coldReads = catalogReads;
+        for (const target of targets) {
+          phase('workload-selection-started');
+          const started = performance.now(); workspaces.dispatch({ operation: 'select', workspace: target.id });
+          phase('workload-selection-finished'); phase('workload-catalog-started');
+          await issues.dispatch({ operation: 'refresh' }); await issues.idle();
+          phase('workload-catalog-finished');
+          assert.equal(issues.status().error, null); assert.equal(issues.status().catalog.repositoryId, target.repositoryId); assert.equal(issues.status().catalog.issues.length, 400);
+          coldMs.push(performance.now() - started);
+        }
+        assert.equal(catalogReads - coldReads, 25); const reads = catalogReads, turns = providerTurns;
+        await wait(() => js("document.querySelectorAll('#workspace-list>article').length===25"));
+        for (const target of targets) {
+          phase('workload-navigation-started');
+          const label = JSON.stringify(target.name), began = await js(`(()=>{document.getElementById('repositories-nav').click();const card=[...document.querySelectorAll('#workspace-list>article')].find(node=>node.querySelector('h2').textContent===${label});const began=performance.now();card.querySelector('button').click();return began})()`);
+          await wait(() => js(`document.getElementById('chat-title').textContent===${label}&&document.getElementById('workspace-context').textContent===${label}`));
+          await js('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+          warmMs.push(await js('performance.now()-' + began));
+          assert.equal(issues.status().workspaceId, target.id); assert.equal(issues.status().catalog.repositoryId, target.repositoryId);
+          await js("document.getElementById('issues-nav').click()");
+          assert.equal(await js("document.querySelectorAll('#issue-list>article').length===50&&document.getElementById('issue-list-count').textContent.includes('400 matching')"), true);
+          phase('workload-navigation-finished');
+        }
+        const sorted = [...warmMs].sort((a, b) => a - b), warmP95Ms = sorted[Math.ceil(sorted.length * .95) - 1];
+        measurements.push({ interaction: 'synthetic-protected-25-repository-10000-total-item-workload', repositories: 25, totalItems: 10000, itemsPerRepository: 400,
+          transport: 'synthetic-no-network', coldLoadMs: coldMs, warmNavigationMs: warmMs, warmNavigationP95Ms: warmP95Ms,
+          warmCatalogRequests: catalogReads - reads, warmFixtureProviderTurns: providerTurns - turns, memory: process.memoryUsage(), actualWorkers: 0 });
+        assert(warmP95Ms < 2000);
+        assert.equal(catalogReads, reads);
+        assert.equal(providerTurns, turns);
+        assert.equal([...issueFixtures.values()].reduce((count, fixture) => count + fixture.writes.length, 0), writes);
+        const reopened = openWorkspaceStore(directory, { vault }); try { assert.equal(reopened.workspaces().length, 25); } finally { reopened.close(); }
+        if (process.argv.includes('--qualify-soak')) {
+          const { measureSoak, soakDurationMs, observeSoakSample, observeSoakFrames } = require('./qualify-soak.cjs');
+          const storage = require('../test-storage.cjs').qualificationContext();
+          require('../test-storage.cjs').validateOwnedDataDirectory(storage, storage.paths.outputs);
+          const file = path.join(storage.paths.outputs, `soak-${process.pid}.jsonl`), fd = openSync(file, 'wx', 0o600);
+          const phaseFile = path.join(storage.paths.outputs, `soak-phases-${process.pid}.jsonl`);
+          const controller = new AbortController(), abort = () => controller.abort(); window.once('closed', abort);
+          const wallBegan = Date.now(), pins = targets.map(target => policy.worker.read(target.id).hash), hostPin = policy.worker.read(null).hash;
+          let bytes = 0, phaseBytes = 0, phaseFd;
+          try {
+            phaseFd = openSync(phaseFile, 'wx', 0o600);
+            const result = await measureSoak({ signal: controller.signal,
+              sample: async (_elapsed, index) => observeSoakSample({ signal: controller.signal,
+                windowState: () => ({ windowVisible: Number(!window.isDestroyed() && window.isVisible()), windowFocused: Number(!window.isDestroyed() && window.isFocused()) }),
+                write: value => {
+                  const line = Buffer.from(JSON.stringify({ sample: index, ...value }) + '\n');
+                  if ((phaseBytes += line.length) > 2 * 1024 ** 2) throw Error('soak-phase-evidence-limit');
+                  let offset = 0; while (offset < line.length) offset += writeSync(phaseFd, line, offset, line.length - offset); fsyncSync(phaseFd);
+                },
+                sample: async phase => {
+                  phase(1);
+                  assert.equal(policy.worker.read(null).hash, hostPin);
+                  for (const [index, target] of targets.entries()) {
+                    assert.equal(policy.worker.read(target.id).hash, pins[index]);
+                    assert.equal(policy.worker.read(target.id).values['scheduling.enabled'].value, false);
+                  }
+                  await scheduler.check('timer'); assert.equal(scheduler.busy(), false);
+                  const label = JSON.stringify(targets[index % targets.length].name);
+                  phase(2);
+                  const timing = await js(`(()=>{const control=performance.now();document.getElementById('repositories-nav').click();document.getElementById('workspace-list').offsetHeight;const controlMs=performance.now()-control;const card=[...document.querySelectorAll('#workspace-list>article')].find(node=>node.querySelector('h2').textContent===${label});const began=performance.now();card.querySelector('button').click();return {controlMs,began,rendererVisible:document.visibilityState==='visible'?1:0}})()`);
+                  phase(3, timing.rendererVisible);
+                  await wait(() => js(`document.getElementById('chat-title').textContent===${label}&&document.getElementById('workspace-context').textContent===${label}`));
+                  phase(4, await js("document.visibilityState==='visible'?1:0"));
+                  const frames = await js(`(${observeSoakFrames.toString()})()`);
+                  phase(4, frames.rendererVisible); assert.equal(frames.frames, 2);
+                  phase(5);
+                  const navigationMs = await js('performance.now()-' + timing.began);
+                  assert.equal(catalogReads, reads); assert.equal(providerTurns, turns);
+                  assert.equal([...issueFixtures.values()].reduce((count, fixture) => count + fixture.writes.length, 0), writes);
+                  const memory = process.memoryUsage();
+                  return { navigationMs, controlMs: timing.controlMs, rssBytes: memory.rss, heapUsedBytes: memory.heapUsed };
+                } }),
+              write: value => {
+                const line = Buffer.from(JSON.stringify({ ...value, wallElapsedMs: Date.now() - wallBegan,
+                  catalogRequests: catalogReads - reads, fixtureProviderTurns: providerTurns - turns,
+                  fixtureWrites: [...issueFixtures.values()].reduce((count, fixture) => count + fixture.writes.length, 0) - writes }) + '\n');
+                if ((bytes += line.length) > 1024 ** 2) throw Error('soak-evidence-limit');
+                let offset = 0; while (offset < line.length) offset += writeSync(fd, line, offset, line.length - offset); fsyncSync(fd);
+                assert(value.controlMs < 150);
+              } });
+            measurements.push({ interaction: '24-hour-foreground-synthetic-cache-idle-service-soak', ...result, wallElapsedMs: Date.now() - wallBegan,
+              catalogRequests: catalogReads - reads, fixtureProviderTurns: providerTurns - turns, samplesPath: file, samplesBytes: bytes,
+              samplesSha256: require('node:crypto').createHash('sha256').update(readFileSync(file)).digest('hex'),
+              phaseEvidencePath: phaseFile, phaseEvidenceBytes: phaseBytes, phaseEvidenceSha256: require('node:crypto').createHash('sha256').update(readFileSync(phaseFile)).digest('hex') });
+            assert(result.elapsedMs >= soakDurationMs); assert(result.navigationP95Ms < 2000); assert(result.controlP95Ms < 150);
+          } finally { window.removeListener('closed', abort); closeSync(fd); if (phaseFd !== undefined) closeSync(phaseFd); }
+        }
+      } finally {
+        for (const [id, rows] of saved) { const fixture = issueFixtures.get(id); fixture.issues.splice(0, fixture.issues.length, ...rows); }
+        if (!window.isDestroyed()) { workspaces.dispatch({ operation: 'select', workspace: original }); await issues.dispatch({ operation: 'refresh' }); await issues.idle(); }
+      }
+      } finally {
+        for (const { folder, info } of seeded) {
+          const current = lstatSync(folder);
+          assert(current.isDirectory() && !current.isSymbolicLink() && current.uid === process.getuid()
+            && current.dev === info.dev && current.ino === info.ino && realpathSync(folder) === folder && (current.mode & 0o777) === 0o700);
+          rmdirSync(folder); assert.equal(existsSync(folder), false);
+        }
+      }
+    });
     await check('themes-narrow-zoom-high-contrast-reduced-motion', async () => {
       if (developmentScope) await js("document.getElementById('settings-nav').click();document.getElementById('settings-agents').click()");
       for (const theme of ['light', 'dark']) for (const view of ['repositories', 'issues', 'settings']) { nativeTheme.themeSource = theme; await js(`document.getElementById('${view}-nav').click()`); assert.equal(await js('document.documentElement.scrollWidth<=innerWidth'), true); }
@@ -537,6 +902,12 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
       if (developmentScope) await js("document.getElementById('settings-nav').click();document.getElementById('settings-agents').click();document.getElementById('dev-starter-skills').open=true");
       if (schedulingScope) await js("document.getElementById('settings-nav').click();document.getElementById('settings-schedule').click();window.scrollTo(0,0)");
       if (backgroundScope) await js("document.getElementById('settings-nav').click();document.getElementById('settings-background').click();window.scrollTo(0,0)");
+      if (skillsScope) await js("document.getElementById('settings-nav').click();document.getElementById('settings-skills').click();window.scrollTo(0,0)");
+      if (toolsScope) await js("document.getElementById('settings-nav').click();document.getElementById('settings-skills').click();window.scrollTo(0,document.getElementById('tool-settings').offsetTop-100)");
+      if (privacyScope) await js("document.getElementById('settings-nav').click();document.getElementById('settings-privacy').click();window.scrollTo(0,0)");
+      if (appearanceScope) await js("document.getElementById('settings-nav').click();document.getElementById('settings-appearance').click();window.scrollTo(0,document.getElementById('appearance-form').offsetTop-100)");
+      if (deliveryScope) await js("document.getElementById('settings-nav').click();document.getElementById('settings-privacy').click();window.scrollTo(0,document.getElementById('privacy-installation-inventory').offsetTop-100)");
+      if (permissionScope) { await js("document.getElementById('settings-nav').click();document.getElementById('settings-permissions').click();document.getElementById('permission-form').scrollIntoView({block:'start'});window.scrollBy(0,-(document.querySelector('.app-head').getBoundingClientRect().height+(innerWidth<=720?document.querySelector('.app-nav').getBoundingClientRect().height:0)+10))"); assert.equal(await js("document.getElementById('permission-workspace-read').getBoundingClientRect().bottom<innerHeight"), true); }
       await js('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))'); await new Promise(resolve => setTimeout(resolve, 100));
       if (developmentScope) assert.equal(await js("!document.getElementById('settings-view').hidden && !document.getElementById('agent-settings').hidden && document.getElementById('settings-nav').getAttribute('aria-current')==='page'"), true);
       assert.equal(await js("getComputedStyle(document.body).backgroundColor==='rgb(16, 23, 34)'"), true);
@@ -555,12 +926,13 @@ exports.run = async ({ window, directory, vault, manager, workspaces, issues, pi
       assert.equal(folderCancelled, true);
     });
   } catch { const snapshot = workspaces.status(); workspaceEvidence = { checkpoint: workspaceStage, busy: snapshot.busy, state: snapshot.draft?.state, error: snapshot.draft?.error, folderSelected: Boolean(snapshot.draft?.folder), projectCount: snapshot.draft?.projects?.length ?? 0 }; process.exitCode = 1; }
-  const report = { desktopQualification: backgroundScope ? 'optional-background-host' : schedulingScope ? 'deterministic-scheduling' : developmentScope ? 'development-controls' : pipelineScope ? 'versioned-pipeline-editing' : 'protected-issue-intake', checks, passed: checks.length === (backgroundScope ? 25 : schedulingScope ? 23 : developmentScope ? 22 + (pipelineScope ? 6 : 0) : pipelineScope ? 24 : issueScope ? 18 : 21) && checks.every(c => c.passed), milliseconds: Math.round(performance.now() - started), windowReadyFromMainEntryMs: windowReadyMs, measurements,
-    versions: { electron: process.versions.electron, chromium: process.versions.chrome, node: process.versions.node, sqlite: process.versions.sqlite, os: process.platform, architecture: process.arch },
-    nativeEvidence, workspaceEvidence, folderFailure, folderCancelled, synthetic: 'Synthetic GitHub/model replies, first folder selection and optional background-service adapter; actual native secure field, folder-panel cancellation, protected storage, local Git and own window. Actual SMAppService/bootstrap is qualified separately.',
+  const soakVerified = !process.argv.includes('--qualify-soak') || measurements.some(value => value.interaction === '24-hour-foreground-synthetic-cache-idle-service-soak' && value.elapsedMs >= 86400000 && value.navigationP95Ms < 2000 && value.controlP95Ms < 150);
+  const report = { desktopQualification: permissionScope ? 'permissions-and-local-testing-controls' : deliveryScope ? 'delivery-updates-recovery-controls-and-installation-data-inventory' : appearanceScope ? 'appearance-and-accessibility-preferences' : privacyScope ? 'protected-local-privacy-and-recovery' : toolsScope ? 'scoped-tools-and-custom-pipelines' : skillsScope ? 'starter-skill-management' : backgroundScope ? 'optional-background-host' : schedulingScope ? 'deterministic-scheduling' : developmentScope ? 'development-controls' : pipelineScope ? 'versioned-pipeline-editing' : 'protected-issue-intake', checks, passed: soakVerified && checks.length === (permissionScope ? 24 : deliveryScope ? 31 : appearanceScope ? 26 : privacyScope ? 27 : toolsScope ? 26 : skillsScope ? 26 : backgroundScope ? 25 : schedulingScope ? 23 : developmentScope ? 22 + (pipelineScope ? 6 : 0) : pipelineScope ? 24 : issueScope ? 18 : 21) + (process.argv.includes('--qualify-issues') ? 2 : 0) && checks.every(c => c.passed), milliseconds: Math.round(performance.now() - started), windowReadyFromMainEntryMs: windowReadyMs, measurements,
+    versions: { electron: process.versions.electron, chromium: process.versions.chrome, node: process.versions.node, sqlite: process.versions.sqlite, os: process.platform, architecture: process.arch }, storageRouting,
+    nativeEvidence, workspaceEvidence, folderFailure, folderCancelled, synthetic: 'Synthetic GitHub/model replies, first folder selection, optional tool catalog and background-service adapters; actual native secure fields, folder-panel cancellation, protected storage, local Git and own window. External tool compatibility and actual SMAppService/bootstrap are qualified separately.',
     notRun: issueScope ? ['Unchanged Codex unauthenticated discovery', 'Unchanged public GitHub App qualification', 'Unchanged invalid Cloud key probe'] : [],
     pending: ['Human native folder selection', 'Authenticated provider/GitHub PM journeys', 'Human task observation', 'Screen reader', 'Windows/Linux', 'Stable signed package storage identity'], captureAvailable: Boolean(capture),
-    nativeCaptureAvailable: existsSync(path.join(directory, 'secure-field.png')), qaCaptureAvailable: existsSync(path.join(directory, 'qa-capture.png')) };
+    nativeCaptureAvailable: existsSync(path.join(directory, 'secure-field.png')), qaCaptureAvailable: existsSync(path.join(directory, 'qa-capture.png')), layoutCaptureAvailable: existsSync(path.join(directory, 'layout-capture.png')), recoveryCaptureAvailable: existsSync(path.join(directory, 'recovery-capture.png')) };
   console.log(JSON.stringify(report)); if (!report.passed) process.exitCode = 1;
   if (window.isDestroyed()) app.exit(report.passed ? 0 : 1);
   else { window.once('closed', () => app.exit(report.passed ? 0 : 1)); window.close(); }

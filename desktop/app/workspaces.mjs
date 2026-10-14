@@ -99,7 +99,7 @@ export async function initWorkspaces({ el, message, show }) {
     if (!state) return;
     try {
       const result = await window.pipeliner.workspaceRequest({ ...payload, contextRevision: state.revision });
-      if (text) { message(text, true); $('prompt').value = ''; }
+      if (text) message(text, true);
       if (result.snapshot) render(result.snapshot); if (result.message) message(result.message);
     } catch { message('This setup or view changed. Review the selected project and try again. No new target was chosen.'); render(await window.pipeliner.workspaceRequest({ operation: 'status' })); }
     if (!$('chat-view').hidden) $('prompt').focus();

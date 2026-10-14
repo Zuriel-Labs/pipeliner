@@ -50,7 +50,7 @@ export async function initBackground({ el, message }) {
   }
   async function request(payload, text) {
     if (!state || pending) return; pending = true;
-    try { const result = await window.pipeliner.backgroundRequest({ ...payload, contextRevision: state.revision }); if (text) { message(text, true); $('prompt').value = ''; } pending = false; render(result.snapshot ?? state); }
+    try { const result = await window.pipeliner.backgroundRequest({ ...payload, contextRevision: state.revision }); if (text) message(text, true); pending = false; render(result.snapshot ?? state); }
     catch { pending = false; message('Background change could not finish. Check the current state and recovery controls. Work remains preserved.'); render(await window.pipeliner.backgroundRequest({ operation: 'status' })); }
   }
   window.pipeliner.onBackground(render); render(await window.pipeliner.backgroundRequest({ operation: 'status' }));

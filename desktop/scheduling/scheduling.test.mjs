@@ -6,6 +6,11 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { defaults, canonicalJSON } from '../core/settings.mjs';
 import { openWorkspaceStore } from '../repositories/store.mjs';
+import { openTestVault } from '../connections/test-vault.mjs';
+import { legacyWorkspace } from '../repositories/legacy-fixture.mjs';
+import { verifyProtectedBackup } from '../privacy/backup.mjs';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { scheduleConfig, selectReadyWork } from './model.mjs';
 import { createScheduler } from './scheduler.mjs';
 
@@ -108,22 +113,20 @@ test('completion waits by default; explicit immediate scheduling performs one ne
   await f.scheduler.completed('R0'); assert.equal(f.requests(), before + 1);
 });
 
-test('workspace schedule records survive backed-up additive migration; forged data fails closed', t => {
+test('workspace schedule records survive protected migration; forged data fails closed', async t => {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'pipeliner-schedule-')));
-  let store;
-  t.after(() => { store?.close(); rmSync(directory, { recursive: true }); assert.equal(existsSync(directory), false); });
-  store = openWorkspaceStore(directory);
-  store.register({ id: 'R0', repositoryId: 'REPO', slug: 'fixture/repo', localKey: '1:2', path: directory, project: { id: 'PROJECT' } });
-  store.saveIssueContext('R0', { selected: 7 }); store.close(); store = null;
-  const legacy = new DatabaseSync(join(directory, 'workspaces.sqlite')); legacy.exec('DROP TABLE schedule_states; PRAGMA user_version=3;'); legacy.close();
-  store = openWorkspaceStore(directory);
-  const backupName = readdirSync(directory).find(name => /^workspaces-v3-[a-f0-9-]+\.sqlite$/.test(name)); assert(backupName); assert.equal(lstatSync(join(directory, backupName)).mode & 0o777, 0o600);
-  const backup = new DatabaseSync(join(directory, backupName), { readOnly: true });
-  try { assert.equal(backup.prepare('PRAGMA user_version').get().user_version, 3); assert.equal(JSON.parse(backup.prepare('SELECT data FROM issue_contexts').get().data).selected, 7); } finally { backup.close(); }
+  const vault = await openTestVault(directory); let store;
+  t.after(() => { store?.close(); vault.close(); rmSync(directory, { recursive: true }); assert.equal(existsSync(directory), false); });
+  legacyWorkspace(directory, 3, { workspaces: [{ id: 'R0', repositoryId: 'REPO', slug: 'fixture/repo', localKey: '1:2', path: directory, project: { id: 'PROJECT' } }], issues: { R0: { selected: 7 } } });
+  const originalHash = createHash('sha256').update(readFileSync(join(directory, 'workspaces.sqlite'))).digest('hex');
+  store = openWorkspaceStore(directory, { vault });
+  const backupName = readdirSync(directory).find(name => /^workspaces-v3-[a-f0-9-]+\.pipeliner-backup$/.test(name)); assert(backupName); assert.equal(lstatSync(join(directory, backupName)).mode & 0o777, 0o600);
+  assert.equal(verifyProtectedBackup(join(directory, backupName), { vault, store: 'workspaces', version: 3 }).sourceHash, originalHash);
+  assert.equal(store.issueContext('R0').selected, 7);
   const state = { schemaVersion: 1, config: {}, nextAt: 1000, lastAt: 0, reason: 'no-ready-work', catchUp: false, eligible: null, pending: null };
-  store.saveSchedule('R0', state); store.close(); store = openWorkspaceStore(directory); assert.deepEqual(store.schedule('R0'), state);
+  store.saveSchedule('R0', state); store.close(); store = openWorkspaceStore(directory, { vault }); assert.deepEqual(store.schedule('R0'), state);
   store.close(); store = null;
   const db = new DatabaseSync(join(directory, 'workspaces.sqlite'));
   db.prepare('UPDATE schedule_states SET data=? WHERE repository=?').run(canonicalJSON({ ...state, reason: 'forged' }), 'R0'); db.close();
-  store = openWorkspaceStore(directory); assert.throws(() => store.schedule('R0'), /invalid/);
+  assert.throws(() => openWorkspaceStore(directory, { vault }), /invalid/);
 });

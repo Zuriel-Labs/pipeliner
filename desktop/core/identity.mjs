@@ -9,7 +9,7 @@ function localGit(checkout, args, missing = false) {
     { env: { PATH: '/usr/bin:/bin', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', LC_ALL: 'C' }, encoding: 'utf8', timeout: 5000, maxBuffer: 16384, stdio: ['ignore', 'pipe', 'pipe'] }).trim(); }
   catch (error) { if (missing && error.status === 1) return ''; throw new Error('Local Git identity inspection failed'); }
 }
-function origin(value) {
+export function repositoryOrigin(value) {
   const match = /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([A-Za-z0-9-]{1,39})\/([A-Za-z0-9_.-]{1,100})$/.exec(value);
   if (!match) throw new Error('Unsupported or credential-bearing repository origin');
   const name = match[2].replace(/\.git$/, '');
@@ -22,8 +22,8 @@ export function workspaceRemote(directory) {
   const urls = localGit(checkout, ['config', '--no-includes', '--local', '--get-all', 'remote.origin.url']).split('\n');
   const pushes = localGit(checkout, ['config', '--no-includes', '--local', '--get-all', 'remote.origin.pushurl'], true);
   if (urls.length !== 1) throw new Error('Local origin is ambiguous');
-  const slug = origin(urls[0]);
-  if (pushes && pushes.split('\n').some(value => origin(value) !== slug)) throw new Error('Local fetch and push identity mismatch');
+  const slug = repositoryOrigin(urls[0]);
+  if (pushes && pushes.split('\n').some(value => repositoryOrigin(value) !== slug)) throw new Error('Local fetch and push identity mismatch');
   return slug;
 }
 
@@ -40,7 +40,7 @@ export function inspectWorkspace(directory, remote) {
   if (checkout !== checkoutRoot && !checkout.startsWith(`${checkoutRoot}${sep}`)) throw new Error('Selected folder is outside the verified working tree');
   const urls = git(['config', '--no-includes', '--local', '--get-all', 'remote.origin.url']).split('\n');
   const pushes = git(['config', '--no-includes', '--local', '--get-all', 'remote.origin.pushurl'], true);
-  if (urls.length !== 1 || [...urls, ...(pushes ? pushes.split('\n') : [])].some(url => origin(url) !== selected)) throw new Error('Local and selected GitHub identity mismatch');
+  if (urls.length !== 1 || [...urls, ...(pushes ? pushes.split('\n') : [])].some(url => repositoryOrigin(url) !== selected)) throw new Error('Local and selected GitHub identity mismatch');
   const commonPath = realpathSync(resolve(checkout, git(['rev-parse', '--path-format=absolute', '--git-common-dir'])));
   const common = statSync(commonPath, { bigint: true });
   if (!common.isDirectory()) throw new Error('Invalid Git common directory');

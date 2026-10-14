@@ -132,6 +132,20 @@ export function createRuntime(db, { transaction: commit, policy, clock: wallCloc
   function runnable(binding) { const run = runFor(binding, true); if (run.control !== 'running') throw new Error('Run paused, stopped or recovery-required'); return run; }
   function uncertain(run) { return db.prepare(`SELECT id FROM runtime_actions WHERE run_id=? AND state IN ('dispatched','uncertain') LIMIT 1`).get(run.id); }
   return Object.freeze({
+    recovery() {
+      if (db.prepare('PRAGMA foreign_key_check').get()) throw new Error('Runtime record integrity failed');
+      let reservations = 0, uncertainEffects = 0;
+      for (const run of db.prepare('SELECT * FROM runtime_runs').iterate()) {
+        validateRun(run); assignment(run);
+        if (run.released_at === null) reservations++;
+        else if (!Number.isSafeInteger(run.released_at) || !Number.isSafeInteger(run.created_at) || run.released_at < run.created_at) throw new Error('Runtime release integrity failed');
+      }
+      for (const action of db.prepare('SELECT id,run_id FROM runtime_actions').iterate()) {
+        const run = db.prepare('SELECT * FROM runtime_runs WHERE id=?').get(action.run_id);
+        if (['prepared', 'dispatched', 'uncertain'].includes(actionData(action.id, run).value.state)) uncertainEffects++;
+      }
+      return immutable({ reservations, uncertainEffects });
+    },
     async reserve(identity, request) {
       const workspace = workspaceData(identity); canonicalJSON(request); record(request, ['commandId', 'issue', 'pipeline'], ['policyHash']);
       if (!identifier(request.commandId) || !Number.isSafeInteger(request.issue) || request.issue < 1 || !['development', 'release'].includes(request.pipeline)) throw new Error('Invalid reservation request');

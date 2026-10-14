@@ -2,8 +2,9 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 
 const modes = { check: '--native-check', failure: '--native-failure-check', connect: null,
   'connect-org': '--organization-fixture', 'connect-setup': '--setup-fixtures',
@@ -11,8 +12,16 @@ const modes = { check: '--native-check', failure: '--native-failure-check', conn
 const mode = process.argv[2];
 if (!Object.hasOwn(modes, mode) || process.platform !== 'darwin' || process.arch !== 'arm64') throw new Error('Requires check, failure or connect on an arm64 Mac');
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+if (!process.env.TEST_ARTIFACT_RUN) {
+  const result=spawnSync('/Users/chris/.local/bin/test-artifacts',['run','--repo',root,'--issue',
+    process.env.TEST_ARTIFACT_ISSUE || 'desktop-github','--',process.execPath,fileURLToPath(import.meta.url),...process.argv.slice(2)],{stdio:'inherit'});
+  process.exit(Number.isInteger(result.status)?result.status:74);
+}
+const storage=createRequire(import.meta.url)('../desktop/test-storage.cjs').validateContext(root);
+if (path.resolve(os.tmpdir())!==storage.paths.tmp) throw new Error('test-storage-context-mismatch');
 const bundle = path.join(root, 'desktop/prototype/node_modules/electron/dist/Electron.app');
 const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'pipeliner-d05-run-'));
+const directoryInfo=await fs.lstat(directory);
 await fs.writeFile(path.join(directory, 'ownership.json'), JSON.stringify({ issue: 26, owner: 'brimdor', mode, root }));
 const records = [];
 let child, buffer = '', bytes = 0, interrupted = false;
@@ -43,7 +52,8 @@ const ownedHelpers = async () => {
 try {
   child = spawn(path.join(bundle, 'Contents/MacOS/Electron'), [path.join(root, 'desktop/github/connect.cjs'), '--managed',
     ...(modes[mode] ? [modes[mode]] : [])], { cwd: root,
-    env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: os.homedir(), LANG: 'en_US.UTF-8', TMPDIR: directory },
+    env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: os.homedir(), LANG: 'en_US.UTF-8', TMPDIR: directory,
+      TEST_ARTIFACT_RUN:storage.run_path,...Object.fromEntries(['tmp','logs','recordings','outputs'].map(name=>['TEST_ARTIFACT_'+name.toUpperCase(),storage.paths[name]])) },
     stdio: ['ignore', 'pipe', 'ignore'] });
   const stop = () => { interrupted = true; child.kill('SIGTERM'); };
   process.once('SIGTERM', stop);
@@ -89,6 +99,10 @@ try {
   }
   for (let count = 0; count < 40 && (await ownedHelpers()).length; count++) await new Promise(resolve => setTimeout(resolve, 50));
   if ((await ownedHelpers()).length) throw new Error('Task native helpers remain; cleanup pending');
-  await fs.rm(directory, { recursive: true, force: true });
+  const current=await fs.lstat(directory);
+  if (!current.isDirectory()||current.isSymbolicLink()||current.uid!==process.getuid()
+    || current.dev!==directoryInfo.dev||current.ino!==directoryInfo.ino||await fs.realpath(directory)!==directory) throw new Error('native-root-cleanup-unverified');
+  await fs.rm(directory, { recursive: true });
+  await fs.access(directory).then(()=>{throw new Error('native-root-cleanup-unverified');},error=>{if(error.code!=='ENOENT')throw error;});
   console.log(JSON.stringify({ cleanup: 'owned processes exited; native data removed' }));
 }

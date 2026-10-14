@@ -1,10 +1,11 @@
 import { containsSecret } from '../connections/commands.mjs';
+import { toolDataNames } from '../tools/commands.mjs';
 
 export const stepTypes = Object.freeze({ agent: 'Agent task', check: 'Repository check', 'pm-qa': 'PM testing gate', 'pr-integration': 'PR integration', build: 'Local build',
   'artifact-verify': 'Artifact verification', retain: 'Artifact retention', publish: 'Artifact publication', extension: 'Extension step' });
 export const inputNames = Object.freeze({ issue: 'Issue', workspace: 'Working files', candidate: 'Current candidate', artifact: 'Verified artifact', results: 'Prior results' });
 export const evidenceNames = Object.freeze({ 'verified-result': 'Verified result', tests: 'Test results', review: 'Review notes', artifact: 'Verified artifact', implementation: 'Changed source' });
-export const pipelineShapes = Object.freeze({ view: [[], ['scope', 'kind']], begin: [[], ['scope', 'kind']], preset: [['scenario'], []], edit: [['action'], []], testing: [['action'], []],
+export const pipelineShapes = Object.freeze({ view: [[], ['scope', 'kind']], begin: [[], ['scope', 'kind']], preset: [['scenario'], []], edit: [['action'], []], bind: [['step', 'name'], []], input: [['step', 'path', 'source'], ['previous', 'selection', 'value']], testing: [['action'], []],
   prepare: [[], []], apply: [[], ['hash']], discard: [[], []], reset: [[], ['kind']], restore: [['version'], ['kind']], rebase: [[], []], chat: [['text'], []] });
 const kind = text => Object.entries(stepTypes).find(([, label]) => label.toLowerCase() === text.toLowerCase())?.[0];
 // ponytail: deterministic guided phrases; model assistance must propose through this boundary without gaining PM apply.
@@ -19,6 +20,18 @@ export function pipelineCommand(text) {
   if (/^refresh (?:this |the )?pipeline draft$/i.test(value)) return { operation: 'rebase' };
   if ((match = /^reset (development|release) pipeline to inherit$/i.exec(value))) return { operation: 'reset', kind: match[1].toLowerCase() };
   if ((match = /^restore (development|release) pipeline from version (\d+)$/i.exec(value))) return { operation: 'restore', kind: match[1].toLowerCase(), version: Number(match[2]) };
+  if ((match = /^use (?:tool|skill) ([a-z0-9]+(?:-[a-z0-9]+)*) in step (\d+)$/i.exec(value))) return { operation: 'bind', step: Number(match[2]), name: match[1] };
+  if ((match = /^give step (\d+) (.+) as ([A-Za-z][A-Za-z0-9_.-]{0,63})$/i.exec(value))) {
+    const source = Object.entries(toolDataNames).find(([, label]) => label.toLowerCase() === match[2].toLowerCase())?.[0];
+    if (source && !['previous.structuredContent', 'pm.supplied'].includes(source)) return { operation: 'input', step: Number(match[1]), path: match[3].split('.'), source };
+  }
+  if ((match = /^give step (\d+) verified result from step (\d+)(?: field ([A-Za-z][A-Za-z0-9_.-]{0,63}))? as ([A-Za-z][A-Za-z0-9_.-]{0,63})$/i.exec(value))) return {
+    operation: 'input', step: Number(match[1]), path: match[4].split('.'), source: 'previous.structuredContent', previous: Number(match[2]), ...(match[3] ? { selection: match[3].split('.') } : {}) };
+  if ((match = /^remove step (\d+) input ([A-Za-z][A-Za-z0-9_.-]{0,63})$/i.exec(value))) return { operation: 'input', step: Number(match[1]), path: match[2].split('.'), source: 'none' };
+  if ((match = /^set step (\d+) input ([A-Za-z][A-Za-z0-9_.-]{0,63}) to (text|number|boolean) (.{1,500})$/i.exec(value))) {
+    const type = match[3].toLowerCase(), supplied = type === 'text' ? match[4] : type === 'number' ? Number(match[4]) : match[4].toLowerCase() === 'true' ? true : match[4].toLowerCase() === 'false' ? false : undefined;
+    if (supplied !== undefined && (type !== 'number' || Number.isFinite(supplied))) return { operation: 'input', step: Number(match[1]), path: match[2].split('.'), source: 'pm.supplied', value: supplied };
+  }
   let action;
   if ((match = /^add (?:a |an )?(.+) after step (\d+) called (.{1,240})$/i.exec(value)) && kind(match[1])) action = { operation: 'add', step: Number(match[2]), kind: kind(match[1]), label: match[3] };
   else if ((match = /^remove step (\d+)$/i.exec(value))) action = { operation: 'remove', step: Number(match[1]) };

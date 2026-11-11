@@ -2,9 +2,9 @@
   "version": 1,
   "workflows": {
     ".github/workflows/quality.yml": {
-      "rationale": "Reviewed pinned checkout/setup-node and the read-only Node contract validator with all static imports. New release-cycle, QA and Showcase helpers validate supplied JSON only; no configured commands are executed. crypto hashes scope and cleanup tokens. Home verification and full behavioral tests run locally, not in Actions. Secret scanner action uses prebuilt tooling. No application builds, package lifecycle hooks, composites or nested workflow calls. Issue #12 adds a pure known-question-directive matcher and read-only checks of provider Markdown/YAML; no commands or application builds are introduced.",
+      "rationale": "Reviewed pinned checkout/setup-node and the read-only Node contract validator with all static imports. New release-cycle, QA and Showcase helpers validate supplied JSON only; no configured commands are executed. crypto hashes scope and cleanup tokens. Home verification and full behavioral tests run locally, not in Actions. Secret scanner action uses prebuilt tooling. No application builds, package lifecycle hooks, composites or nested workflow calls. Issue #12 adds a pure known-question-directive matcher and read-only checks of provider Markdown/YAML; no commands or application builds are introduced. Reviewed TruffleHog v3.99.8 pin and release notes; verified tag commit and retained scanner arguments.",
       "files": {
-        ".github/workflows/quality.yml": "c89ab05dce1f8a9ee0aa258a2a7da9f67d7241b747d20095015bc949155c2d73",
+        ".github/workflows/quality.yml": "085c31fec03f9810b87cbf174f4b4f2d30a8a01865bae2a5cd6e3c8cf84e7a9d",
         "package.json": "591159744983ea992feb3a9130162509832ee07efac3c2228d1b26ce71892213",
         "scripts/validate-repository.mjs": "fb01f8962a59a438f66b985a54babe9ee03008c0f2b6e54307e37952994cacf8",
         "scripts/lib/validation.mjs": "29c4f83ee6f8c5ee73c745860dfde759d75fa0d9345ef68410fee5ff210f5d60",
